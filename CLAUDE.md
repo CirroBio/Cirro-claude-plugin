@@ -94,6 +94,23 @@ construction against a recording double — a new operation must be added there.
 **Dataset folders are `folder://` tags.** Report them as `folders`, never surface the
 prefix, and never write a tag list without re-including folder membership.
 
+**A form's fields are not just its `properties`.** Conditional fields live inside
+`dependencies.<selector>.oneOf[].properties`, and `dependencies` keys are *selector field
+names*, not a nesting level. Any analysis that walks only `properties` will report live,
+correctly-mapped fields as dangling — this has already produced one wrong answer to a
+user. Use `formcheck.form_paths()`, which is the one implementation of that walk.
+
+**The form validator is calibrated, not invented.** Its three tiers come from measuring
+the 213 forms and 72 input maps in Cirro-pipelines: 2 errors and 5 errors respectively,
+each a genuine defect. If a change to `formcheck.py` starts flagging production
+configuration, the validator is wrong, not the configuration. `folder` is documented by
+Cirro but used by none of the 213, so it warns rather than errors.
+
+**`pipeline_ops` registers itself into `mutations.OPS`.** The import sits at the bottom
+of `mutations.py` and the registration at the bottom of `pipeline_ops.py`, so the two
+import in either order; putting the registration on the `mutations` side reintroduces a
+circular-import failure for anyone importing `pipeline_ops` first.
+
 **Never call `DataPortal()` bare.** With no cached token it enters a device-code login
 and blocks until the code expires. Build auth explicitly via `worker/portal.py`.
 

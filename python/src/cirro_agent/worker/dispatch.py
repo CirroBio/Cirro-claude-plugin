@@ -95,6 +95,7 @@ HANDLERS = {
     "process_params": reads.do_process_params,
     "process_config": reads.do_process_config,
     "workflow_spec": reads.do_workflow_spec,
+    "check_config": reads.do_check_config,
     "task_logs": reads.do_task_logs,
     "login_start": auth.login_start,
     "login_wait": auth.login_wait,

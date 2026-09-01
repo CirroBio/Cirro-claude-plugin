@@ -66,6 +66,29 @@ APPLY_CASES = {
                        "action": "stop", "workspace_name": "W"},
     "delete_workspace": {"project_id": "proj_a", "workspace_id": "ws_1",
                          "action": "delete", "workspace_name": "W"},
+    "create_process": {
+        "process_id": "process-test-1", "name": "Test Pipeline", "description": "d",
+        "executor": "NEXTFLOW", "category": "Community", "config_source": "STORAGE",
+        "custom_settings": None, "repository_path": "org/wf", "version": "v1.0.0",
+        "entry_point": "main.nf", "executor_version": None,
+        "repository_type": "GITHUB_PUBLIC", "parent_process_ids": [],
+        "child_process_ids": [], "uses_sample_sheet": False,
+        "allow_multiple_sources": True, "file_mapping_rules": [],
+        "design_spec": "/tmp/design-spec.md"},
+    "update_process": {
+        "process_id": "process-test-1", "changes": {"version": "v2.0.0"},
+        "current": {"name": "Test Pipeline", "description": "d",
+                    "category": "Community", "executor": "NEXTFLOW",
+                    "config_source": "WITH_PROCESS",
+                    "code": {"repository_path": "org/wf", "version": "v1.0.0",
+                             "repository_type": "GITHUB_PUBLIC",
+                             "entry_point": "main.nf", "executor_version": None},
+                    "settings": {"repository": "org/wf", "branch": "main",
+                                 "folder": ".cirro"},
+                    "parent_process_ids": [], "child_process_ids": [],
+                    "uses_sample_sheet": False, "allow_multiple_sources": True}},
+    "sync_process_config": {"process_id": "process-test-1"},
+    "archive_process": {"process_id": "process-test-1", "name": "Test Pipeline"},
 }
 
 
@@ -87,7 +110,14 @@ def test_every_registered_op_is_covered_here():
     """So a new op cannot be added without exercising its request construction."""
     covered = set(APPLY_CASES) | {"upload_dataset", "upload_reference", "download_files",
                                   "unarchive_project", "update_project_schema",
-                                  "resume_analysis"}
+                                  "resume_analysis",
+                                  # Local writes: they touch the filesystem and git, not
+                                  # the SDK, so there is no request object to build.
+                                  "write_process_config", "commit_process_config",
+                                  # Exercised end to end in test_pipeline_config.py
+                                  # against a fake tenant, where the revision API's
+                                  # response shape matters more than the request.
+                                  "upload_process_config"}
     missing = set(mutations.OPS) - covered
     assert not missing, (
         f"these operations build requests that nothing exercises: {sorted(missing)}")
@@ -131,3 +161,33 @@ def test_create_workspace_sends_the_container_image():
     assert request.compute_config.container_image_uri == "ghcr.io/org/image:1.0"
     assert request.compute_config.cpu == 4
     assert str(request.sharing_type) == "PRIVATE"
+
+
+def test_create_process_sends_config_source_and_settings():
+    """The one field that decides where a pipeline reads its configuration."""
+    from cirro_api_client.v1.models import ConfigSource
+    reader = _reader()
+    args = dict(APPLY_CASES["create_process"])
+    args["config_source"] = "WITH_PROCESS"
+    args["custom_settings"] = {"repository": "org/wf", "branch": "dev",
+                               "folder": "config"}
+    mutations.OPS["create_process"].apply(reader, args)
+    request = reader.client.processes.create_custom_process.call_args.kwargs["process"]
+    assert request.config_source == ConfigSource.WITH_PROCESS
+    assert request.custom_settings.repository == "org/wf"
+    assert request.custom_settings.branch == "dev"
+    assert request.custom_settings.folder == "config"
+    assert request.pipeline_code.version == "v1.0.0"
+
+
+def test_update_process_resolves_every_field_from_the_current_record():
+    """CustomProcessInput replaces the record, so an omitted field is a deletion."""
+    reader = _reader()
+    mutations.OPS["update_process"].apply(
+        reader, dict(APPLY_CASES["update_process"]))
+    request = reader.client.processes.update_custom_process.call_args.kwargs["process"]
+    assert request.pipeline_code.version == "v2.0.0", "the requested change"
+    assert request.name == "Test Pipeline", "unchanged fields must survive"
+    assert request.pipeline_code.entry_point == "main.nf"
+    assert request.custom_settings.repository == "org/wf"
+    assert str(request.config_source) == "WITH_PROCESS"

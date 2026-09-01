@@ -1556,3 +1556,73 @@ def do_workflow_spec(request: dict) -> dict:
     envelope["budget"] = {"max_tokens": max_tokens,
                           "used_est": estimate_tokens(envelope), "degraded": degraded}
     return envelope
+
+
+def do_check_config(request: dict) -> dict:
+    """Validate a folder of configuration assets before it goes anywhere.
+
+    Local only: no session, no auth, no network. Catches the failures that are
+    expensive to discover later -- an unknown form keyword the portal rejects, a
+    mapping to a form field that does not exist, and the `../` literal that Cirro's
+    WAF blocks before the request reaches the app.
+    """
+    from pathlib import Path
+    from ..envelope import CONTRACT, estimate_tokens
+    from .. import formcheck, formgen
+
+    target = request.get("path")
+    if not target:
+        raise errors.InvalidQuery(
+            "check_config needs a path to a configuration folder.",
+            what="Point at the folder holding the generated assets.", field="path",
+            retry_with=[{"path": "./.cirro"}],
+        )
+    folder = Path(target).expanduser()
+    if not folder.is_dir():
+        raise errors.NotFound(
+            f"{folder} is not a directory.",
+            what="Point at the folder holding the assets.", field="path", given=target,
+            retry_with=[{"path": str(folder.parent)}],
+        )
+
+    assets = {}
+    for name in formgen.SLOTS:
+        candidate = folder / name
+        if candidate.is_file():
+            assets[name] = candidate.read_text()
+    extra = sorted(p.name for p in folder.iterdir()
+                   if p.is_file() and p.name not in formgen.SLOTS)
+
+    report = formcheck.check_assets(assets) if assets else {
+        "ok": False, "n_errors": 1, "n_warnings": 0, "checked": [],
+        "problems": [{"level": "error", "where": str(folder),
+                      "message": "no Cirro configuration assets found here",
+                      "fix": f"expected one or more of: {', '.join(formgen.SLOTS)}"}]}
+
+    missing = [n for n in ("process-form.json", "process-input.json",
+                           "process-output.json", "process-compute.config")
+               if n not in assets]
+    if missing:
+        report["problems"].append({
+            "level": "warning", "where": str(folder),
+            "message": f"not present: {', '.join(missing)}",
+            "fix": "a pipeline normally needs all four core assets"})
+        report["n_warnings"] += 1
+
+    if "preprocess.py" in assets and not (folder / "test_preprocess.py").is_file():
+        report["problems"].append({
+            "level": "error", "where": "preprocess.py",
+            "message": ("a preprocess script must ship with an offline unit test; "
+                        "there is no test_preprocess.py beside it"),
+            "fix": "extract a pure make_manifest() and test it with unittest"})
+        report["n_errors"] += 1
+        report["ok"] = False
+
+    body = {"ok": True, "api": {"contract": CONTRACT},
+            "query": {"verb": "check_config", "path": str(folder)},
+            "result": {"folder": str(folder), "assets": sorted(assets),
+                       "other_files": extra, **report},
+            "cost": {"api_calls": 0, "by_kind": {}, "note": "local validation only"}}
+    body["budget"] = {"max_tokens": int(request.get("max_tokens") or 6000),
+                      "used_est": estimate_tokens(body), "degraded": []}
+    return body

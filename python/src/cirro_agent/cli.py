@@ -13,7 +13,7 @@ from . import errors, runner
 
 # The complete set of verbs this binary may ask the worker for.
 READ_VERBS = frozenset({"query", "get", "summarize", "describe", "list",
-                        "process_params", "process_config", "workflow_spec",
+                        "process_params", "process_config", "workflow_spec", "check_config",
                         "task_logs", "whoami"})
 
 
@@ -212,6 +212,8 @@ def build_parser() -> argparse.ArgumentParser:
     ws.add_argument("--group", help="limit to one schema group")
     ws.add_argument("--include-hidden", action="store_true",
                     help="also return hidden and infrastructure parameters")
+    add("check-config", "validate a folder of pipeline configuration assets"
+        ).add_argument("path", help="folder holding process-form.json and friends")
     add("describe", "field catalog, tiers and query grammar for an entity").add_argument(
         "entity", nargs="?", default="dataset")
     add("whoami", "identity, tenant and runtime")
@@ -314,6 +316,15 @@ def main(argv=None) -> int:
                            "cache_root": str(runner.plugin_data())}, args)
         try:
             return _emit(reads.do_workflow_spec(request))
+        except errors.AgentError as exc:
+            return _emit(exc.to_dict())
+
+    if command == "check-config":
+        # Local validation: no session, auth or network needed.
+        from .worker import reads
+        request = _common({"verb": "check_config", "path": args.path}, args)
+        try:
+            return _emit(reads.do_check_config(request))
         except errors.AgentError as exc:
             return _emit(exc.to_dict())
 

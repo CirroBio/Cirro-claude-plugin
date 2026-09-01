@@ -63,7 +63,7 @@ cirro-agent read tasks -p "My Project" -d ds_123
 | Structure | `projects`, `project`, `folders`, `describe`, `whoami`, `doctor` |
 | Datasets | `datasets`, `dataset`, `files`, `params`, `analysis-status` |
 | Runs | `logs`, `tasks`, `task-logs`, `trace` |
-| Pipelines | `processes`, `process`, `process-params`, `process-config`, `workflow-spec` |
+| Pipelines | `processes`, `process`, `process-params`, `process-config`, `workflow-spec`, `check-config` |
 | Project resources | `samples`, `references`, `reference-types`, `compute-envs`, `shares`, `workspaces`, `project-users`, `users` |
 
 **Big answers stay useful.** Ask about a project with 4,000 datasets and you will not get
@@ -138,6 +138,8 @@ A few things worth knowing:
 | Metadata | `update_sample`, `update_project_schema` |
 | Sharing | `create_share`, `delete_share`, `subscribe_share`, `unsubscribe_share` |
 | Workspaces | `create_workspace`, `start_workspace`, `stop_workspace`, `delete_workspace` |
+| Pipelines | `create_process`, `update_process`, `upload_process_config`, `sync_process_config`, `archive_process` |
+| Your computer | `write_process_config`, `commit_process_config` |
 | Your computer | `download_files` |
 
 Downloading is gated too. It does not change anything in Cirro, but it can fill a disk,
@@ -155,6 +157,9 @@ so the plan tells you how many bytes are coming and how much space you have.
 | `cirro-download` | Bringing dataset files to your computer |
 | `cirro-dataset-admin` | Renaming, retagging, moving between folders, deleting |
 | `cirro-project-admin` | Projects, access, shares, workspaces |
+| `cirro-spec-workflow` | Reading a Nextflow or WDL workflow and writing down what it needs |
+| `cirro-define-test-dataset` | Picking test data, parameters and success criteria |
+| `cirro-configure-pipeline` | Turning that into a registered, runnable Cirro pipeline |
 | `cirro-write-python` | Writing you a standalone script to run yourself |
 
 Commands: `/cirro:setup` and `/cirro:doctor`.
@@ -162,6 +167,37 @@ Commands: `/cirro:setup` and `/cirro:doctor`.
 Behind the approval gate sit seven tools: `session_init`, `login_start`, `login_wait`,
 `whoami`, `logout`, `plan` and `apply`. You will rarely name them — Claude uses them —
 but `apply` is the only one that can change anything, and it always prompts.
+
+## Adding a pipeline to Cirro
+
+Getting a workflow — one of your own, or something off GitHub — running as a Cirro
+pipeline is three steps, and Claude will walk you through them in order:
+
+1. **Read the workflow.** Claude parses the repository and writes down every input and
+   parameter it takes: which are required, which have defaults, which are just plumbing
+   Cirro supplies for you. You get a `design-spec.md` to correct — this is the step where
+   your knowledge of the science matters most, because the parser can only report what
+   the code says, not which of 60 parameters a user should actually see.
+2. **Pick something to test it on.** A small dataset, the parameters to run it with, and
+   the specific things that must be true for the run to count as working.
+3. **Configure and register it.** Claude generates the form your colleagues will fill in,
+   the mapping from that form to the workflow's parameters, and the compute settings —
+   then registers the pipeline.
+
+You choose where the configuration lives: uploaded into Cirro, kept in the workflow's own
+repository, or kept in a separate configuration repository. If it lives in a repository,
+Claude writes and commits the files and **you** push them — it does not push, and it does
+not open pull requests.
+
+Two things worth knowing:
+
+- **Claude only edits pipelines you own.** One belonging to a colleague, or curated by
+  Cirro, is refused rather than changed.
+- **The generated configuration is checked before it goes anywhere.** `cirro-agent read
+  check-config` catches the failures the portal reports unhelpfully or not at all — form
+  fields the renderer will ignore, file pickers that will show an empty list, parameters
+  wired to fields that do not exist. Nothing in that check can tell you whether the form
+  makes sense to a biologist, so open it in the Cirro UI once before sharing it.
 
 ## Locking it down further
 
@@ -207,7 +243,9 @@ tenant** — only to a simulated one. Four bugs found on 2026-08-27 were exactly
 that surface only on a real call, so treat your first use of any given operation as
 untested and pick something disposable.
 
-Configuring new pipelines is designed but not built yet.
+Pipeline configuration is built and its generated output is checked against the
+configuration of 213 pipelines already running in Cirro, but the same caveat applies:
+registering a pipeline has not yet been done against a live tenant.
 
 ## For maintainers
 

@@ -1370,6 +1370,12 @@ OPS = {op.name: op for op in [
 ]}
 
 
+# Pipeline configuration lives in its own module and registers itself on import.
+# The import is last, and the registration is on that side, so the two modules can be
+# imported in either order.
+from . import pipeline_ops  # noqa: E402,F401
+
+
 def get_op(name: str) -> Op:
     if name not in OPS:
         raise errors.NotSupported(
