@@ -1,0 +1,17 @@
+{
+  "name": "cirro",
+  "owner": {
+    "name": "Cirro Bio",
+    "url": "https://cirro.bio"
+  },
+  "metadata": {
+    "description": "Operate the Cirro data platform from Claude Code via the Cirro Python SDK."
+  },
+  "plugins": [
+    {
+      "name": "cirro",
+      "source": "./",
+      "description": "Explore, analyze, and manage data on the Cirro platform. Reads are unrestricted; every create, update, and delete is gated on your approval."
+    }
+  ]
+}

@@ -1,0 +1,203 @@
+"""The MCP surface: authentication, and the gated write path.
+
+Seven tools. Six are ordinary; `apply` carries
+`_meta["anthropic/requiresUserInteraction"]`, which is the one enforcement
+primitive a plugin author actually has -- it prompts on every call in every
+permission mode, is not skipped by an allow rule, is not suppressed by a hook
+returning allow, and fails closed when prompting is impossible.
+
+Reads deliberately live elsewhere (`cirro-agent read ...` over Bash): they are
+ungated by policy, high-cardinality, and benefit from shell composition, and
+keeping them out of here keeps this tool list short enough to stay in context.
+
+This process must never import cirro. `cirro.config.Constants` freezes CIRRO_HOME
+at import time, so a long-lived server could only ever serve one session folder.
+Every operation is a fresh subprocess instead.
+"""
+from pathlib import Path
+from typing import Any, Optional
+
+from mcp.server.mcpserver import MCPServer
+
+from . import errors, runner, session as session_mod
+
+INSTRUCTIONS = """\
+Cirro data platform access.
+
+READS ARE NOT HERE. Run them through Bash:
+    cirro-agent read --help
+    cirro-agent read datasets -p "Project Name" -f "status:FAILED created:last-7d"
+    cirro-agent read describe dataset       # field catalog, tiers, query grammar
+Listing responses are capped, faceted over the whole match set, and carry
+`next_calls` with exact predicted match counts -- follow those rather than
+guessing a narrower filter.
+
+WRITES ARE TWO STEPS, ALWAYS:
+    1. plan(op, args)  -- read-only. Resolves names to IDs, validates parameters,
+       computes blast radius, and returns `rendered` plus a single-use plan_id.
+    2. Show `rendered` to the person in your own message.
+    3. apply(plan_id, digest, approved_summary) -- prompts for approval.
+`apply` takes no operation arguments, so what was approved is what runs.
+"""
+
+server = MCPServer(
+    name="cirro",
+    title="Cirro Data Platform",
+    instructions=INSTRUCTIONS,
+    version="0.3.0",
+)
+
+
+@server.tool(
+    name="session_init",
+    title="Create a Cirro session folder",
+    description=(
+        "Create the .cirro session folder in a working directory and bind it to one "
+        "Cirro tenant. The folder holds this directory's credential and cache, kept "
+        "separate from the machine-wide ~/.cirro. Call this once per project directory; "
+        "it is never created implicitly. Creates a directory and writes to it."
+    ),
+)
+def session_init(base_url: str, directory: Optional[str] = None) -> dict:
+    """Bind a working directory to a Cirro tenant."""
+    try:
+        target = Path(directory).expanduser().resolve() if directory else Path.cwd()
+        current = session_mod.init(target, base_url)
+        tracked = session_mod.is_git_tracked(current.path)
+        warnings = []
+        if tracked:
+            warnings.append(
+                f"{current.path} is tracked by git. It holds credential state and should "
+                "not be committed; the folder ships its own .gitignore but an existing "
+                "tracked entry overrides it.")
+        return {
+            "ok": True,
+            "session_dir": str(current.path),
+            "base_url": current.base_url,
+            "auth": current.auth,
+            "warnings": warnings,
+            "next": {"tool": "login_start",
+                     "note": "authenticate this folder, then reads become available"},
+        }
+    except errors.AgentError as exc:
+        return exc.to_dict()
+
+
+@server.tool(
+    name="login_start",
+    title="Begin a Cirro login",
+    description=(
+        "Start a device-code login and return immediately with a URL and code to relay "
+        "to the person. Never blocks. If the folder already holds a working credential, "
+        "reports the authenticated identity instead, proved by a live API call. After "
+        "relaying the link, call login_wait."
+    ),
+)
+def login_start(base_url: Optional[str] = None) -> dict:
+    """Start a browser login without waiting for it."""
+    request: dict[str, Any] = {"verb": "login_start"}
+    try:
+        current = session_mod.load()
+    except errors.NoSessionFolder as exc:
+        # Only a missing folder may be created here. Anything else -- a tenant conflict
+        # above all -- must surface, not be papered over by binding a new session.
+        if not base_url:
+            return exc.to_dict()
+        try:
+            current = session_mod.init(Path.cwd(), base_url)
+        except errors.AgentError as init_error:
+            return init_error.to_dict()
+    except errors.AgentError as exc:
+        return exc.to_dict()
+    return runner.call(request, session=current)
+
+
+@server.tool(
+    name="login_wait",
+    title="Wait for a Cirro login to complete",
+    description=(
+        "Poll for completion of a login started by login_start, against its own timeout "
+        "rather than the device code's lifetime. Returns pending, ok, or a typed "
+        "failure -- it can never hang. A pending result is not an error: relay the link "
+        "again and call this once more."
+    ),
+)
+def login_wait(timeout_s: int = 120) -> dict:
+    """Wait, boundedly, for the browser login."""
+    return runner.call({"verb": "login_wait", "timeout_s": timeout_s})
+
+
+@server.tool(
+    name="whoami",
+    title="Cirro identity and runtime",
+    description=(
+        "Report the authenticated user, tenant, session folder, and the resolved cirro "
+        "SDK version, including whether it is an editable local checkout. Read-only."
+    ),
+)
+def whoami() -> dict:
+    """Who am I, against which tenant, with which SDK."""
+    return runner.call({"verb": "whoami"})
+
+
+@server.tool(
+    name="logout",
+    title="Discard this folder's Cirro credential",
+    description=(
+        "Remove the cached credential for this session folder, forcing a fresh login. "
+        "On macOS the token itself lives in the login Keychain; this reports the command "
+        "to remove that entry rather than editing the keychain itself."
+    ),
+)
+def logout() -> dict:
+    """Forget this folder's credential."""
+    return runner.call({"verb": "logout"})
+
+
+@server.tool(
+    name="plan",
+    title="Plan a Cirro change (read-only)",
+    description=(
+        "Resolve and validate a change without making it. Returns `rendered` -- the text "
+        "to show the person -- plus a single-use plan_id and digest that expire in ten "
+        "minutes. Makes no modification of any kind.\n\n"
+        "Operations: run_analysis, resume_analysis, stop_analysis, upload_dataset, "
+        "upload_reference, import_public, update_dataset, update_samplesheet, "
+        "delete_dataset, create_project, update_project_tags, archive_project, "
+        "unarchive_project, set_user_role, invite_user, update_sample, "
+        "update_project_schema, create_share, delete_share, subscribe_share, "
+        "unsubscribe_share, create_workspace, start_workspace, stop_workspace, "
+        "delete_workspace, download_files.\n\n"
+        "For run_analysis, read `cirro-agent read process-params <process>` first: it is "
+        "the authoritative list of accepted parameter keys."
+    ),
+)
+def plan(op: str, args: Optional[dict] = None) -> dict:
+    """Resolve, validate and price a change without performing it."""
+    # `verb` routes to the handler; `op` names the mutation being planned.
+    return runner.call({"verb": "plan", "op": op, "args": args or {}})
+
+
+@server.tool(
+    name="apply",
+    title="Apply an approved Cirro plan",
+    description=(
+        "Execute a plan created by `plan`. Takes no operation arguments -- everything "
+        "comes from the stored plan, so what the person approved is exactly what runs. "
+        "Refuses an expired, already-used, tampered, or different-user plan. Show the "
+        "plan's `rendered` text to the person before calling this."
+    ),
+    meta={"anthropic/requiresUserInteraction": True},
+)
+def apply(plan_id: str, digest: str, approved_summary: str) -> dict:
+    """Perform the change a plan describes, after approval."""
+    return runner.call({"verb": "apply", "plan_id": plan_id, "digest": digest,
+                        "approved_summary": approved_summary})
+
+
+def main() -> None:
+    server.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,24 @@
+# Pins the dependency set that ships with the plugin. Not a library: `uv sync`
+# against this file builds the venv that every worker subprocess runs in.
+[project]
+name = "cirro-agent-runtime"
+version = "0.3.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "cirro-agent",
+]
+
+[dependency-groups]
+dev = ["cirro-agent[dev]"]
+
+[tool.uv]
+package = false
+# cirro 1.12.1 pins cirro_api_client<1.6.0, but the process config-revision routes
+# (save_process_revision, get_process_resource, get_latest_process_revision) and the
+# ConfigSource enum exist only in >=1.6.0 -- without them the plugin cannot read or
+# write pipeline configuration at all. Verified: cirro 1.12.1 imports and runs against
+# 1.6.0. python/tests/test_runtime_contract.py fails loudly if that stops being true.
+override-dependencies = ["cirro-api-client>=1.6.0,<2"]
+
+[tool.uv.sources]
+cirro-agent = { path = "../python", editable = true }

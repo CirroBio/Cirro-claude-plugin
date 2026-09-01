@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# stdio MCP server. Launched with cwd = plugin root, so it locates the session
+# folder from CLAUDE_PROJECT_DIR rather than from cwd.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${CIRRO_AGENT_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$(cd "$HERE/.." && pwd)}}"
+# shellcheck source=/dev/null
+source "$ROOT/scripts/_resolve-python.sh"
+CIRRO_AGENT_PLUGIN_ROOT="$ROOT"; export CIRRO_AGENT_PLUGIN_ROOT
+if ! PY="$(resolve_python)"; then
+  # A missing runtime must not kill the server: the tools report it instead, so the
+  # user gets a usable message rather than a silent MCP connection failure.
+  PY="$(command -v python3 || true)"
+  if [ -z "$PY" ]; then exit 1; fi
+fi
+export PYTHONPATH="$ROOT/python/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY" -m cirro_agent.mcp_server

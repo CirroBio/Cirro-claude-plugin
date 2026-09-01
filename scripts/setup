@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Build the pinned runtime. Explicit, never triggered from inside a tool call: a
+# 30-120s network install must not hide behind something that looks instant.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${CIRRO_AGENT_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$(cd "$HERE/.." && pwd)}}"
+# shellcheck source=/dev/null
+source "$ROOT/scripts/_resolve-python.sh"
+DATA="$(resolve_plugin_data)"
+VENV="$DATA/venv"
+PY_VERSION="${CIRRO_AGENT_PY_VERSION:-3.12}"
+
+if ! command -v uv >/dev/null 2>&1; then
+  cat >&2 <<'MSG'
+uv is required and was not found on PATH.
+
+Install it with one of:
+    brew install uv
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+
+This script will not install it for you -- that would be an unattended network
+install of a binary. Alternatively set CIRRO_AGENT_PYTHON to a Python 3.10-3.13
+interpreter that already has the `cirro` and `mcp` packages.
+MSG
+  exit 1
+fi
+
+mkdir -p "$DATA"
+echo "Building the Cirro runtime in $VENV (Python $PY_VERSION)..."
+SYNC_ARGS=(--python "$PY_VERSION" --project "$ROOT/runtime")
+if [ -f "$ROOT/runtime/uv.lock" ]; then SYNC_ARGS+=(--locked); fi
+UV_PROJECT_ENVIRONMENT="$VENV" uv sync "${SYNC_ARGS[@]}"
+
+# Dev override: point at a local SDK checkout instead of the pinned release.
+if [ -n "${CIRRO_AGENT_SDK_PATH:-}" ]; then
+  echo "Installing the local cirro SDK checkout from $CIRRO_AGENT_SDK_PATH (editable)..."
+  UV_PROJECT_ENVIRONMENT="$VENV" uv pip install --python "$VENV/bin/python" \
+    -e "$CIRRO_AGENT_SDK_PATH"
+fi
+
+VERSION="$("$VENV/bin/python" -c 'import importlib.metadata as m; print(m.version("cirro"))')"
+SDK_PATH="$("$VENV/bin/python" -c 'import cirro,pathlib; print(pathlib.Path(cirro.__file__).parent)')"
+cat > "$DATA/cirro-agent-ready.json" <<JSON
+{"mode":"installed","python":"$VENV/bin/python","cirro_version":"$VERSION",
+ "cirro_path":"$SDK_PATH","python_pin":"$PY_VERSION"}
+JSON
+
+echo
+echo "Runtime ready."
+echo "  interpreter   $VENV/bin/python"
+echo "  cirro         $VERSION at $SDK_PATH"
+echo
+echo "Next: create a session folder for this directory and log in."

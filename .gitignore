@@ -1,0 +1,7 @@
+.cirro/
+.dev-venv/
+.plugin-data/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/

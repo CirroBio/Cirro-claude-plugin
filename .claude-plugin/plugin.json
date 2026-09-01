@@ -1,0 +1,30 @@
+{
+  "name": "cirro",
+  "description": "Operate the Cirro data platform through its Python SDK. Explore projects, datasets, samples, files, and pipeline runs with responses shaped for an agent context; launch analyses, upload data, and manage resources behind an explicit approval gate.",
+  "version": "0.3.0",
+  "author": {
+    "name": "Cirro Bio",
+    "url": "https://cirro.bio"
+  },
+  "homepage": "https://github.com/CirroBio/Cirro-claude-plugin",
+  "repository": "https://github.com/CirroBio/Cirro-claude-plugin",
+  "license": "MIT",
+  "keywords": [
+    "cirro",
+    "bioinformatics",
+    "genomics",
+    "pipelines",
+    "nextflow",
+    "data-platform"
+  ],
+  "mcpServers": {
+    "cirro": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/mcp-server",
+      "args": [],
+      "env": {
+        "CIRRO_AGENT_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}",
+        "CIRRO_AGENT_PLUGIN_DATA": "${CLAUDE_PLUGIN_DATA}"
+      }
+    }
+  }
+}
