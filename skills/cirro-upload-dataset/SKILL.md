@@ -38,11 +38,16 @@ plan(op="upload_dataset", args={
   "project_id": "proj_...",
   "process": "proc_ingest_...",
   "name": "Sequencing run 2026-08-27",
-  "folder": "/path/to/folder",
+  "source_dir": "/path/to/local/files",
+  "folder": "Sequencing/2026",   # optional: the Cirro folder to file it under
   "description": "...",          # optional
   "include_hidden": false        # optional
 })
 ```
+
+`source_dir` is the local directory to read from; `folder` is the Cirro folder the
+dataset lands in. Pass `folder` here rather than uploading and then moving it — filing
+happens as part of the upload, and a separate move is a second approval for no reason.
 
 `plan` counts the files and bytes, collapses the filenames into templates so you can
 see at a glance what is going up, and runs Cirro's own file-name validation for that

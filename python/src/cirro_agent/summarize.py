@@ -49,7 +49,6 @@ def percentile(values: list, fraction: float) -> Optional[float]:
 
 # --------------------------------------------------------------------------- files
 
-_TOKEN_SPLIT = re.compile(r"[_\-]")
 _TRAILING_DIGITS = re.compile(r"^(.*?)(\d+)$")
 
 

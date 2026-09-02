@@ -187,15 +187,22 @@ def logout() -> dict:
         "unarchive_project, set_user_role, invite_user, update_sample, "
         "update_project_schema, create_share, delete_share, subscribe_share, "
         "unsubscribe_share, create_workspace, start_workspace, stop_workspace, "
-        "delete_workspace, download_files.\n\n"
+        "delete_workspace, download_files, create_process, update_process, "
+        "upload_process_config, sync_process_config, archive_process, "
+        "write_process_config, commit_process_config.\n\n"
+        "If a plan expired, pass its id as `renew_from` with the same op and args: an "
+        "identical plan comes back as `unchanged: true` without re-sending the text, "
+        "since the person has already read it.\n\n"
         "For run_analysis, read `cirro-agent read process-params <process>` first: it is "
         "the authoritative list of accepted parameter keys."
     ),
 )
-def plan(op: str, args: Optional[dict] = None) -> dict:
+def plan(op: str, args: Optional[dict] = None,
+         renew_from: Optional[str] = None) -> dict:
     """Resolve, validate and price a change without performing it."""
     # `verb` routes to the handler; `op` names the mutation being planned.
-    return runner.call({"verb": "plan", "op": op, "args": args or {}})
+    return runner.call({"verb": "plan", "op": op, "args": args or {},
+                        "renew_from": renew_from})
 
 
 @server.tool(
@@ -209,8 +216,14 @@ def plan(op: str, args: Optional[dict] = None) -> dict:
     ),
     meta={"anthropic/requiresUserInteraction": True},
 )
-def apply(plan_id: str, digest: str, approved_summary: str) -> dict:
-    """Perform the change a plan describes, after approval."""
+def apply(plan_id: str, digest: str, approved_summary: str = "") -> dict:
+    """Perform the change a plan describes, after approval.
+
+    `approved_summary` is supplied by the approval hook, which reads it from the
+    stored plan -- so the value that proves the approved text matches the executed
+    plan does not travel through the model's context. Passing it explicitly still
+    works, and is the fallback when hooks are disabled.
+    """
     return runner.call({"verb": "apply", "plan_id": plan_id, "digest": digest,
                         "approved_summary": approved_summary})
 

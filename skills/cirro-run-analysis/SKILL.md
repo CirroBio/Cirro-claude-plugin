@@ -57,6 +57,7 @@ plan(op="run_analysis", args={
   "name": "RNAseq batch 32",
   "source_dataset_ids": ["ds_..."],
   "params": {...},
+  "folder": "Analyses/RNAseq",                        # optional Cirro folder
   "notification_emails": ["someone@example.org"]      # optional
 })
 ```
@@ -66,6 +67,11 @@ spec, counts the input files and bytes, resolves the compute environment, and re
 a `rendered` summary plus a single-use `plan_id` that expires in ten minutes.
 
 If `plan` returns an error, fix the cause and plan again. Do not attempt `apply`.
+
+**Filing the output.** Pass `folder` (or `folders`) in this same call to put the
+output dataset straight into a Cirro folder. Folder membership lives in the dataset's
+tag list and the launch request carries tags, so it costs no extra call and no second
+approval. Launching and then moving is two approvals for one intention.
 
 ## 5. Show the plan to the user, then apply
 

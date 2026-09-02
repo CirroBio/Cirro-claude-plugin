@@ -199,3 +199,26 @@ def test_a_plan_edited_on_disk_fails_its_own_digest(sess):
     with pytest.raises(errors.AgentError) as caught:
         claim(sess, plan)
     assert "does not match its own digest" in caught.value.message
+
+
+def test_both_phases_of_one_apply_land_in_one_file(session_dir, monkeypatch):
+    """A file holding an intent with no outcome reads as a mutation that never
+    finished. The two records must not be separable by a clock tick."""
+    plan = make(session_dir)
+    plans.claim(session_dir, plan.plan_id, digest=plan.digest,
+                approved_summary=plan.summary, username="sminot")
+
+    # Advance the wall clock only for a bare gmtime() -- the shape the old code used.
+    # A stamp taken from the plan passes an explicit time and is left alone, so this
+    # separates "named for the plan" from "named for whenever the write happened".
+    # `plans.time` is the stdlib module itself, so capture the real one first.
+    real_gmtime = time.gmtime
+    monkeypatch.setattr(plans.time, "gmtime",
+                        lambda *args: real_gmtime(args[0] if args
+                                                  else time.time() + 3600))
+    plans.finish(session_dir, plan, result={"ok": True})
+
+    files = sorted((session_dir.path / "runs").glob("*.jsonl"))
+    assert len(files) == 1, [f.name for f in files]
+    phases = [json.loads(line)["phase"] for line in files[0].read_text().splitlines()]
+    assert phases == ["intent", "outcome"]

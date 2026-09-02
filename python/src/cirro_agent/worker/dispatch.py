@@ -22,8 +22,7 @@ def do_plan(request: dict) -> dict:
                           username=reader.username, risk=op.risk,
                           warnings=draft.warnings,
                           invalidates=draft.invalidates)
-    rendered = plans.render(record.to_dict())
-    return {
+    response = {
         "ok": True,
         "plan_id": record.plan_id,
         "digest": record.digest,
@@ -31,19 +30,49 @@ def do_plan(request: dict) -> dict:
         "risk": op.risk,
         "expires_at": record.expires_at,
         "expires_in_s": int(record.expires_at - record.created_at),
-        "summary": record.summary,
-        "rendered": rendered,
         "warnings": record.warnings,
         "will_invalidate": record.invalidates,
         "cost": reader.cost.to_dict(),
+        # `rendered` carries the summary, so the summary is not repeated beside it, and
+        # apply's approved_summary is supplied by the gate rather than echoed here. The
+        # text used to appear three times in one response and a fourth time in apply's
+        # input, for one copy of information.
         "next": {
             "tool": "apply",
-            "args": {"plan_id": record.plan_id, "digest": record.digest,
-                     "approved_summary": record.summary},
-            "note": ("Show the rendered text above to the person before calling apply. "
-                     "apply prompts for approval and accepts no other arguments."),
+            "args": {"plan_id": record.plan_id, "digest": record.digest},
+            "note": ("Show the rendered text to the person before calling apply. "
+                     "apply prompts for approval and takes no operation arguments."),
         },
     }
+
+    previous = request.get("renew_from")
+    if previous and _same_plan(session, previous, record):
+        # Nothing the person already saw has changed, and they see the prompt rendered
+        # from disk either way -- so re-sending the text would buy nothing.
+        response["renewed_from"] = previous
+        response["unchanged"] = True
+        response["note"] = ("Identical to the expired plan; its text still stands. "
+                            "Re-show that text, then apply.")
+        return response
+
+    response["rendered"] = plans.render(record.to_dict())
+    response["unchanged"] = False
+    return response
+
+
+def _same_plan(session: Session, previous_id: str, record) -> bool:
+    """Would re-approving cost the person anything new to read?
+
+    Compared on what the approval actually depends on -- the operation, the resolved
+    arguments and the rendered figures -- not on the digest, which includes the plan
+    id and expiry and so never matches.
+    """
+    try:
+        stale = plans.load(session, previous_id)
+    except errors.AgentError:
+        return False
+    return (stale.op == record.op and stale.args == record.args
+            and stale.summary == record.summary and stale.warnings == record.warnings)
 
 
 def do_apply(request: dict) -> dict:

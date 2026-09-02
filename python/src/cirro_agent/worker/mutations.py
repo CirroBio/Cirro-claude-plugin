@@ -74,6 +74,31 @@ def _project(reader: reads.Reader, args: dict) -> dict:
     return reader.resolve_project(given)
 
 
+def _target_folders(args: dict, current: list) -> list:
+    """The folder list a dataset should end up in.
+
+    `folder` names one, `folders` names several, `remove_from_folder` clears them, and
+    silence leaves them alone -- which for an edit means the current membership and
+    for a new dataset means none. Every operation that writes a tag list goes through
+    here, because Cirro stores folders in that same list and replaces it wholesale:
+    an operation that set tags without re-including folders would move the dataset
+    out of its folder as a side effect.
+    """
+    if args.get("remove_from_folder"):
+        return []
+    if args.get("folders") is not None:
+        return [str(f).strip().strip("/") for f in args["folders"] if str(f).strip()]
+    if args.get("folder") is not None:
+        named = str(args["folder"]).strip().strip("/")
+        return [named] if named else []
+    return list(current)
+
+
+def _wire_tags(folders: list, tags: list) -> list:
+    """The single list Cirro actually stores: folder entries plus plain tags."""
+    return [R.folder_tag(f) for f in (folders or [])] + list(tags or [])
+
+
 def _dataset(reader: reads.Reader, project_id: str, given: str) -> dict:
     """Mutations take IDs only. Names collide and are mutable."""
     datasets, _ = reader.datasets(project_id)
@@ -244,6 +269,9 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
         "resume_dataset_id": args.get("resume_dataset_id"),
         "source_sample_ids": args.get("source_sample_ids") or [],
         "tags": args.get("tags") or [],
+        # A new analysis has no folder of its own yet, so silence means none rather
+        # than "keep what is there".
+        "folders": _target_folders(args, []),
     }
 
     lines = [
@@ -251,6 +279,7 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
         "",
         f"  Pipeline     {process['name']} [{process['executor']}] ({process['id']})",
         f"  Output name  {args['name']}",
+        f"  Into folder  {', '.join(resolved['folders']) or '(none)'}",
         f"  Compute      {compute_label}",
         f"  Inputs       {len(inputs)} dataset(s), {total_files} files, "
         f"{S.human_bytes(total_bytes)}",
@@ -286,14 +315,18 @@ def apply_run_analysis(reader: reads.Reader, args: dict) -> dict:
         value = args.get(key)
         if value:
             setattr(request, field_name, value)
-    if args.get("tags"):
+    # Folders are tags, and RunAnalysisRequest carries tags -- so the output dataset
+    # is filed at launch, in the same call, instead of needing an update afterwards.
+    combined = _wire_tags(args.get("folders"), args.get("tags"))
+    if combined:
         from cirro_api_client.v1.models import Tag
-        request.tags = [Tag(value=t) for t in args["tags"]]
+        request.tags = [Tag(value=value) for value in combined]
     response = reader.client.execution.run_analysis(project_id=args["project_id"],
                                                     request=request)
     created = R.plain(getattr(response, "id", None))
     return {"created_dataset_id": created,
             "message": R.plain(getattr(response, "message", None)),
+            "folders": args.get("folders") or [],
             "follow_with": {"verb": "get", "entity": "dataset", "id": created,
                             "scope": {"project_ids": [args["project_id"]]},
                             "freshness": "fresh"}}
@@ -352,101 +385,188 @@ def apply_stop_analysis(reader: reads.Reader, args: dict) -> dict:
 # ------------------------------------------------------------------ dataset edits
 
 
+def _dataset_edit(row: dict, args: dict) -> Optional[dict]:
+    """What one dataset's record should become, or None if nothing would change.
+
+    UpdateDatasetRequest requires name, description, process_id AND tags -- it is a
+    whole-record replacement. Omitting a field blanks it, so every one is resolved
+    here from the current record and only the requested changes are applied.
+    """
+    current_folders = list(row.get("folders") or [])
+    current_tags = list(row.get("tags") or [])
+    target_folders = _target_folders(args, current_folders)
+    target_tags = list(args["tags"]) if args.get("tags") is not None else current_tags
+
+    changes = {key: args[key] for key in ("name", "description")
+               if args.get(key) is not None and args[key] != row.get(key)}
+    if (not changes and target_folders == current_folders
+            and sorted(target_tags) == sorted(current_tags)):
+        return None
+    return {
+        "dataset_id": row["id"], "dataset_name": row.get("name"),
+        "name": changes.get("name", row.get("name")),
+        "description": changes.get("description", row.get("description") or ""),
+        "process_id": row.get("process_id"),
+        "folders": target_folders, "tags": target_tags,
+        "was": {"name": row.get("name"), "description": row.get("description"),
+                "folders": current_folders, "tags": current_tags},
+        "changed": sorted(changes),
+    }
+
+
 def plan_update_dataset(reader: reads.Reader, args: dict) -> Draft:
-    """Rename, re-describe, retag, or move a dataset between folders.
+    """Rename, re-describe, retag, or move one or more datasets between folders.
 
     Folder membership and tags share one underlying list, and the API replaces that
     list wholesale. Writing tags alone would therefore silently move a dataset out of
     its folder, so the folder is always resolved explicitly here and carried through.
+
+    Several datasets can be edited under one approval. Each one's current record is
+    read separately, so "move these into QC" preserves each dataset's own tags rather
+    than flattening them to a shared list.
     """
-    _need(args, "update_dataset", "dataset_id")
+    given = args.get("dataset_ids") or ([args["dataset_id"]]
+                                        if args.get("dataset_id") else [])
+    if not given:
+        raise errors.InvalidQuery(
+            "update_dataset needs dataset_id or dataset_ids.",
+            what="Name the dataset(s) to edit.", field="dataset_ids",
+            retry_with=[{"verb": "query", "entity": "dataset"}],
+        )
     project = _project(reader, args)
-    row = _dataset(reader, project["id"], args["dataset_id"])
 
-    current_folders = list(row.get("folders") or [])
-    current_tags = list(row.get("tags") or [])
+    if len(given) > 1 and (args.get("name") is not None
+                           or args.get("description") is not None):
+        raise errors.InvalidQuery(
+            f"name and description cannot be set on {len(given)} datasets at once.",
+            what="They would all end up with the same name.",
+            field="name" if args.get("name") is not None else "description",
+            retry_with=[{"op": "update_dataset",
+                         "args": {"dataset_ids": given, "folder": "Some Folder"}}],
+        )
 
-    if args.get("remove_from_folder"):
-        target_folders = []
-    elif args.get("folder") is not None:
-        target_folders = [str(args["folder"]).strip().strip("/")]
-    else:
-        target_folders = current_folders
+    rows = [_dataset(reader, project["id"], one) for one in given]
+    edits = [(row, _dataset_edit(row, args)) for row in rows]
+    actionable = [edit for _row, edit in edits if edit is not None]
+    unchanged = [row["name"] for row, edit in edits if edit is None]
 
-    target_tags = list(args["tags"]) if args.get("tags") is not None else current_tags
-
-    changes = {}
-    for key in ("name", "description"):
-        if args.get(key) is not None and args[key] != row.get(key):
-            changes[key] = args[key]
-    folder_changed = target_folders != current_folders
-    tags_changed = sorted(target_tags) != sorted(current_tags)
-
-    if not changes and not folder_changed and not tags_changed:
+    if not actionable:
         raise errors.InvalidQuery(
             "Nothing would change.",
             what="Supply a new name, description, folder, or tags.",
             given=args,
             retry_with=[
-                {"op": "update_dataset", "args": {"dataset_id": row["id"],
+                {"op": "update_dataset", "args": {"dataset_ids": given,
                                                   "folder": "Some Folder"}},
-                {"op": "update_dataset", "args": {"dataset_id": row["id"],
+                {"op": "update_dataset", "args": {"dataset_ids": given,
                                                   "tags": ["example"]}},
             ],
         )
 
-    lines = [f"Update dataset {row['name']} ({row['id']}) in {project['name']}.", ""]
-    for key, value in changes.items():
-        lines.append(f"  {key}")
-        lines.append(f"    from  {row.get(key)!r}")
-        lines.append(f"    to    {value!r}")
-    if folder_changed:
-        was = ", ".join(current_folders) or "(not in a folder)"
-        now = ", ".join(target_folders) or "(not in a folder)"
-        lines += ["  folder", f"    from  {was}", f"    to    {now}"]
-    if tags_changed:
-        lines += ["  tags", f"    from  {current_tags}", f"    to    {target_tags}"]
+    if len(actionable) == 1:
+        edit = actionable[0]
+        lines = [f"Update dataset {edit['dataset_name']} ({edit['dataset_id']}) in "
+                 f"{project['name']}.", ""]
+        lines += _edit_lines(edit, indent="  ")
+    else:
+        lines = [f"Update {len(actionable)} datasets in {project['name']} "
+                 f"({project['id']}).", ""]
+        for edit in actionable:
+            lines.append(f"  {edit['dataset_name']} ({edit['dataset_id']})")
+            lines += _edit_lines(edit, indent="    ")
+            lines.append("")
 
     warnings = []
-    if tags_changed and not folder_changed and current_folders:
-        warnings.append(
-            f"Folder membership ({', '.join(current_folders)}) is preserved by this "
-            "change.")
-    if args.get("remove_from_folder") and current_folders:
-        warnings.append(
-            f"This takes the dataset out of {', '.join(current_folders)}; it will no "
-            "longer appear under any folder.")
+    if unchanged:
+        warnings.append(f"{len(unchanged)} of {len(given)} already match and will be "
+                        f"left alone: {', '.join(unchanged)}.")
+    preserved = sorted({f for edit in actionable
+                        if edit["folders"] == edit["was"]["folders"]
+                        for f in edit["was"]["folders"]})
+    if args.get("tags") is not None and preserved:
+        warnings.append(f"Folder membership ({', '.join(preserved)}) is preserved by "
+                        "this change.")
+    if args.get("remove_from_folder"):
+        emptied = sorted({f for edit in actionable for f in edit["was"]["folders"]})
+        if emptied:
+            warnings.append(f"This takes {len(actionable)} dataset(s) out of "
+                            f"{', '.join(emptied)}; they will no longer appear under "
+                            "any folder.")
+    if args.get("tags") is not None and len(actionable) > 1:
+        warnings.append(f"The tag list is replaced on all {len(actionable)} datasets, "
+                        "so any tags unique to one of them are dropped.")
 
-    # UpdateDatasetRequest requires name, description, process_id AND tags -- it is a
-    # whole-record replacement. Omitting a field blanks it, so every one is resolved
-    # here from the current record and only the requested changes are applied.
     return Draft(
-        args={"project_id": project["id"], "dataset_id": row["id"],
-              "name": changes.get("name", row.get("name")),
-              "description": changes.get("description", row.get("description") or ""),
-              "process_id": row.get("process_id"),
-              "folders": target_folders, "tags": target_tags},
-        summary="\n".join(lines), warnings=warnings,
+        args={"project_id": project["id"], "edits": actionable},
+        summary="\n".join(lines).rstrip(), warnings=warnings,
         invalidates=[_inv("datasets", project["id"])],
     )
 
 
+def _edit_lines(edit: dict, *, indent: str) -> list:
+    lines = []
+    for key in edit["changed"]:
+        lines += [f"{indent}{key}", f"{indent}  from  {edit['was'][key]!r}",
+                  f"{indent}  to    {edit[key]!r}"]
+    if edit["folders"] != edit["was"]["folders"]:
+        was = ", ".join(edit["was"]["folders"]) or "(not in a folder)"
+        now = ", ".join(edit["folders"]) or "(not in a folder)"
+        lines += [f"{indent}folder", f"{indent}  from  {was}", f"{indent}  to    {now}"]
+    if sorted(edit["tags"]) != sorted(edit["was"]["tags"]):
+        lines += [f"{indent}tags", f"{indent}  from  {edit['was']['tags']}",
+                  f"{indent}  to    {edit['tags']}"]
+    return lines
+
+
 def apply_update_dataset(reader: reads.Reader, args: dict) -> dict:
+    """Apply each dataset's resolved record, reporting per dataset.
+
+    One API call per dataset, so a batch can fail partway. Raising on the first
+    failure would report the whole operation as failed while some datasets had
+    already been changed, and the audit trail would say so -- so failures are
+    collected and every dataset's outcome is named.
+    """
     from cirro_api_client.v1.models import UpdateDatasetRequest, Tag
-    # One list on the wire: folder membership plus plain tags. The planner already
-    # decided the full contents, so nothing is dropped here.
-    combined = [R.folder_tag(f) for f in (args.get("folders") or [])]
-    combined += list(args.get("tags") or [])
-    request = UpdateDatasetRequest(
-        name=args["name"],
-        description=args.get("description") or "",
-        process_id=args["process_id"],
-        tags=[Tag(value=value) for value in combined],
-    )
-    detail = reader.client.datasets.update(project_id=args["project_id"],
-                                           dataset_id=args["dataset_id"], request=request)
-    return {"updated": args["dataset_id"], "name": R.plain(getattr(detail, "name", None)),
-            "folders": args.get("folders") or [], "tags": args.get("tags") or []}
+
+    updated, failed = [], []
+    for edit in args["edits"]:
+        # One list on the wire: folder membership plus plain tags. The planner already
+        # decided the full contents, so nothing is dropped here.
+        combined = _wire_tags(edit.get("folders"), edit.get("tags"))
+        request = UpdateDatasetRequest(
+            name=edit["name"],
+            description=edit.get("description") or "",
+            process_id=edit["process_id"],
+            tags=[Tag(value=value) for value in combined],
+        )
+        try:
+            detail = reader.client.datasets.update(
+                project_id=args["project_id"], dataset_id=edit["dataset_id"],
+                request=request)
+        except Exception as exc:
+            failed.append({"dataset_id": edit["dataset_id"],
+                           "name": edit["dataset_name"],
+                           "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        updated.append({"dataset_id": edit["dataset_id"],
+                        "name": R.plain(getattr(detail, "name", None)),
+                        "folders": edit.get("folders") or [],
+                        "tags": edit.get("tags") or []})
+
+    if failed and not updated:
+        raise errors.UpstreamError(
+            f"None of the {len(failed)} dataset(s) could be updated.",
+            what=failed[0]["error"],
+            retry_with=[{"op": "update_dataset", "note": "re-plan and try again"}],
+            user_action="Check the Cirro web UI for service status if this persists.",
+            failed=failed,
+        )
+    result = {"updated": updated, "n_updated": len(updated)}
+    if failed:
+        result["failed"] = failed
+        result["note"] = (f"{len(updated)} of {len(updated) + len(failed)} datasets "
+                          "were updated; the rest are unchanged and listed in `failed`.")
+    return result
 
 
 def plan_delete_dataset(reader: reads.Reader, args: dict) -> Draft:
@@ -565,37 +685,42 @@ def _scan_folder(folder: Path, include_hidden: bool = False) -> tuple:
 
 
 def plan_upload_dataset(reader: reads.Reader, args: dict) -> Draft:
-    _need(args, "upload_dataset", "name", "process", "folder")
+    # `source_dir` is the local directory; `folder` is the Cirro folder the dataset
+    # lands in. Both were once called `folder`, which made one of the two a footgun.
+    _need(args, "upload_dataset", "name", "process", "source_dir")
     project = _project(reader, args)
     process = _process(reader, args["process"], ingest=True)
-    folder = Path(args["folder"]).expanduser().resolve()
-    if not folder.is_dir():
+    source_dir = Path(args["source_dir"]).expanduser().resolve()
+    if not source_dir.is_dir():
         raise errors.InvalidQuery(
-            f"{folder} is not a directory.",
-            what="Point folder at a local directory of files to upload.",
-            field="folder", given=str(folder),
-            retry_with=[{"op": "upload_dataset", "args": {"folder": str(Path.cwd())}}],
+            f"{source_dir} is not a directory.",
+            what="Point source_dir at a local directory of files to upload.",
+            field="source_dir", given=str(source_dir),
+            retry_with=[{"op": "upload_dataset",
+                         "args": {"source_dir": str(Path.cwd())}}],
         )
-    files, total_bytes = _scan_folder(folder, bool(args.get("include_hidden")))
+    files, total_bytes = _scan_folder(source_dir, bool(args.get("include_hidden")))
     if not files:
         raise errors.InvalidQuery(
-            f"No files found under {folder}.",
-            what="Check the folder, or pass include_hidden.",
-            field="folder", given=str(folder),
+            f"No files found under {source_dir}.",
+            what="Check the directory, or pass include_hidden.",
+            field="source_dir", given=str(source_dir),
             retry_with=[{"op": "upload_dataset",
-                         "args": {"folder": str(folder), "include_hidden": True}}],
+                         "args": {"source_dir": str(source_dir),
+                                  "include_hidden": True}}],
         )
 
     warnings = []
     try:
         reader.client.processes.check_dataset_files(
-            files=files, process_id=process["id"], directory=str(folder))
+            files=files, process_id=process["id"], directory=str(source_dir))
         reader.cost.call("processes.check_dataset_files")
     except Exception as exc:
         # The SDK runs this check before uploading anyway, so surfacing it now costs
         # nothing and turns a failed upload into a pre-approval warning.
         warnings.append(f"File-name validation for {process['name']!r} reports: {exc}")
 
+    folders = _target_folders(args, [])
     patterns = S.name_patterns(files, limit=5)
     lines = [
         f"Upload {len(files)} files ({S.human_bytes(total_bytes)}) into "
@@ -603,7 +728,8 @@ def plan_upload_dataset(reader: reads.Reader, args: dict) -> Draft:
         "",
         f"  Dataset name  {args['name']}",
         f"  Data type     {process['name']} ({process['id']})",
-        f"  Source folder {folder}",
+        f"  From          {source_dir}",
+        f"  Into folder   {', '.join(folders) or '(none)'}",
         "",
         "  Files:",
     ]
@@ -611,7 +737,8 @@ def plan_upload_dataset(reader: reads.Reader, args: dict) -> Draft:
     return Draft(
         args={"project_id": project["id"], "process_id": process["id"],
               "name": args["name"], "description": args.get("description", ""),
-              "folder": str(folder), "files": files, "tags": args.get("tags") or [],
+              "source_dir": str(source_dir), "files": files,
+              "folders": folders, "tags": args.get("tags") or [],
               "n_files": len(files), "total_bytes": total_bytes},
         summary="\n".join(lines), warnings=warnings,
         invalidates=[_inv("datasets", project["id"])],
@@ -622,13 +749,17 @@ def apply_upload_dataset(reader: reads.Reader, args: dict) -> dict:
     from cirro.sdk.project import DataPortalProject
     detail = reader.client.projects.get(project_id=args["project_id"])
     wrapped = DataPortalProject(detail, reader.client)
+    # Folder membership rides in the tag list, so the dataset is filed on creation
+    # rather than by a second gated operation afterwards.
+    combined = _wire_tags(args.get("folders"), args.get("tags"))
     wrapped.upload_dataset(
         name=args["name"], description=args.get("description") or "",
-        process=args["process_id"], upload_folder=args["folder"],
-        files=args.get("files") or None, tags=args.get("tags") or None)
+        process=args["process_id"], upload_folder=args["source_dir"],
+        files=args.get("files") or None, tags=combined or None)
     return {"uploaded_to_project": args["project_id"], "name": args["name"],
             "n_files": args.get("n_files"),
             "bytes": args.get("total_bytes"),
+            "folders": args.get("folders") or [], "tags": args.get("tags") or [],
             "follow_with": {"verb": "query", "entity": "dataset",
                             "scope": {"project_ids": [args["project_id"]]},
                             "filter": {"field": "name", "op": "eq",
@@ -967,23 +1098,34 @@ def plan_update_project_schema(reader: reads.Reader, args: dict) -> Draft:
     schema_payload = args["schema"]
     new_keys = sorted((schema_payload.get("properties") or {}).keys()) \
         if isinstance(schema_payload, dict) else []
-    old_keys = []
+    old_keys, baseline_error = [], None
     try:
         current = reader.client.metadata.get_project_schema(project_id=project["id"])
         reader.cost.call("metadata.schema")
         spec = getattr(current, "form_spec_json", None) or {}
         old_keys = sorted((spec.get("properties") or {}).keys()) \
             if isinstance(spec, dict) else []
-    except Exception:
-        pass
-    lines = [
-        f"Replace the sample-metadata schema of {project['name']} ({project['id']}).",
-        "", f"  keys removed  {sorted(set(old_keys) - set(new_keys))}",
-        f"  keys added    {sorted(set(new_keys) - set(old_keys))}",
-        f"  keys kept     {len(set(old_keys) & set(new_keys))}",
-    ]
+    except Exception as exc:
+        # Swallowing this used to leave old_keys empty, which rendered as "keys
+        # removed []" and suppressed the removal warning -- so a schema replacement
+        # that dropped keys was approved as though it dropped none.
+        baseline_error = str(exc)
+
+    lines = [f"Replace the sample-metadata schema of {project['name']} "
+             f"({project['id']}).", ""]
     warnings = []
     removed = set(old_keys) - set(new_keys)
+    if baseline_error is None:
+        lines += [f"  keys removed  {sorted(removed)}",
+                  f"  keys added    {sorted(set(new_keys) - set(old_keys))}",
+                  f"  keys kept     {len(set(old_keys) & set(new_keys))}"]
+    else:
+        lines += [f"  keys after    {new_keys}",
+                  "  keys removed  unknown -- the current schema could not be read"]
+        warnings.append(
+            f"The current schema could not be read ({baseline_error}), so this plan "
+            "cannot say which keys would be removed. Replacing a schema you cannot "
+            "see risks dropping keys that existing sample metadata validates against.")
     if removed:
         warnings.append(f"Removing schema keys {sorted(removed)} affects how existing "
                         "sample metadata validates.")

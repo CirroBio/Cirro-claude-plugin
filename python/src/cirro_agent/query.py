@@ -814,9 +814,6 @@ def suggest(rows: list, base_query: dict, spec: EntitySpec, facets: dict, ctx: C
 
 # --------------------------------------------------------------------------- group_by
 
-_BIN_SUFFIXES = ("month", "quarter", "year", "day", "week", "log2", "class")
-
-
 def _group_key(row: dict, key: str, ctx: Ctx) -> Any:
     if ":" in key:
         field, _, unit = key.partition(":")

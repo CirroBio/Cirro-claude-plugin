@@ -93,6 +93,10 @@ construction against a recording double — a new operation must be added there.
 
 **Dataset folders are `folder://` tags.** Report them as `folders`, never surface the
 prefix, and never write a tag list without re-including folder membership.
+`mutations._target_folders` and `_tag_values` are the one implementation of both halves
+of that rule; every op that writes a tag list goes through them. `folder` means the
+Cirro folder in every operation -- `upload_dataset`'s local directory is `source_dir`,
+because when both were called `folder` one of them was a footgun.
 
 **A form's fields are not just its `properties`.** Conditional fields live inside
 `dependencies.<selector>.oneOf[].properties`, and `dependencies` keys are *selector field

@@ -45,7 +45,11 @@ def _dataset_payload(index, *, status="COMPLETED", process="proc_rnaseq",
         id=f"ds_{index:04d}", name=f"RNAseq_batch{index % 20}_S{index}",
         project_id="proj_a", process_id=process,
         source_dataset_ids=parents or [], status=Status(status),
-        tags=[Tag(value="folder://Immuno"), Tag(value="qc-pass")],
+        # Varied per dataset: a fixture where every row carries the same tags cannot
+        # tell "each dataset keeps its own tags" from "one row's tags were reused".
+        tags=[Tag(value="folder://Immuno" if index % 2 == 0 else "folder://Archive"),
+              Tag(value="qc-pass")] + ([] if index == 0
+                                       else [Tag(value=f"batch-{index}")]),
         created_by=owner,
         created_at=_dt(created), updated_at=_dt(created),
         description=f"run {index}",
@@ -205,3 +209,13 @@ def writable_tenant(fake_tenant):
         status_code=204)
     router.get(f"{API}/processes/proc_rnaseq/parameters").respond(json=PARAMETER_SPEC)
     return fake_tenant
+
+
+def approved_summary(session_dir, plan_id):
+    """The text apply must be given, read where the approval hook reads it.
+
+    The plan response deliberately no longer echoes the summary beside `rendered`,
+    so tests take it from the stored plan exactly as scripts/gate.py does.
+    """
+    from cirro_agent import plans
+    return plans.load(session_dir, plan_id).summary

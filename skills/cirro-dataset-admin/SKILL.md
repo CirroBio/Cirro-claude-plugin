@@ -7,6 +7,25 @@ description: Rename, retag, or delete a Cirro dataset, or replace its sampleshee
 
 Every operation here goes through `plan` → show the user → `apply`.
 
+## Several datasets, one approval
+
+`update_dataset` takes `dataset_ids` as well as `dataset_id`. "Move those three into
+QC" is one plan and one approval prompt that names all three, not three of each.
+
+Each dataset's current record is read separately, so a batch move preserves each one's
+own tags rather than flattening them onto whichever record was read first.
+
+Two things it will not do:
+
+- **`name` and `description` are refused for a batch** — they would give every dataset
+  the same name. Edit those one at a time.
+- **`tags` replaces the list on every dataset in the batch**, so tags unique to one of
+  them are dropped. The plan warns about this; read the warning to the user rather
+  than past it.
+
+Datasets that already match are named in a warning and left alone, so re-running a
+move is not an error.
+
 ## Always resolve the ID first
 
 ```bash

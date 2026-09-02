@@ -11,7 +11,7 @@ from conftest import PARAMETER_SPEC  # noqa: F401
 from cirro_agent import plans
 from cirro_agent.worker import dispatch
 
-from conftest import API
+from conftest import API, approved_summary
 
 
 def call(tenant, session_dir, verb, **overrides):
@@ -88,8 +88,11 @@ def test_plan_writes_a_private_single_use_record(writable_tenant, session_dir):
 # --- apply executes exactly what was approved ---
 
 def apply_from(tenant, session_dir, plan_result, **overrides):
+    # The approved text comes from the stored plan, which is where the approval hook
+    # reads it -- the plan response no longer repeats it beside `rendered`.
     payload = {"plan_id": plan_result["plan_id"], "digest": plan_result["digest"],
-               "approved_summary": plan_result["summary"]}
+               "approved_summary": approved_summary(session_dir,
+                                                    plan_result["plan_id"])}
     payload.update(overrides)
     return call(tenant, session_dir, "apply", **payload)
 
@@ -222,3 +225,25 @@ def test_an_unknown_operation_lists_the_supported_ones(writable_tenant, session_
     result = call(writable_tenant, session_dir, "plan", op="drop_database", args={})
     assert result["error"]["code"] == "NOT_SUPPORTED"
     assert len(result["error"]["remediation"]["retry_with"]) > 20
+
+
+def test_a_schema_plan_will_not_claim_nothing_was_removed(writable_tenant, session_dir,
+                                                          monkeypatch):
+    """An unreadable baseline used to render as "keys removed []" with no warning."""
+    from cirro_agent.worker import mutations
+
+    def unreadable(*_args, **_kwargs):
+        raise RuntimeError("schema service unavailable")
+    monkeypatch.setattr(
+        "cirro.services.metadata.MetadataService.get_project_schema", unreadable)
+
+    planned = call(writable_tenant, session_dir, "plan", op="update_project_schema",
+                   args={"project_id": "proj_a",
+                         "schema": {"properties": {"only_key": {"type": "string"}}}})
+
+    assert planned["ok"], planned
+    shown = approved_summary(session_dir, planned["plan_id"])
+    assert "keys removed  []" not in shown
+    assert "unknown" in shown
+    assert any("could not be read" in w for w in planned["warnings"]), planned["warnings"]
+    assert mutations.OPS["update_project_schema"]

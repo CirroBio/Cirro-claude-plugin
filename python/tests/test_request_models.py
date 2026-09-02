@@ -15,9 +15,10 @@ from cirro_agent.worker import mutations
 # op -> args a planner would realistically produce (resolved, IDs only).
 APPLY_CASES = {
     "update_dataset": {
-        "project_id": "proj_a", "dataset_id": "ds_1", "name": "n",
-        "description": "d", "process_id": "proc_1",
-        "folders": ["Immuno"], "tags": ["qc-pass"]},
+        "project_id": "proj_a",
+        "edits": [{"dataset_id": "ds_1", "dataset_name": "n", "name": "n",
+                   "description": "d", "process_id": "proc_1",
+                   "folders": ["Immuno"], "tags": ["qc-pass"]}]},
     "delete_dataset": {"project_id": "proj_a", "dataset_id": "ds_1",
                        "dataset_name": "n"},
     "update_samplesheet": {"project_id": "proj_a", "dataset_id": "ds_1",
@@ -128,6 +129,7 @@ def test_update_dataset_sends_every_required_field():
     reader = _reader()
     mutations.apply_update_dataset(reader, dict(APPLY_CASES["update_dataset"]))
     request = reader.client.datasets.update.call_args.kwargs["request"]
+    assert reader.client.datasets.update.call_count == 1
     assert request.name == "n"
     assert request.description == "d"
     assert request.process_id == "proc_1", \

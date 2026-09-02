@@ -249,7 +249,10 @@ def record(session: Session, plan: Plan, *, phase: str, result: Any = None,
     """Append-only audit log. Written before the mutation and after it."""
     runs = session.path / "runs"
     runs.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    # Stamped from the plan, not from now: stamping at write time split one apply
+    # across two files whenever intent and outcome straddled a second boundary,
+    # leaving a file holding an intent that appeared never to have completed.
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(plan.created_at))
     path = runs / f"{stamp}-{plan.op}-{plan.plan_id}.jsonl"
     entry = {
         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

@@ -128,9 +128,12 @@ A few things worth knowing:
 
 - **Cirro has no pricing API**, so a plan tells you what will run and on what, rather
   than inventing a cost estimate.
-- **Folders are safe.** Cirro stores folder membership alongside tags, so a careless tag
-  edit could quietly move a dataset out of its folder. The plan always resolves folder
-  membership explicitly and tells you it is preserving it.
+- **Folders are safe, and they come along for the ride.** Cirro stores folder
+  membership alongside tags, so a careless tag edit could quietly move a dataset out of
+  its folder. Every plan resolves folder membership explicitly and tells you it is
+  preserving it. You can also name the folder when you upload data or launch an
+  analysis, so filing happens as part of that change rather than as a second one to
+  approve.
 - **Some things are deliberately not offered** — renaming or re-billing a project,
   editing a live share's conditions, billing changes. Those belong in the Cirro web UI
   where their effects are visible.
@@ -141,7 +144,7 @@ A few things worth knowing:
 |---|---|
 | Analyses | `run_analysis`, `resume_analysis`, `stop_analysis` |
 | Adding data | `upload_dataset`, `upload_reference`, `import_public` |
-| Datasets | `update_dataset`, `update_samplesheet`, `delete_dataset` |
+| Datasets | `update_dataset` (one or many at once), `update_samplesheet`, `delete_dataset` |
 | Projects | `create_project`, `update_project_tags`, `archive_project`, `unarchive_project` |
 | People | `set_user_role`, `invite_user` |
 | Metadata | `update_sample`, `update_project_schema` |

@@ -314,7 +314,14 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
     except (KeyError, TypeError, ValueError):
         expires = "an unreadable time"
     lines.append(f"Plan {plan_id} is single-use and expires at {expires}.")
-    respond("ask", "\n".join(lines))
+    # Supplied from the stored plan rather than echoed by the model. apply requires
+    # the approved text to match the plan byte for byte; sourcing it here means that
+    # check costs nothing in context, and the value cannot be the model's paraphrase.
+    respond("ask", "\n".join(lines),
+            {"updatedInput": {**tool_input,
+                              "plan_id": plan_id,
+                              "digest": plan.get("digest") or "",
+                              "approved_summary": plan.get("summary") or ""}})
 
 
 # --------------------------------------------------------------------------- write
