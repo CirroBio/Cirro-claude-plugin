@@ -19,6 +19,9 @@ from . import reads, rows as R
 RISK_WRITE = "cirro_write"
 RISK_DESTRUCTIVE = "cirro_destructive"
 RISK_LOCAL = "local_write"
+# An operation that changes Cirro *and* the local disk. The risk string is what the
+# approval prompt shows, so an op that does both must not present as doing one.
+RISK_WRITE_LOCAL = "cirro_write+local_write"
 
 
 @dataclass

@@ -486,3 +486,38 @@ def test_a_staging_failure_does_not_report_a_live_revision_as_failed(tmp_path,
     assert result["revision_token"] == "7", "the upload succeeded and must say so"
     assert result["staged"] == []
     assert "the revision itself was accepted and is live" in result["omitted"][0]["note"]
+
+
+def test_an_upload_that_also_writes_local_disk_says_so_in_the_approval():
+    """The risk string is what the approval prompt shows.
+
+    Presenting an operation that creates directories and overwrites files as a
+    plain remote write understates what the user is agreeing to.
+    """
+    from cirro_agent.worker import mutations, pipeline_ops
+    assert mutations.OPS["upload_process_config"].risk == mutations.RISK_WRITE_LOCAL
+    assert mutations.OPS["update_process"].risk == mutations.RISK_WRITE
+    assert pipeline_ops.STAGING_DIR
+
+
+def test_the_plan_names_the_local_files_it_would_replace(tmp_path, monkeypatch):
+    """write_process_config already holds this standard; both paths now match."""
+    from cirro_agent.worker import pipeline_ops
+    from unittest.mock import MagicMock
+    spec = _write_spec(tmp_path)
+    stale = tmp_path / pipeline_ops.STAGING_DIR
+    stale.mkdir()
+    (stale / "process-form.json").write_text("{}")
+
+    reader = MagicMock()
+    reader.base_url = "app.cirro.test"
+    reader.processes.return_value = [{"id": "p1", "owner": "me@example.org"}]
+    monkeypatch.setattr(pipeline_ops, "_owned_process",
+                        lambda _r, _p: {"name": "Demo", "id": "p1",
+                                        "config_source": pipeline_ops.STORAGE})
+
+    draft = pipeline_ops.plan_upload_process_config(
+        reader, {"process_id": "p1", "design_spec": spec})
+
+    assert "process-form.json" in draft.summary.split("Replaced locally")[1]
+    assert any("will be overwritten" in w for w in draft.warnings)

@@ -23,6 +23,7 @@ from .. import errors, formcheck, formgen
 from . import reads, rows as R
 from . import mutations
 from .mutations import (Draft, Op, RISK_DESTRUCTIVE, RISK_LOCAL, RISK_WRITE,
+                        RISK_WRITE_LOCAL,
                         _inv, _need)
 
 STORAGE = "STORAGE"
@@ -421,6 +422,8 @@ def plan_upload_process_config(reader: reads.Reader, args: dict) -> Draft:
         token = None
 
     staging = _staging_dir(args)
+    replaced = sorted(name for name in assets if (staging / name).exists()
+                      and (staging / name).read_text() != assets[name])
     changed, added = [], []
     for name, text in sorted(assets.items()):
         slot = formgen.SLOTS[name]
@@ -438,12 +441,16 @@ def plan_upload_process_config(reader: reads.Reader, args: dict) -> Draft:
         f"  New               {', '.join(added) or 'none'}",
         f"  Changed           {', '.join(changed) or 'none'}",
         f"  Staged to         {staging}",
+        f"  Replaced locally  {', '.join(replaced) or 'none'}",
         "",
         "All slots go up in one revision, so the configuration is never half-applied.",
         "A copy is kept in the folder above so you can read it later without asking "
         "Cirro for it back.",
     ]
     warnings = [p["message"] for p in report["problems"] if p["level"] == "warning"]
+    if replaced:
+        warnings.append(f"{len(replaced)} file(s) in {staging} will be overwritten: "
+                        f"{', '.join(replaced)}")
     if token and not changed and not added:
         warnings.append("Nothing differs from the current revision; this would be a "
                         "no-op revision.")
@@ -899,7 +906,7 @@ def apply_commit_process_config(reader: reads.Reader, args: dict) -> dict:
 PIPELINE_OPS = [
     Op("create_process", RISK_WRITE, plan_create_process, apply_create_process),
     Op("update_process", RISK_WRITE, plan_update_process, apply_update_process),
-    Op("upload_process_config", RISK_WRITE, plan_upload_process_config,
+    Op("upload_process_config", RISK_WRITE_LOCAL, plan_upload_process_config,
        apply_upload_process_config),
     Op("sync_process_config", RISK_WRITE, plan_sync_process_config,
        apply_sync_process_config),

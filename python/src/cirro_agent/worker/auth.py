@@ -12,6 +12,7 @@ code's lifetime, so no tool call can hang even if the human walks away.
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -204,9 +205,14 @@ def login_start(request: dict) -> dict:
         # A network or upstream failure is not a reason to start a login.
 
     if _child_alive():
-        flow = _read(home / FLOW_FILE)
-        if flow:
-            return _pending(home, flow, adopted_existing=True)
+        # A live child that has not published yet is simply mid-request -- issuing the
+        # device code takes a second or two. Orphaning it here and spawning a second
+        # daemon put two codes in flight against one tenant: whichever the person did
+        # not use kept polling to expiry, then overwrote the successful child's result
+        # with "Authentication timed out".
+        adopted = _await_flow(home, base_url, FLOW_PUBLISH_TIMEOUT)
+        if adopted is not None:
+            return {**adopted, "adopted_existing": True}
 
     for stale in (FLOW_FILE, STATUS_FILE, PID_FILE):
         (home / stale).unlink(missing_ok=True)
@@ -221,11 +227,28 @@ def login_start(request: dict) -> dict:
     child.stdin.close()
     _write(home / PID_FILE, {"pid": child.pid, "started_at": time.time()})
 
-    deadline = time.monotonic() + FLOW_PUBLISH_TIMEOUT
+    published = _await_flow(home, base_url, FLOW_PUBLISH_TIMEOUT)
+    if published is None:
+        raise errors.NetworkUnavailable(
+            f"Cirro at {base_url} did not issue a device code within "
+            f"{int(FLOW_PUBLISH_TIMEOUT)}s.",
+            what="The authorization request did not come back.",
+            user_action=f"Check network access to {base_url}, then retry login.",
+        )
+    return {**published, "reason": reason}
+
+
+def _await_flow(home: Path, base_url: str, timeout: float) -> Optional[dict]:
+    """Watch for a daemon to publish a code, settle, or fail. None means neither.
+
+    Shared by the spawn path and by adoption of a daemon that is already running, so
+    that a child mid-request is waited on rather than replaced.
+    """
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         flow = _read(home / FLOW_FILE)
         if flow:
-            return _pending(home, flow, reason=reason)
+            return _pending(home, flow)
         settled = _read(home / STATUS_FILE)
         if settled and settled.get("status") == "ok":
             # The daemon loaded a usable token instead of issuing a code, so no link
@@ -239,14 +262,10 @@ def login_start(request: dict) -> dict:
                 what="Cirro did not issue a device code.",
                 user_action=f"Check network access to {base_url} and try again.",
             )
+        if not _child_alive():
+            return None
         time.sleep(0.3)
-
-    raise errors.NetworkUnavailable(
-        f"Cirro at {base_url} did not issue a device code within "
-        f"{int(FLOW_PUBLISH_TIMEOUT)}s.",
-        what="The authorization request did not come back.",
-        user_action=f"Check network access to {base_url}, then retry login.",
-    )
+    return None
 
 
 def login_daemon(request: dict) -> dict:
@@ -393,9 +412,27 @@ def whoami(request: dict) -> dict:
         return payload
 
 
+def _stop_login(home: Path) -> bool:
+    """Kill a login still in flight before discarding the credential.
+
+    Removing the pidfile only makes the daemon invisible. It keeps polling, and on
+    success writes the token straight back -- so a logout during a login handed the
+    credential back moments after the user asked to be rid of it.
+    """
+    raw = _read(home / PID_FILE)
+    if not raw:
+        return False
+    try:
+        os.kill(int(raw["pid"]), signal.SIGTERM)
+        return True
+    except (OSError, ValueError, KeyError):
+        return False
+
+
 def logout(request: dict) -> dict:
     base_url = request["base_url"]
     home = _home()
+    stopped = _stop_login(home)
     removed = []
     try:
         config = portal.app_config(base_url)
@@ -423,4 +460,5 @@ def logout(request: dict) -> dict:
                 "session folder. Removing the file above forces a fresh login. To erase "
                 "the keychain entry as well, run: "
                 "security delete-generic-password -s cirro-client")
-    return {"ok": True, "removed": removed, "session_dir": str(home), "note": note}
+    return {"ok": True, "removed": removed, "stopped_login": stopped,
+            "session_dir": str(home), "note": note}

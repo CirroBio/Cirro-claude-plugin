@@ -129,7 +129,7 @@ def test_every_registered_operation_has_a_planner_and_an_executor():
         assert callable(op.plan), name
         assert callable(op.apply), name
         assert op.risk in (mutations.RISK_WRITE, mutations.RISK_DESTRUCTIVE,
-                           mutations.RISK_LOCAL), name
+                           mutations.RISK_LOCAL, mutations.RISK_WRITE_LOCAL), name
 
 
 def test_the_read_cli_cannot_reach_a_mutating_verb():

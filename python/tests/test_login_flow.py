@@ -387,3 +387,69 @@ def test_a_live_session_clears_the_remains_of_the_login_that_made_it(logged_in):
 
     assert not (logged_in / auth.STATUS_FILE).exists()
     assert not (logged_in / auth.FLOW_FILE).exists()
+
+
+# --- one login at a time -----------------------------------------------------
+
+def test_a_child_still_issuing_a_code_is_waited_on_not_replaced(home, monkeypatch):
+    """Two daemons means two codes; the unused one later overwrites the good result.
+
+    A live child that has not published yet is mid-request, not stuck.
+    """
+    monkeypatch.setattr(auth, "_child_alive", lambda: True)
+    monkeypatch.setattr(auth.subprocess, "Popen", _no_spawn)
+    monkeypatch.setattr(auth, "_verify",
+                        lambda _b: (_ for _ in ()).throw(
+                            errors.AuthRequired("no", what="w", user_action="log in")))
+
+    reads = {"n": 0}
+
+    def slow_publish(path):
+        # The code arrives a couple of polls in, as a real device-code request does.
+        if path.name == auth.FLOW_FILE:
+            reads["n"] += 1
+            return FLOW if reads["n"] > 2 else None
+        return None
+    monkeypatch.setattr(auth, "_read", slow_publish)
+    monkeypatch.setattr(auth.time, "sleep", lambda _s: None)
+
+    result = auth.login_start({"base_url": BASE_URL})
+
+    assert result["adopted_existing"] is True
+    assert result["verification_url"] == FLOW["verification_url"]
+
+
+def test_a_dead_child_does_not_hold_the_caller_for_the_whole_timeout(home,
+                                                                     monkeypatch):
+    """_await_flow gives up as soon as the daemon is gone, rather than at the ceiling."""
+    monkeypatch.setattr(auth, "_child_alive", lambda: False)
+    started = time.monotonic()
+    assert auth._await_flow(home, BASE_URL, auth.FLOW_PUBLISH_TIMEOUT) is None
+    assert time.monotonic() - started < 1.0
+
+
+def test_logging_out_stops_a_login_that_is_still_running(home, monkeypatch):
+    """Removing the pidfile only hides the daemon; it would finish and re-save."""
+    signalled = []
+    monkeypatch.setattr(auth.os, "kill",
+                        lambda pid, sig: signalled.append((pid, sig)))
+    monkeypatch.setattr(auth.portal, "app_config",
+                        lambda _b: (_ for _ in ()).throw(
+                            errors.NetworkUnavailable("offline", what="w",
+                                                      user_action="retry")))
+    (home / auth.PID_FILE).write_text(json.dumps({"pid": 4242}))
+    (home / "abc123.token.dat").write_text("")
+
+    result = auth.logout({"base_url": BASE_URL})
+
+    assert signalled == [(4242, auth.signal.SIGTERM)]
+    assert result["stopped_login"] is True
+    assert not (home / auth.PID_FILE).exists()
+
+
+def test_logging_out_with_no_login_running_is_not_an_error(home, monkeypatch):
+    monkeypatch.setattr(auth.portal, "app_config",
+                        lambda _b: (_ for _ in ()).throw(
+                            errors.NetworkUnavailable("offline", what="w",
+                                                      user_action="retry")))
+    assert auth.logout({"base_url": BASE_URL})["stopped_login"] is False
