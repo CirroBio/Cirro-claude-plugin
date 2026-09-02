@@ -24,7 +24,11 @@ from typing import Any, Optional
 from . import errors
 from .session import Session
 
-TTL_SECONDS = 600
+# An hour, not ten minutes. The clock only ever guarded two things: that the figures
+# the person read are still true, and that their intent has not moved on. Only the
+# second needs a clock -- the first is checked properly at apply time by re-planning
+# and refusing if anything they read has changed, which no timeout can approximate.
+TTL_SECONDS = 3600
 
 # A plan id becomes a filesystem path, so it is validated before it is interpolated.
 PLAN_ID_PATTERN = re.compile(r"^plan_\d{10,}_[0-9a-f]{8}$")
@@ -35,8 +39,8 @@ PLAN_ID_PATTERN = re.compile(r"^plan_\d{10,}_[0-9a-f]{8}$")
 # The summary is in here deliberately. Covering only op/args/base_url left the approval
 # TEXT outside the integrity check, so editing it on disk kept the digest valid and a
 # human could approve a rename while a delete executed.
-DIGEST_FIELDS = ("op", "args", "base_url", "summary", "username", "expires_at",
-                 "session_dir", "risk")
+DIGEST_FIELDS = ("op", "args", "request_args", "base_url", "summary", "username",
+                 "expires_at", "session_dir", "risk")
 
 PENDING = "pending"
 APPLYING = "applying"
@@ -71,6 +75,9 @@ class Plan:
     session_dir: str
     created_at: float
     expires_at: float
+    # The arguments as the caller gave them, kept so apply can re-plan from the same
+    # starting point and compare. `args` holds the resolved result of that planning.
+    request_args: dict = field(default_factory=dict)
     status: str = PENDING
     risk: str = "cirro_write"
     warnings: list = field(default_factory=list)
@@ -98,7 +105,8 @@ def _plan_path(session: Session, plan_id: str) -> Path:
 def create(session: Session, *, op: str, args: dict, summary: str,
            username: Optional[str], risk: str = "cirro_write",
            warnings: Optional[list] = None,
-           invalidates: Optional[list] = None) -> Plan:
+           invalidates: Optional[list] = None,
+           request_args: Optional[dict] = None) -> Plan:
     now = time.time()
     plan = Plan(
         plan_id=f"plan_{int(now)}_{secrets.token_hex(4)}",
@@ -111,6 +119,7 @@ def create(session: Session, *, op: str, args: dict, summary: str,
         session_dir=str(session.path.resolve()),
         created_at=now,
         expires_at=now + TTL_SECONDS,
+        request_args=dict(request_args or {}),
         risk=risk,
         warnings=list(warnings or []),
         invalidates=list(invalidates or []),
@@ -242,6 +251,34 @@ def finish(session: Session, plan: Plan, *, result: Any = None,
     plan.status = FAILED if error else DONE
     _save(session, plan)
     record(session, plan, phase="outcome", result=result, error=error)
+
+
+def outcomes(session: Session, plan: Plan) -> dict:
+    """Per-step results a completed chain recorded, keyed by step index as a string.
+
+    Read from the audit file rather than kept in the plan, because the audit is the
+    record that already has to be trustworthy -- and because the file name is derived
+    from the plan, one apply's records are always in one place.
+    """
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(plan.created_at))
+    path = session.path / "runs" / f"{stamp}-{plan.op}-{plan.plan_id}.jsonl"
+    found = {}
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return found
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if entry.get("phase") != "outcome":
+            continue
+        for step in (entry.get("result") or {}).get("completed") or []:
+            index = step.get("step")
+            if isinstance(index, int) and isinstance(step.get("result"), dict):
+                found[str(index - 1)] = step["result"]
+    return found
 
 
 def record(session: Session, plan: Plan, *, phase: str, result: Any = None,

@@ -19,9 +19,10 @@ def do_plan(request: dict) -> dict:
     draft = op.plan(reader, request.get("args") or {})
     session = _session(request)
     record = plans.create(session, op=op.name, args=draft.args, summary=draft.summary,
-                          username=reader.username, risk=op.risk,
+                          username=reader.username, risk=draft.risk or op.risk,
                           warnings=draft.warnings,
-                          invalidates=draft.invalidates)
+                          invalidates=draft.invalidates,
+                          request_args=request.get("args") or {})
     response = {
         "ok": True,
         "plan_id": record.plan_id,
@@ -75,6 +76,42 @@ def _same_plan(session: Session, previous_id: str, record) -> bool:
             and stale.summary == record.summary and stale.warnings == record.warnings)
 
 
+def _revalidated(reader: reads.Reader, op, record) -> dict:
+    """Re-plan from the original request and refuse if the disclosure has changed.
+
+    A timeout cannot tell whether the figures a person read are still true; planning
+    again can. So the expiry only has to guard intent -- whether they still mean it --
+    and this guards accuracy: if the same request now resolves to different arguments
+    or renders different text, what they approved is not what would run.
+
+    Returns the freshly resolved arguments, so what executes is computed from the
+    world as it is now rather than from a snapshot.
+    """
+    if not record.request_args:
+        # Plans written before request_args existed, and any op planned with no
+        # arguments at all. Nothing to re-plan from; the digest still applies.
+        return record.args
+    try:
+        draft = op.plan(reader, dict(record.request_args))
+    except errors.AgentError as exc:
+        raise errors.PlanStale(
+            f"{record.op} no longer plans cleanly: {exc.message}",
+            what="Something the approved plan depended on has changed.",
+            retry_with=[{"tool": "plan", "op": record.op,
+                         "renew_from": record.plan_id}],
+        )
+    if draft.args == record.args and draft.summary == record.summary:
+        return draft.args
+    raise errors.PlanStale(
+        "The facts behind this plan changed since it was approved.",
+        what=("Re-planning the same request produced a different result, so executing "
+              "it would not be what was approved."),
+        retry_with=[{"tool": "plan", "op": record.op, "renew_from": record.plan_id}],
+        user_action="Re-plan and read the new figures before approving again.",
+        changed=("arguments" if draft.args != record.args else "disclosure"),
+    )
+
+
 def do_apply(request: dict) -> dict:
     from . import mutations
     session = _session(request)
@@ -83,9 +120,10 @@ def do_apply(request: dict) -> dict:
         session, request["plan_id"], digest=request.get("digest", ""),
         approved_summary=request.get("approved_summary", ""), username=reader.username)
     op = mutations.get_op(record.op)
+    resolved = _revalidated(reader, op, record)
 
     try:
-        result = op.apply(reader, record.args)
+        result = op.apply(reader, resolved)
     except errors.AgentError as exc:
         plans.finish(session, record, error=f"{exc.code}: {exc.message}")
         raise

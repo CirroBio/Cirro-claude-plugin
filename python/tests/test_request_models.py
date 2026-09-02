@@ -115,6 +115,9 @@ def test_every_registered_op_is_covered_here():
                                   # Local writes: they touch the filesystem and git, not
                                   # the SDK, so there is no request object to build.
                                   "write_process_config", "commit_process_config",
+                                  # A chain builds no request of its own; it dispatches
+                                  # to other ops, and is covered in test_chain.py.
+                                  "chain",
                                   # Exercised end to end in test_pipeline_config.py
                                   # against a fake tenant, where the revision API's
                                   # response shape matters more than the request.

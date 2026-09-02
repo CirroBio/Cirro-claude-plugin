@@ -121,6 +121,23 @@ and blocks until the code expires. Build auth explicitly via `worker/portal.py`.
 **`get_all_records` truncates silently** and overshoots its own ceiling. Paginate
 locally so truncation is detectable and `scan_complete` can be honest.
 
+**A chain widens the approval, never the authorization.** `chain` runs several
+build-up ops under one approval. An argument a later step cannot know yet is a
+reference to an earlier step's recorded output, resolved by the server -- never a
+wildcard, and never a value the caller supplies at apply time. `Op.outputs` declares
+what is referenceable and a test asserts each declaration is really returned.
+Destructive ops are refused inside a chain, so one "yes" can never authorize a
+deletion nobody was looking at. Retries are a policy the person approves once:
+bounded attempts, and a `may_change` allowlist that is enforced by refusing a diff
+outside it rather than by rendering it and hoping.
+
+**The plan expiry only guards intent; accuracy is guarded by re-planning.** `apply`
+re-plans from the stored `request_args` and refuses with `PLAN_STALE` if the same
+request now resolves differently or renders different text. That is why `TTL_SECONDS`
+is an hour rather than ten minutes -- a clock cannot tell whether the figures a person
+read are still true, and this can. `request_args` is inside `DIGEST_FIELDS`, so it is
+covered by the same tamper check as everything else.
+
 ## Response discipline
 
 Facets and counts describe the whole match set, never the rows returned. A response that

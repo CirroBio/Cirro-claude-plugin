@@ -247,3 +247,70 @@ def test_a_schema_plan_will_not_claim_nothing_was_removed(writable_tenant, sessi
     assert "unknown" in shown
     assert any("could not be read" in w for w in planned["warnings"]), planned["warnings"]
     assert mutations.OPS["update_project_schema"]
+
+
+# --- the approval must still describe reality when it executes ---------------
+
+def test_apply_refuses_when_the_facts_changed_after_approval(writable_tenant,
+                                                             session_dir, monkeypatch):
+    """A ten-minute clock cannot tell whether the figures are still true.
+
+    Re-planning can, so the expiry only has to guard intent, and accuracy is checked
+    here at the moment of execution.
+    """
+    planned = call(writable_tenant, session_dir, "plan", op="update_dataset",
+                   args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                         "tags": ["new-tag"]})
+    assert planned["ok"], planned
+
+    # The dataset picks up a tag from elsewhere between approval and execution, so the
+    # tag list the person approved replacing is no longer the list that exists.
+    from cirro_agent.worker import mutations
+    original = mutations._dataset
+
+    def drifted(reader, project_id, given):
+        row = dict(original(reader, project_id, given))
+        row["tags"] = row["tags"] + ["added-by-someone-else"]
+        return row
+    monkeypatch.setattr(mutations, "_dataset", drifted)
+
+    applied = apply_from(writable_tenant, session_dir, planned)
+
+    assert applied["ok"] is False
+    assert applied["error"]["code"] == "PLAN_STALE"
+    assert applied["error"]["remediation"]["retry_with"][0]["renew_from"] == \
+        planned["plan_id"]
+
+
+def test_apply_proceeds_when_nothing_changed(writable_tenant, session_dir):
+    """Re-planning is a check, not an obstacle: an unchanged world still applies."""
+    planned = call(writable_tenant, session_dir, "plan", op="update_dataset",
+                   args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                         "tags": ["new-tag"]})
+    applied = apply_from(writable_tenant, session_dir, planned)
+    assert applied["ok"], applied
+    assert applied["result"]["n_updated"] == 1
+
+
+def test_a_plan_whose_target_disappeared_is_stale_not_a_crash(writable_tenant,
+                                                              session_dir, monkeypatch):
+    planned = call(writable_tenant, session_dir, "plan", op="update_dataset",
+                   args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                         "tags": ["new-tag"]})
+
+    from cirro_agent import errors
+    from cirro_agent.worker import mutations
+
+    def gone(*_args, **_kwargs):
+        raise errors.NotFound("no such dataset", what="w",
+                              retry_with=[{"verb": "query"}])
+    monkeypatch.setattr(mutations, "_dataset", gone)
+
+    applied = apply_from(writable_tenant, session_dir, planned)
+    assert applied["error"]["code"] == "PLAN_STALE"
+    assert "no longer plans cleanly" in applied["error"]["message"]
+
+
+def test_the_expiry_is_generous_now_that_accuracy_is_checked_separately():
+    from cirro_agent import plans
+    assert plans.TTL_SECONDS == 3600

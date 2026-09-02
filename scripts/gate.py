@@ -29,8 +29,8 @@ MAX_PLAN_AGE_GRACE = 5  # seconds of clock slack when checking expiry
 
 # Must stay identical to cirro_agent.plans.DIGEST_FIELDS and PLAN_ID_PATTERN;
 # test_gate.py asserts the two agree.
-DIGEST_FIELDS = ("op", "args", "base_url", "summary", "username", "expires_at",
-                 "session_dir", "risk")
+DIGEST_FIELDS = ("op", "args", "request_args", "base_url", "summary", "username",
+                 "expires_at", "session_dir", "risk")
 PLAN_ID_PATTERN = re.compile(r"^plan_\d{10,}_[0-9a-f]{8}$")
 
 # Text that means a command is talking to the Cirro SDK.

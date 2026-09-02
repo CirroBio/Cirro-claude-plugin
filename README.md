@@ -119,8 +119,29 @@ Warnings:
 
 Only if you approve does anything happen. What runs is exactly what you read — the
 approved plan is the only input to the change, so nothing can be substituted after you
-say yes. A plan is good for one change and expires after ten minutes, so a stale
-approval cannot be reused later.
+say yes. A plan is good for one change, and if the underlying facts move between
+planning and approving, it is refused rather than applied against figures you never
+saw.
+
+**Multi-step work gets one prompt.** Configuring a pipeline, uploading test data and
+launching a run can be approved together as a chain. Values a later step cannot know
+yet — the ID of a dataset the upload is about to create — appear as exactly that, not
+as a blank cheque. Deletions are never allowed inside a chain.
+
+If a run fails and you approved a retry policy up front, the retry reuses what already
+succeeded and shows you only what changed:
+
+```
+Attempt 2 of 3 on the chain approved as plan_1788384902_446399a9.
+
+  Re-running: configure, run
+  Reusing:    1 earlier step(s), unchanged
+
+  Changed since the last attempt:
+       configure.design_spec
+         from  '/work/spec.md'
+         to    '/work/spec-v2.md'
+```
 
 Every change is written to a log in `.cirro/runs/` — what was done, when, and as whom.
 
@@ -152,6 +173,7 @@ A few things worth knowing:
 | Workspaces | `create_workspace`, `start_workspace`, `stop_workspace`, `delete_workspace` |
 | Pipelines | `create_process`, `update_process`, `upload_process_config`, `sync_process_config`, `archive_process` |
 | Your computer | `write_process_config`, `commit_process_config` |
+| Several at once | `chain` — approve a sequence of the above as one action |
 | Your computer | `download_files` |
 
 Downloading is gated too. It does not change anything in Cirro, but it can fill a disk,

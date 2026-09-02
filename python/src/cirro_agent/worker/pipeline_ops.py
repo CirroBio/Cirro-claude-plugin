@@ -904,7 +904,8 @@ def apply_commit_process_config(reader: reads.Reader, args: dict) -> dict:
 
 
 PIPELINE_OPS = [
-    Op("create_process", RISK_WRITE, plan_create_process, apply_create_process),
+    Op("create_process", RISK_WRITE, plan_create_process, apply_create_process,
+       outputs=("created_process_id",)),
     Op("update_process", RISK_WRITE, plan_update_process, apply_update_process),
     Op("upload_process_config", RISK_WRITE_LOCAL, plan_upload_process_config,
        apply_upload_process_config),

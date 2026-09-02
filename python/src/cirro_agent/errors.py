@@ -106,6 +106,10 @@ MissingDependency = _err("MISSING_DEPENDENCY", USER_ACTION)
 
 # Plan/apply gate.
 PlanInvalid = _err("PLAN_INVALID", AGENT_ACTION)
+# The plan is intact and unexpired, but the facts it described have moved. Distinct
+# from PLAN_INVALID because the remedy is to re-plan and show the person the new
+# figures, not to fix a malformed request.
+PlanStale = _err("PLAN_STALE", AGENT_ACTION)
 
 # Upstream.
 RateLimited = _err("RATE_LIMITED", RETRYABLE)
