@@ -11,6 +11,7 @@ code's lifetime, so no tool call can hang even if the human walks away.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -76,22 +77,136 @@ def _verify(base_url: str) -> dict:
     }
 
 
+def _flow_url(auth_obj) -> Optional[str]:
+    """The one-click URL, with the code already in it.
+
+    `message` is prose meant for a human to read; the flow carries the two parts
+    separately, so build the link from those and fall back to scraping the prose only
+    if the shape ever changes.
+    """
+    flow = getattr(auth_obj, "_flow", None) or {}
+    uri, code = flow.get("verification_uri"), flow.get("user_code")
+    if uri and code:
+        return f"{uri}?user_code={code}"
+    # `or ""` rather than a default: a null message is a TypeError here, and this
+    # runs inside the daemon's _write argument, where nothing would record the fault.
+    found = re.search(r"https?://\S+", flow.get("message") or "")
+    return found.group(0) if found else None
+
+
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _printable(text: str) -> str:
+    """Strip anything the terminal would act on rather than show.
+
+    Both strings written below come verbatim from the tenant's /device-code
+    response. This is the one channel deliberately trusted more than the agent's
+    relay, which is exactly what makes forging it worth something: ANSI and OSC
+    sequences would let a hostile tenant overwrite the real link with another,
+    print a fake "signed in as", or drive the clipboard through OSC 52.
+    """
+    return CONTROL_CHARS.sub("", text or "")
+
+
+def _announce(url: str, message: str) -> bool:
+    """Write the link straight to the terminal, bypassing the agent entirely.
+
+    Not every host has a controlling terminal -- a desktop app has none -- so
+    failure here is normal and silent, and the agent relays the link either way.
+    """
+    try:
+        with open("/dev/tty", "w") as tty:
+            tty.write(f"\n  Cirro login: {_printable(url)}\n"
+                      f"  {_printable(message)}\n\n")
+            tty.flush()
+        return True
+    except OSError:
+        return False
+
+
+def _has_credential(home: Path) -> bool:
+    """Is there anything here that could possibly be verified?
+
+    The token file is named for the tenant's client_id, which costs a round trip to
+    learn. The glob costs nothing and answers the same question, so a genuine first
+    login skips a GET /api/info/system it could not have used.
+
+    Only the device-code flow keeps anything on disk -- on macOS the file is a signal
+    and the secret is in the Keychain, but it is still touched on save. The headless
+    modes carry their credential in the environment, so for them the answer is always
+    yes and the verification below is what decides.
+    """
+    if portal.auth_mode() != portal.AUTH_DEVICE_CODE:
+        return True
+    return any(home.glob("*.token.dat"))
+
+
+def _pending(home: Path, flow: dict, **extra) -> dict:
+    """Print the link to the terminal, once, and build the pending envelope.
+
+    Printing is a courtesy channel -- the host may have no terminal, and a
+    full-screen TUI may redraw over it -- so the agent is told to relay the link
+    regardless. `printed_to_terminal` reports what actually happened rather than
+    what was attempted.
+
+    The flow file records that it has been printed so that re-entering through an
+    adopted login does not spam the terminal with the same code again.
+    """
+    url = flow.get("verification_url")
+    if url and not flow.get("printed_at"):
+        printed = _announce(url, flow.get("auth_message", ""))
+        flow = {**flow, "printed_at": time.time(), "printed_to_terminal": printed}
+        _write(home / FLOW_FILE, flow)
+    return {
+        "ok": True, "status": "pending",
+        **flow,
+        "printed_to_terminal": bool(flow.get("printed_to_terminal")),
+        "relay_note": ("Show verification_url to the user now, in your next message, "
+                       "before anything else. Printing to their terminal is a courtesy "
+                       "that may not have reached them."),
+        **extra,
+    }
+
+
 def login_start(request: dict) -> dict:
     base_url = request["base_url"]
     home = _home()
     home.mkdir(parents=True, exist_ok=True)
 
-    try:
-        info = _verify(base_url)
-        return {"ok": True, "status": "already_authenticated", **info}
-    except (errors.AuthRequired, errors.AuthExpired) as exc:
-        reason = exc.code
-    # Network and upstream failures are not a reason to start a login.
+    reason = "no_credential"
+    if _has_credential(home):
+        try:
+            # A stored access token that has merely expired is not a reason to log in
+            # again: the SDK refreshes it against the refresh token on the first real
+            # call, which is exactly what _verify makes. Only a credential that cannot
+            # be refreshed reaches the branches below.
+            info = _verify(base_url)
+            # Sweep the remains of whatever login produced this credential. A
+            # leftover {"status": "failed"} would otherwise outlive it and make a
+            # later login_wait raise against a folder that is signed in.
+            for stale in (FLOW_FILE, STATUS_FILE, PID_FILE):
+                (home / stale).unlink(missing_ok=True)
+            return {"ok": True, "status": "already_authenticated", **info}
+        except (errors.AuthRequired, errors.AuthExpired) as exc:
+            reason = exc.code
+        except errors.AgentError:
+            raise
+        except Exception as exc:
+            # A refusal from the refresh itself -- a revoked or rotated refresh token
+            # surfaces as RuntimeError out of cirro.auth, not as a pre-flight error.
+            # Catching only the pre-flight errors left this case unable to recover:
+            # no login was started and the caller was told to start one.
+            mapped = portal.wrap_upstream(exc, what="Verifying the stored credential.")
+            if not isinstance(mapped, errors.AuthExpired):
+                raise mapped
+            reason = mapped.code
+        # A network or upstream failure is not a reason to start a login.
 
     if _child_alive():
         flow = _read(home / FLOW_FILE)
         if flow:
-            return {"ok": True, "status": "pending", "adopted_existing": True, **flow}
+            return _pending(home, flow, adopted_existing=True)
 
     for stale in (FLOW_FILE, STATUS_FILE, PID_FILE):
         (home / stale).unlink(missing_ok=True)
@@ -110,11 +225,17 @@ def login_start(request: dict) -> dict:
     while time.monotonic() < deadline:
         flow = _read(home / FLOW_FILE)
         if flow:
-            return {"ok": True, "status": "pending", "reason": reason, **flow}
-        failure = _read(home / STATUS_FILE)
-        if failure and failure.get("status") == "failed":
+            return _pending(home, flow, reason=reason)
+        settled = _read(home / STATUS_FILE)
+        if settled and settled.get("status") == "ok":
+            # The daemon loaded a usable token instead of issuing a code, so no link
+            # is coming. Without this arm the loop waited out the full timeout and
+            # reported a network failure for a login that had just succeeded.
+            (home / PID_FILE).unlink(missing_ok=True)
+            return {"ok": True, "status": "already_authenticated", **_verify(base_url)}
+        if settled and settled.get("status") == "failed":
             raise errors.AuthRequired(
-                f"Could not start a login: {failure.get('error')}",
+                f"Could not start a login: {settled.get('error')}",
                 what="Cirro did not issue a device code.",
                 user_action=f"Check network access to {base_url} and try again.",
             )
@@ -145,9 +266,12 @@ def login_daemon(request: dict) -> dict:
         return {"ok": True}
 
     try:
+        # Publishing the link is the only thing between the person and finishing, so
+        # nothing else -- launching a browser above all -- happens before this write.
         _write(home / FLOW_FILE, {
             "auth_message": auth.auth_message,
             "auth_message_markdown": auth.auth_message_markdown,
+            "verification_url": _flow_url(auth),
             "base_url": base_url,
         })
     except ValueError as exc:
@@ -169,44 +293,75 @@ def login_daemon(request: dict) -> dict:
 def login_wait(request: dict) -> dict:
     base_url = request["base_url"]
     home = _home()
-    timeout = float(request.get("timeout_s") or 120)
-    deadline = time.monotonic() + min(timeout, 240.0)
+    requested = request.get("timeout_s")
+    # `or` here would turn an explicit 0 -- "just tell me the state now" -- into a
+    # two-minute block, which is the opposite of what the caller asked for.
+    timeout = 120.0 if requested is None else max(0.0, min(float(requested), 240.0))
+    deadline = time.monotonic() + timeout
+    started = _child_alive() or (home / PID_FILE).exists()
 
-    while time.monotonic() < deadline:
+    while True:
+        # The state is read before the deadline is tested, so timeout_s=0 reports what
+        # is true right now. Testing the deadline first made a finished login read as
+        # still pending.
         status = _read(home / STATUS_FILE)
         if status and status.get("status") == "ok":
             (home / PID_FILE).unlink(missing_ok=True)
-            return {"ok": True, "status": "ok", **_verify(base_url)}
+            return {"ok": True, "status": "ok", "was_already_logged_in": False,
+                    **_verify(base_url)}
         if status and status.get("status") == "failed":
             (home / PID_FILE).unlink(missing_ok=True)
-            error = str(status.get("error", ""))
-            if "timed out" in error.lower():
-                raise errors.AuthRequired(
-                    "The device code expired before the login was completed.",
-                    what="Device codes are short-lived.",
-                    user_action="Start a new login and open the link promptly.",
-                )
-            raise errors.AuthRequired(
-                f"Login failed: {error}",
-                what="Cirro rejected or abandoned the authorization.",
-                user_action="Start a new login.",
-            )
+            raise _login_failed(str(status.get("error", "")))
         if not _child_alive() and not status:
-            raise errors.AuthRequired(
-                "The login helper exited without recording a result.",
-                what="The background login process is gone.",
-                user_action="Start a new login.",
-            )
+            return _no_login_running(home, base_url, started)
+        if time.monotonic() >= deadline:
+            break
         time.sleep(1.0)
 
     flow = _read(home / FLOW_FILE) or {}
-    return {
-        "ok": True, "status": "pending",
-        "waited_s": int(min(timeout, 240.0)),
-        "note": ("Still waiting for the browser login. This is not an error -- relay the "
-                 "link again and call login_wait once more."),
-        **flow,
-    }
+    return _pending(home, flow, waited_s=int(timeout),
+                    note=("Still waiting for the browser login. This is not an error "
+                          "-- relay the link again and call login_wait once more."))
+
+
+def _login_failed(error: str) -> errors.AgentError:
+    if "timed out" in error.lower():
+        return errors.AuthRequired(
+            "The device code expired before the login was completed.",
+            what="Device codes are short-lived.",
+            user_action="Start a new login and open the link promptly.",
+        )
+    return errors.AuthRequired(
+        f"Login failed: {error}",
+        what="Cirro rejected or abandoned the authorization.",
+        user_action="Start a new login.",
+    )
+
+
+def _no_login_running(home: Path, base_url: str, started: bool) -> dict:
+    """No helper, no result. Either nothing was ever started, or it died.
+
+    Those look identical from the files alone, so `started` records whether a pidfile
+    existed when the wait began. Without that distinction a helper killed before it
+    could publish anything was reported as a quiet, idle session.
+    """
+    if started or (home / FLOW_FILE).exists():
+        raise errors.AuthRequired(
+            "The login helper exited without recording a result.",
+            what="The background login process is gone.",
+            user_action="Start a new login.",
+            retry_with=[{"tool": "login_start", "base_url": base_url}],
+        )
+    try:
+        return {"ok": True, "status": "ok", "was_already_logged_in": True,
+                **_verify(base_url)}
+    except (errors.AuthRequired, errors.AuthExpired):
+        raise errors.AuthRequired(
+            "No login is in progress and this folder is not logged in.",
+            what="login_wait was called without a login to wait for.",
+            user_action="Start a login first.",
+            retry_with=[{"tool": "login_start", "base_url": base_url}],
+        )
 
 
 def whoami(request: dict) -> dict:

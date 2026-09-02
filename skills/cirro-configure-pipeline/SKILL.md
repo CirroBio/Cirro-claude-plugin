@@ -66,6 +66,10 @@ where a large parameter set would otherwise be a wall.
 Registering the process and delivering the configuration are **separate steps**. The
 process record is always created through the API; only the assets differ by pattern.
 
+In every pattern the generated files end up somewhere the user can read later. Say
+where, in the message where you report the result — the point of a configuration is
+that someone can go back and look at it.
+
 **Pattern 1 — Cirro storage**
 
 ```
@@ -76,6 +80,13 @@ plan(op="upload_process_config", args={"process_id": "...", "design_spec": "..."
 All slots go up in one revision, so the configuration is never half-applied. Updating
 later requires the current revision number as the update token; the plan reads it for
 you, and a stale one is refused rather than silently overwriting.
+
+The upload also drops a copy of exactly what it sent into `pipeline-config/` beside the
+design spec, written only once Cirro has accepted the revision, so the folder is never
+a record of something that failed. Without it this pattern leaves nothing on disk and
+the only way to see a pipeline's configuration is to ask Cirro for it back. Pass
+`stage_dir` to put it elsewhere. It is an ordinary folder, not the hidden `.cirro/`
+session directory, so it can be committed alongside the spec if the user wants that.
 
 **Patterns 2 and 3 — a git repository**
 

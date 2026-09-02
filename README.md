@@ -37,6 +37,15 @@ link to sign in with. After that, just ask for what you want:
 
 `/cirro:doctor` tells you where things stand if anything seems off.
 
+### Signing in
+
+Ask Claude to connect and it prints a sign-in link straight to your terminal as soon
+as it has one, as well as showing it in the conversation. Open it yourself and approve.
+Nothing launches a browser on your behalf.
+
+If the directory is already signed in, none of that happens — an expired token is
+refreshed silently and Claude just tells you who you are.
+
 ### Where your credentials live
 
 Each directory you work in gets its own `.cirro/` folder holding that directory's login,
@@ -188,6 +197,10 @@ You choose where the configuration lives: uploaded into Cirro, kept in the workf
 repository, or kept in a separate configuration repository. If it lives in a repository,
 Claude writes and commits the files and **you** push them — it does not push, and it does
 not open pull requests.
+
+Either way you keep the files. Uploading into Cirro also saves a copy in a
+`pipeline-config/` folder next to the design spec, so months later you can read what a
+pipeline is actually configured to do without asking Cirro for it back.
 
 Two things worth knowing:
 

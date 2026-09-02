@@ -88,13 +88,20 @@ def session_init(base_url: str, directory: Optional[str] = None) -> dict:
     title="Begin a Cirro login",
     description=(
         "Start a device-code login and return immediately with a URL and code to relay "
-        "to the person. Never blocks. If the folder already holds a working credential, "
-        "reports the authenticated identity instead, proved by a live API call. After "
-        "relaying the link, call login_wait."
+        "to the person. Never blocks. Creates the session folder when given a base_url, "
+        "so it needs no session_init first, and reports a missing runtime or a "
+        "mismatched tenant itself, so it needs no doctor pass first -- call it first. "
+        "If the folder already holds a working credential it reports the authenticated "
+        "identity instead, proved by a live API call, refreshing an expired token "
+        "rather than starting a new login. On a pending login it prints the link to "
+        "the user's terminal and reports whether that worked in printed_to_terminal, "
+        "but relay verification_url in your very next message regardless -- printing "
+        "is a courtesy that may not have reached them. Nothing opens a browser. Call "
+        "login_wait only after that message."
     ),
 )
 def login_start(base_url: Optional[str] = None) -> dict:
-    """Start a browser login without waiting for it."""
+    """Start a device-code login without waiting for it."""
     request: dict[str, Any] = {"verb": "login_start"}
     try:
         current = session_mod.load()
@@ -109,6 +116,18 @@ def login_start(base_url: Optional[str] = None) -> dict:
             return init_error.to_dict()
     except errors.AgentError as exc:
         return exc.to_dict()
+    if base_url and session_mod._normalize_base_url(base_url) != current.base_url:
+        # One folder serves one tenant. Silently logging in to the bound tenant while
+        # the caller named a different one is the wrong kind of safe: it answers a
+        # question nobody asked, and the two paths that used to surface the binding
+        # (session_init, doctor) are no longer on the login path.
+        return errors.TenantMismatch(
+            f"This folder is bound to {current.base_url}, not {base_url}.",
+            what="A session folder serves exactly one Cirro tenant.",
+            user_action=(f"Work in a directory bound to {base_url}, or drop the "
+                         f"base_url argument to log in to {current.base_url}."),
+            retry_with=[{"tool": "login_start"}],
+        ).to_dict()
     return runner.call(request, session=current)
 
 
@@ -119,11 +138,12 @@ def login_start(base_url: Optional[str] = None) -> dict:
         "Poll for completion of a login started by login_start, against its own timeout "
         "rather than the device code's lifetime. Returns pending, ok, or a typed "
         "failure -- it can never hang. A pending result is not an error: relay the link "
-        "again and call this once more."
+        "again and call this once more. Only needed when login_start returned pending; "
+        "on a folder that was already logged in it simply confirms the identity."
     ),
 )
 def login_wait(timeout_s: int = 120) -> dict:
-    """Wait, boundedly, for the browser login."""
+    """Wait, boundedly, for the sign-in to land."""
     return runner.call({"verb": "login_wait", "timeout_s": timeout_s})
 
 

@@ -384,3 +384,105 @@ def test_commit_never_pushes():
     source = inspect.getsource(pipeline_ops.apply_commit_process_config)
     assert '"push"' not in source and "'push'" not in source
     assert pipeline_ops.PIPELINE_OPS is not None
+
+
+# --- the user keeps a copy of what was uploaded ------------------------------
+
+def test_uploaded_configuration_is_staged_beside_the_design_spec(tmp_path):
+    """Uploading into Cirro storage must still leave something to read locally."""
+    from cirro_agent.worker import pipeline_ops
+    spec = _write_spec(tmp_path)
+    assert pipeline_ops._staging_dir({"design_spec": spec}) == \
+        tmp_path / pipeline_ops.STAGING_DIR
+
+
+def test_the_staging_folder_can_be_pointed_elsewhere(tmp_path):
+    from cirro_agent.worker import pipeline_ops
+    elsewhere = tmp_path / "somewhere" / "else"
+    assert pipeline_ops._staging_dir(
+        {"design_spec": _write_spec(tmp_path), "stage_dir": str(elsewhere)}) == elsewhere
+
+
+def test_a_relative_stage_dir_lands_beside_the_spec_not_in_the_plugin(tmp_path):
+    """The worker's cwd is the plugin installation, so a bare relative path would
+    otherwise write the user's configuration inside the plugin."""
+    from cirro_agent.worker import pipeline_ops
+    staged = pipeline_ops._staging_dir(
+        {"design_spec": _write_spec(tmp_path), "stage_dir": "config"})
+    assert staged == tmp_path / "config"
+
+
+def test_the_plan_says_where_the_copy_will_land(tmp_path, monkeypatch):
+    from cirro_agent.worker import pipeline_ops
+    from unittest.mock import MagicMock
+    reader = MagicMock()
+    reader.base_url = "app.cirro.test"
+    reader.username = "me@example.org"
+    reader.processes.return_value = [{"id": "p1", "owner": "me@example.org"}]
+    monkeypatch.setattr(pipeline_ops, "_owned_process",
+                        lambda _r, _p: {"name": "Demo", "id": "p1",
+                                        "config_source": pipeline_ops.STORAGE})
+    draft = pipeline_ops.plan_upload_process_config(
+        reader, {"process_id": "p1", "design_spec": _write_spec(tmp_path)})
+    assert str(tmp_path / pipeline_ops.STAGING_DIR) in draft.summary
+    assert draft.args["stage_dir"] == str(tmp_path / pipeline_ops.STAGING_DIR)
+
+
+def test_the_copy_is_written_only_after_cirro_accepts_it(tmp_path, monkeypatch):
+    """A staged copy is a record of what is live, not of what was attempted."""
+    from cirro_agent.worker import pipeline_ops
+    from unittest.mock import MagicMock
+    stage = tmp_path / pipeline_ops.STAGING_DIR
+    assets = {"process-form.json": '{"form": {}, "ui": {}}'}
+
+    reader = MagicMock()
+    rejected = MagicMock()
+    rejected.status_code = 403
+    monkeypatch.setattr(
+        "cirro_api_client.v1.api.processes.save_process_revision.sync_detailed",
+        lambda *a, **k: rejected)
+    with pytest.raises(errors.AgentError):
+        pipeline_ops.apply_upload_process_config(
+            reader, {"process_id": "p1", "assets": assets,
+                     "stage_dir": str(stage), "commit_message": "m"})
+    assert not stage.exists(), "a rejected upload must not leave a misleading copy"
+
+    accepted = MagicMock()
+    accepted.status_code = 200
+    accepted.parsed.revision_token = "7"
+    monkeypatch.setattr(
+        "cirro_api_client.v1.api.processes.save_process_revision.sync_detailed",
+        lambda *a, **k: accepted)
+    result = pipeline_ops.apply_upload_process_config(
+        reader, {"process_id": "p1", "assets": assets,
+                 "stage_dir": str(stage), "commit_message": "m"})
+    assert result["staged_to"] == str(stage)
+    assert (stage / "process-form.json").read_text() == assets["process-form.json"]
+
+
+def test_a_staging_failure_does_not_report_a_live_revision_as_failed(tmp_path,
+                                                                     monkeypatch):
+    """The revision is already committed upstream when staging runs.
+
+    Raising here made dispatch mark the plan failed and consume it, so the agent's
+    recovery was to re-plan and push a duplicate revision.
+    """
+    from cirro_agent.worker import pipeline_ops
+    from unittest.mock import MagicMock
+    blocked = tmp_path / "unwritable"
+    blocked.write_text("this is a file, so mkdir underneath it cannot work")
+
+    accepted = MagicMock()
+    accepted.status_code = 200
+    accepted.parsed.revision_token = "7"
+    monkeypatch.setattr(
+        "cirro_api_client.v1.api.processes.save_process_revision.sync_detailed",
+        lambda *a, **k: accepted)
+
+    result = pipeline_ops.apply_upload_process_config(
+        MagicMock(), {"process_id": "p1", "assets": {"process-form.json": "{}"},
+                      "stage_dir": str(blocked / "nested"), "commit_message": "m"})
+
+    assert result["revision_token"] == "7", "the upload succeeded and must say so"
+    assert result["staged"] == []
+    assert "the revision itself was accepted and is live" in result["omitted"][0]["note"]

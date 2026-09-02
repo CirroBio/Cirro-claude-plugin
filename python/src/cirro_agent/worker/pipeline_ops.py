@@ -358,6 +358,37 @@ def apply_create_process(reader: reads.Reader, args: dict) -> dict:
 # ------------------------------------------------------- upload / sync config
 
 
+STAGING_DIR = "pipeline-config"
+
+
+def _staging_dir(args: dict) -> Path:
+    """Where a copy of the uploaded configuration is kept for the user to read.
+
+    Uploading into Cirro storage otherwise leaves nothing on disk: the assets are
+    generated, sent and forgotten, and the only way to see what a pipeline is running
+    is to ask Cirro for it back. The copy goes beside the design spec that produced it,
+    next to the test plan -- not into the session folder, which is hidden, gitignored
+    and full of credentials.
+    """
+    beside_spec = Path(args["design_spec"]).expanduser().resolve().parent
+    override = args.get("stage_dir")
+    if not override:
+        return beside_spec / STAGING_DIR
+    chosen = Path(override).expanduser()
+    # The worker runs with cwd set to the plugin installation, not the user's
+    # directory, so a bare relative path would land inside the plugin. Anchor it to
+    # the spec instead, which is the only user-chosen location this op knows.
+    return chosen.resolve() if chosen.is_absolute() else (beside_spec / chosen).resolve()
+
+
+def _stage(directory: Path, assets: dict) -> list:
+    """Write the generated assets into a directory, returning the names written."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, text in sorted(assets.items()):
+        (directory / name).write_text(text, encoding="utf-8")
+    return sorted(assets)
+
+
 def plan_upload_process_config(reader: reads.Reader, args: dict) -> Draft:
     """STORAGE only: push the assets into Cirro as a new config revision."""
     _need(args, "upload_process_config", "process_id", "design_spec")
@@ -389,6 +420,7 @@ def plan_upload_process_config(reader: reads.Reader, args: dict) -> Draft:
     except Exception:
         token = None
 
+    staging = _staging_dir(args)
     changed, added = [], []
     for name, text in sorted(assets.items()):
         slot = formgen.SLOTS[name]
@@ -405,8 +437,11 @@ def plan_upload_process_config(reader: reads.Reader, args: dict) -> Draft:
         f"  Assets            {len(assets)}: {', '.join(sorted(assets))}",
         f"  New               {', '.join(added) or 'none'}",
         f"  Changed           {', '.join(changed) or 'none'}",
+        f"  Staged to         {staging}",
         "",
         "All slots go up in one revision, so the configuration is never half-applied.",
+        "A copy is kept in the folder above so you can read it later without asking "
+        "Cirro for it back.",
     ]
     warnings = [p["message"] for p in report["problems"] if p["level"] == "warning"]
     if token and not changed and not added:
@@ -414,6 +449,7 @@ def plan_upload_process_config(reader: reads.Reader, args: dict) -> Draft:
                         "no-op revision.")
     return Draft(
         args={"process_id": args["process_id"], "assets": assets, "if_match": token,
+              "stage_dir": str(staging),
               "commit_message": args.get("commit_message")
               or f"Configuration from {Path(args['design_spec']).name}"},
         summary="\n".join(lines), warnings=warnings,
@@ -476,9 +512,25 @@ def apply_upload_process_config(reader: reads.Reader, args: dict) -> dict:
             status_code=response.status_code,
         )
     token = R.plain(getattr(response.parsed, "revision_token", None))
-    return {"process_id": args["process_id"], "revision_token": token,
-            "slots": sorted(formgen.SLOTS[n] for n in args["assets"]),
-            "follow_with": {"verb": "process_config", "id": args["process_id"]}}
+    result = {"process_id": args["process_id"], "revision_token": token,
+              "slots": sorted(formgen.SLOTS[n] for n in args["assets"]),
+              "follow_with": {"verb": "process_config", "id": args["process_id"]}}
+    # Staged only after Cirro accepts, so the folder records what is live rather than
+    # what was attempted -- and never by raising: the revision is already committed
+    # upstream, so a local copy that cannot be written must not turn a successful
+    # upload into a reported failure the caller would retry.
+    stage_dir = args.get("stage_dir")
+    try:
+        result["staged"] = _stage(Path(stage_dir), args["assets"]) if stage_dir else []
+        result["staged_to"] = stage_dir
+    except OSError as exc:
+        result["staged"] = []
+        result["omitted"] = [{
+            "what": "the local copy of the uploaded configuration",
+            "why": f"{stage_dir}: {exc}",
+            "note": "the revision itself was accepted and is live",
+            "fix": {"verb": "process_config", "id": args["process_id"]}}]
+    return result
 
 
 def plan_sync_process_config(reader: reads.Reader, args: dict) -> Draft:
@@ -760,11 +812,7 @@ def plan_write_process_config(reader: reads.Reader, args: dict) -> Draft:
 
 def apply_write_process_config(reader: reads.Reader, args: dict) -> dict:
     destination = Path(args["destination"])
-    destination.mkdir(parents=True, exist_ok=True)
-    written = []
-    for name, text in sorted(args["assets"].items()):
-        (destination / name).write_text(text)
-        written.append(name)
+    written = _stage(destination, args["assets"])
     follow = {"tool": "plan", "op": "commit_process_config",
               "args": {"destination": args["destination"]}} if args.get("repo_root") \
         else None
