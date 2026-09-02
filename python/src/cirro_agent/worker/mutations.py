@@ -557,7 +557,7 @@ def _scan_folder(folder: Path, include_hidden: bool = False) -> tuple:
         if not path.is_file():
             continue
         relative = path.relative_to(folder).as_posix()
-        if not include_hidden and is_hidden_file(relative):
+        if not include_hidden and is_hidden_file(Path(relative)):
             continue
         found.append(relative)
         total += path.stat().st_size
