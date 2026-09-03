@@ -271,9 +271,13 @@ def test_spec_shape_declares_parameters_hidden_behind_a_selector():
                                 "qdnaseq_bin_size": {"type": "integer",
                                                      "default": 500}}},
                 {"properties": {"use_qdnaseq": {"enum": [False]}}}]}}}}}
+
+    class Model:  # what the generated client returns: a model with to_dict()
+        def to_dict(self):
+            return {"form": form, "ui": {}}
     reader = MagicMock()
     reader.client.processes.get_parameter_spec.return_value = SimpleNamespace(
-        form_spec_json=form)
+        form_spec_json=Model())
     defaults, declared, _required = reads.spec_shape(reader, "proc_x")
     assert "qdnaseq_bin_size" in declared
     assert defaults["qdnaseq_bin_size"] == 500

@@ -2,7 +2,7 @@
 from typing import Any
 from .. import errors
 from .. import local_reads
-from . import gated
+from . import (gated, read_chains)
 from . import auth, portal, read_listings, read_process, read_query, read_summaries
 
 
@@ -17,6 +17,7 @@ HANDLERS = {
     "workflow_spec": local_reads.do_workflow_spec,
     "check_config": local_reads.do_check_config,
     "task_logs": read_summaries.do_task_logs,
+    "chain_status": read_chains.do_chain_status,
     "login_start": auth.login_start,
     "login_wait": auth.login_wait,
     "login_daemon": auth.login_daemon,

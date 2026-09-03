@@ -441,12 +441,19 @@ def spec_shape(reader: Reader, process_id: Optional[str]) -> Tuple[dict, Optiona
         reader.cost.call("processes.parameter_spec")
     except Exception:
         return {}, None, None
-    form = getattr(spec, "form_spec_json", None) or {}
+    raw = getattr(spec, "form_spec_json", None)
+    # The SDK hands the spec back as a generated model, not a dict, and the document
+    # itself is the {form, ui} pair Cirro stores -- the schema is the `form` half.
+    # Neither was unwrapped before, so every parameter read as undeclared and
+    # run_analysis warned "usually a typo" on all of them.
+    form = raw.to_dict() if hasattr(raw, "to_dict") else raw
+    if isinstance(form, dict) and isinstance(form.get("form"), dict):
+        form = form["form"]
     if not isinstance(form, dict):
         return {}, None, None
     # formcheck owns the one correct walk over a form: conditional fields live inside
-    # dependencies.<selector>.oneOf[].properties, and walking `properties` alone --
-    # as this used to -- reported every conditional parameter as undeclared.
+    # dependencies.<selector>.oneOf[].properties, and walking `properties` alone
+    # reported every conditional parameter as undeclared.
     defaults, declared = {}, []
     for path, field in formcheck._iter_fields(form):
         if isinstance(field, dict) and field.get("type") == "object" \

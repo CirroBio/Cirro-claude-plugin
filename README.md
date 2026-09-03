@@ -71,7 +71,7 @@ cirro-agent read tasks -p "My Project" -d ds_123
 |---|---|
 | Structure | `projects`, `project`, `folders`, `describe`, `whoami`, `doctor` |
 | Datasets | `datasets`, `dataset`, `files`, `params`, `analysis-status` |
-| Runs | `logs`, `tasks`, `task-logs`, `trace` |
+| Runs | `logs`, `tasks`, `task-logs`, `trace`, `chain-status` |
 | Pipelines | `processes`, `process`, `process-params`, `process-config`, `workflow-spec`, `check-config` |
 | Project resources | `samples`, `references`, `reference-types`, `compute-envs`, `shares`, `workspaces`, `project-users`, `users` |
 
@@ -127,6 +127,9 @@ saw.
 launching a run can be approved together as a chain. Values a later step cannot know
 yet — the ID of a dataset the upload is about to create — appear as exactly that, not
 as a blank cheque. Deletions are never allowed inside a chain.
+
+`cirro-agent read chain-status` shows where a chained workflow stands — each attempt,
+what it produced, where it stopped — without opening anything in `.cirro/`.
 
 If a run fails and you approved a retry policy up front, the retry reuses what already
 succeeded and shows you only what changed:

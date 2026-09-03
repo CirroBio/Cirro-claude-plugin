@@ -187,6 +187,9 @@ def build_parser() -> argparse.ArgumentParser:
     add("workspaces", "interactive workspaces in a project", project=True)
     add("users", "users in this tenant")
     add("project-users", "members of a project and their roles", project=True)
+    chains = add("chain-status", "where a chained workflow stands: attempts, outputs, "
+                                 "where it stopped")
+    chains.add_argument("plan_id", nargs="?", help="a chain's plan_id; omit to list all")
     add("analysis-status", "current status of a run, always re-fetched",
         project=True, dataset=True)
     logs = add("logs", "summarize the workflow log", project=True, dataset=True)
@@ -253,6 +256,9 @@ def main(argv=None) -> int:
     if command == "dataset":
         return _run({"verb": "get", "entity": "dataset", "id": args.id,
                      "scope": _scope(args), "include": args.include or []}, args)
+
+    if command == "chain-status":
+        return _run(_common({"verb": "chain_status", "plan_id": args.plan_id}, args), args)
 
     if command == "analysis-status":
         request = {"verb": "get", "entity": "dataset", "id": args.dataset_id,
