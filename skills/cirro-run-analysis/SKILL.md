@@ -98,6 +98,27 @@ turned off, and you should not try.
 to track it. Do not poll in a loop here — the **cirro-monitor-analysis** skill owns
 that, including the re-fetch discipline a running dataset requires.
 
+## Running on data that is about to be uploaded
+
+If the data is not in Cirro yet, do not upload, wait, then plan the run as a second
+approval. Chain them:
+
+```
+plan(op="chain", args={"steps": [
+  {"label": "upload", "op": "upload_dataset",
+   "args": {"project_id": "proj_...", "process": "proc_ingest_...",
+            "name": "...", "source_dir": "/local/path", "folder": "..."}},
+  {"label": "run", "op": "run_analysis",
+   "args": {"project_id": "proj_...", "process": "proc_...", "name": "...",
+            "params": {...},
+            "source_dataset_ids": [{"from_step": 0, "field": "dataset_id"}]}},
+]})
+```
+
+The run's input is `<dataset_id of step 1: upload>` — resolved by the server from the
+upload's actual result, never supplied by you. One prompt instead of two, and the
+approval text still names every concrete value.
+
 ## Resuming a failed run
 
 ```

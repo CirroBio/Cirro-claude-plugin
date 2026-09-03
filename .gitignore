@@ -5,3 +5,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+
+# coverage data from pytest-cov
+.coverage
+.coverage.*
+htmlcov/

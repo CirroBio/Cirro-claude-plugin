@@ -321,3 +321,123 @@ def test_resuming_a_step_whose_predecessors_never_ran_is_refused(tmp_path):
         mutations.plan_chain(_reader_for(session), {
             "restart_from": {"plan_id": plan.plan_id, "label": "run", "attempt": 2}})
     assert "never completed" in caught.value.message
+
+
+# --- the executor ------------------------------------------------------------
+
+def _fake_ops(monkeypatch, log, *, fail_at=None, fail_with=None):
+    """Two chainable ops whose apply records what it received.
+
+    `producer` returns an id; `consumer` takes it. Both run their planner first, as
+    the real executor does, so a reference that failed to resolve would show up as
+    a planner refusal rather than as garbage handed to apply.
+    """
+    def plan_producer(reader, args):
+        return mutations.Draft(args=dict(args), summary="produce")
+
+    def apply_producer(reader, args):
+        log.append(("producer", args))
+        return {"made_id": f"made-{args['tag']}"}
+
+    def plan_consumer(reader, args):
+        if not isinstance(args.get("uses"), str) or not args["uses"].startswith("made-"):
+            raise errors.InvalidQuery("uses must be a produced id", what="w",
+                                      retry_with=[{"note": "n"}])
+        return mutations.Draft(args=dict(args), summary="consume")
+
+    def apply_consumer(reader, args):
+        log.append(("consumer", args))
+        if fail_at == "consumer":
+            raise fail_with or RuntimeError("consumer exploded")
+        return {"consumed": args["uses"]}
+
+    monkeypatch.setitem(mutations.OPS, "producer", mutations.Op(
+        "producer", mutations.RISK_WRITE, plan_producer, apply_producer,
+        outputs=("made_id",)))
+    monkeypatch.setitem(mutations.OPS, "consumer", mutations.Op(
+        "consumer", mutations.RISK_WRITE, plan_consumer, apply_consumer))
+
+
+def test_the_executor_feeds_each_step_what_the_one_before_it_produced(monkeypatch):
+    log = []
+    _fake_ops(monkeypatch, log)
+    result = mutations.apply_chain(None, {"steps": [
+        {"label": "make", "op": "producer", "args": {"tag": "alpha"}},
+        {"label": "use", "op": "consumer",
+         "args": {"uses": {"from_step": 0, "field": "made_id"}}},
+    ]})
+    assert log == [("producer", {"tag": "alpha"}), ("consumer", {"uses": "made-alpha"})]
+    assert result["n_completed"] == 2 and result["n_steps"] == 2
+    assert [s["label"] for s in result["completed"]] == ["make", "use"]
+    assert result["completed"][1]["result"] == {"consumed": "made-alpha"}
+    assert "failed_at" not in result
+
+
+def test_a_chain_that_fails_partway_reports_both_halves(monkeypatch):
+    """Raising would report the whole chain as failed while step 1 had already run."""
+    log = []
+    _fake_ops(monkeypatch, log, fail_at="consumer")
+    result = mutations.apply_chain(None, {"steps": [
+        {"label": "make", "op": "producer", "args": {"tag": "beta"}},
+        {"label": "use", "op": "consumer",
+         "args": {"uses": {"from_step": 0, "field": "made_id"}}},
+        {"label": "never", "op": "producer", "args": {"tag": "gamma"}},
+    ]})
+    assert result["n_completed"] == 1
+    assert result["failed_at"]["step"] == 2 and result["failed_at"]["label"] == "use"
+    assert "consumer exploded" in result["failed_at"]["error"]
+    assert "steps 3-3 did not run" in result["note"]
+    assert [entry[0] for entry in log] == ["producer", "consumer"], \
+        "the step after the failure must not run"
+
+
+def test_a_chain_that_fails_at_its_first_step_is_an_error_because_nothing_changed(
+        monkeypatch):
+    log = []
+    _fake_ops(monkeypatch, log)
+    with pytest.raises(errors.AgentError) as caught:
+        mutations.apply_chain(None, {"steps": [
+            {"label": "use", "op": "consumer", "args": {"uses": "not-a-produced-id"}},
+        ]})
+    assert caught.value.code == "UPSTREAM_ERROR"
+    assert caught.value.user_action == "Nothing was changed."
+    assert log == [], "the planner refused, so apply never ran"
+
+
+def test_a_typed_refusal_mid_chain_keeps_its_code(monkeypatch):
+    log = []
+    _fake_ops(monkeypatch, log,
+              fail_at="consumer",
+              fail_with=errors.Forbidden("not yours", what="w", user_action="ask"))
+    result = mutations.apply_chain(None, {"steps": [
+        {"op": "producer", "args": {"tag": "d"}},
+        {"op": "consumer", "args": {"uses": {"from_step": 0, "field": "made_id"}}},
+    ]})
+    assert result["failed_at"]["code"] == "FORBIDDEN"
+
+
+def test_a_resumed_chain_starts_from_the_carried_outputs(monkeypatch):
+    """Step numbering and references both continue from where the earlier run stopped."""
+    log = []
+    _fake_ops(monkeypatch, log)
+    result = mutations.apply_chain(None, {
+        "carried": [{"made_id": "made-from-before"}],
+        "steps": [
+            {"label": "use", "op": "consumer",
+             "args": {"uses": {"from_step": 0, "field": "made_id"}}},
+        ]})
+    assert log == [("consumer", {"uses": "made-from-before"})]
+    assert result["completed"][0]["step"] == 2, "numbered after the carried step"
+
+
+def test_the_executor_never_takes_a_value_from_the_caller_for_a_reference(monkeypatch):
+    """The substitution source is the recorded output list and nothing else."""
+    log = []
+    _fake_ops(monkeypatch, log)
+    result = mutations.apply_chain(None, {"steps": [
+        {"op": "producer", "args": {"tag": "real"}},
+        {"op": "consumer", "args": {"uses": {"from_step": 0, "field": "made_id",
+                                             "value": "made-injected"}}},
+    ]})
+    assert log[1] == ("consumer", {"uses": "made-real"})
+    assert result["n_completed"] == 2

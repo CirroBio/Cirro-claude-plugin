@@ -298,6 +298,11 @@ claude --plugin-dir ./
 `python/tests/test_readme_current.py` fails when this file falls out of step with the
 code, so drift breaks the build rather than accumulating.
 
+CI (`.github/workflows/ci.yml`) runs the tests, the lint, and `claude plugin validate`
+on every push, and again weekly so a new `cirro` release that breaks the pinned client
+is caught by `test_runtime_contract.py` rather than by a user. Coverage has a floor
+that only moves up.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

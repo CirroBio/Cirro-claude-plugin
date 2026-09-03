@@ -1,0 +1,50 @@
+# Every safety property of this plugin is a test: the README drift guard, the check
+# that no SDK write method is ungated, the runtime contract against the pinned
+# cirro-api-client, the hook's digest agreement with plans.py. None of them protect
+# anything unless they run without anyone remembering to run them.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so a new cirro or cirro-api-client release that breaks the pinned
+    # contract is caught by test_runtime_contract.py rather than by a user.
+    - cron: "17 6 * * 1"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.5.16"
+
+      - name: Build the pinned runtime
+        run: UV_PROJECT_ENVIRONMENT="$PWD/.dev-venv" uv sync --locked --python 3.12 --project runtime --group dev
+
+      - name: Lint
+        run: .dev-venv/bin/python -m flake8 python/src python/tests scripts/gate.py
+
+      - name: Test
+        # The coverage floor is a ratchet, not a target: it sits just under the
+        # measured figure so a change that drops coverage fails, and it only moves up.
+        run: PYTHONPATH=python/src .dev-venv/bin/python -m pytest python/tests -q --cov=cirro_agent --cov-report=term-missing:skip-covered --cov-fail-under=65
+
+      - name: The gate runs without the virtualenv
+        # scripts/gate.py is a PreToolUse hook and must work with a bare system Python;
+        # it is what earns the "no bypass through Bash" claim.
+        run: python3 -c "import ast, sys; ast.parse(open('scripts/gate.py').read()); print('gate parses under', sys.version)"
+
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate the plugin manifest
+        run: npx --yes @anthropic-ai/claude-code@latest plugin validate ./

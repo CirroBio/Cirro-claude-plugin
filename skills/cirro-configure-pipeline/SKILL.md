@@ -112,6 +112,58 @@ an unauthorized repository, and a failed sync means Cirro is quietly running old
 configuration than the repo contains. A private repository needs the Cirro GitHub app
 authorized — a user action, not something the plugin can do.
 
+## One approval for the whole thing
+
+Registering, uploading test data and launching the first run is one intention, so ask
+for it once. `plan(op="chain", ...)` approves the sequence as one action:
+
+```
+plan(op="chain", args={"steps": [
+  {"label": "register",  "op": "create_process",
+   "args": {"design_spec": "design-spec.md", "config_source": "STORAGE"}},
+  {"label": "configure", "op": "upload_process_config",
+   "args": {"process_id": {"from_step": 0, "field": "created_process_id"},
+            "design_spec": "design-spec.md"}},
+  {"label": "upload",    "op": "upload_dataset",
+   "args": {"project_id": "proj_...", "process": "proc_ingest_...",
+            "name": "wf test data", "source_dir": "test-data/", "folder": "Test"}},
+  {"label": "run",       "op": "run_analysis",
+   "args": {"project_id": "proj_...",
+            "process": {"from_step": 0, "field": "created_process_id"},
+            "name": "wf test run", "params": {...},
+            "source_dataset_ids": [{"from_step": 2, "field": "dataset_id"}]}},
+ ],
+ "retry": {"redo": ["configure", "run"], "max_attempts": 3,
+           "may_change": ["design_spec"]}})
+```
+
+A value a later step cannot know yet — the process id step 1 creates, the dataset id
+step 3 creates — is written as `{"from_step": N, "field": "..."}`. The server fills it
+in from what that step actually returned. It is not a wildcard, and the approval shows
+it as exactly what it is: `<dataset_id of step 3: upload>`.
+
+Waiting for the run is free: `analysis-status`, `tasks` and `logs` are ungated reads.
+Downloading results afterwards is an ordinary plan, because by then the dataset exists.
+
+**When the run fails**, do not re-plan the whole chain. Diagnose from `tasks` and
+`logs`, fix the design spec, validate it with `check-config`, then resume:
+
+```
+plan(op="chain", args={
+  "restart_from": {"plan_id": "<the chain's plan_id>", "label": "configure",
+                   "attempt": 2},
+  "steps": [<the same steps, with the changed design_spec>]})
+```
+
+That reuses the uploaded test data and shows the user only what changed since the
+attempt they approved. The `retry` policy bounds it: only `may_change` fields may
+differ, `max_attempts` is a ceiling, and an attempt identical to the last one is
+flagged as pointless before anyone spends compute on it. Each attempt still asks —
+that click is the one place a human should be, in front of a decision that costs money.
+
+A chain refuses `archive_process` and every other destructive operation. Tearing
+something down is its own approval, always.
+
 ## Preprocess scripts
 
 Only if the workflow needs its inputs transformed before launch — and always for
