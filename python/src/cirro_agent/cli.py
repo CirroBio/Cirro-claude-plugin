@@ -17,12 +17,6 @@ READ_VERBS = frozenset({"query", "get", "summarize", "describe", "list",
                         "task_logs", "whoami"})
 
 
-def reads_config_slots() -> tuple:
-    """Asset slot names, from the worker's own list so the two cannot drift."""
-    from .worker.reads import CONFIG_SLOTS
-    return CONFIG_SLOTS
-
-
 def _emit(payload: dict) -> int:
     json.dump(payload, sys.stdout, indent=2, default=str)
     sys.stdout.write("\n")
@@ -175,7 +169,8 @@ def build_parser() -> argparse.ArgumentParser:
         "id", help="process name or ID")
     pc = add("process-config", "a process's configuration assets and where they live")
     pc.add_argument("id", help="process ID")
-    pc.add_argument("--slot", choices=list(reads_config_slots()),
+    from .worker.read_process import CONFIG_SLOTS
+    pc.add_argument("--slot", choices=list(CONFIG_SLOTS),
                     help="limit to one asset slot")
     pc.add_argument("--raw", action="store_true",
                     help="include verbatim file contents")
@@ -309,31 +304,31 @@ def main(argv=None) -> int:
 
     if command == "workflow-spec":
         # A local parse: no session, auth or network needed for a checkout on disk.
-        from .worker import read_process
+        from . import local_reads
         request = _common({"verb": "workflow_spec", "target": args.target,
                            "ref": args.ref, "group": args.group,
                            "include_hidden": args.include_hidden,
                            "cache_root": str(runner.plugin_data())}, args)
         try:
-            return _emit(read_process.do_workflow_spec(request))
+            return _emit(local_reads.do_workflow_spec(request))
         except errors.AgentError as exc:
             return _emit(exc.to_dict())
 
     if command == "check-config":
         # Local validation: no session, auth or network needed.
-        from .worker import read_process
+        from . import local_reads
         request = _common({"verb": "check_config", "path": args.path}, args)
         try:
-            return _emit(read_process.do_check_config(request))
+            return _emit(local_reads.do_check_config(request))
         except errors.AgentError as exc:
             return _emit(exc.to_dict())
 
     if command == "describe":
         # Static catalog: no session, auth or network needed, so answer directly.
-        from .worker import read_query
+        from . import local_reads
         request = _common({"verb": "describe", "entity": args.entity}, args)
         try:
-            return _emit(read_query.do_describe(request))
+            return _emit(local_reads.do_describe(request))
         except errors.AgentError as exc:
             return _emit(exc.to_dict())
 

@@ -150,8 +150,7 @@ Downloading results afterwards is an ordinary plan, because by then the dataset 
 
 ```
 plan(op="chain", args={
-  "restart_from": {"plan_id": "<the chain's plan_id>", "label": "configure",
-                   "attempt": 2},
+  "restart_from": {"plan_id": "<the chain's plan_id>", "label": "configure"},
   "steps": [<the same steps, with the changed design_spec>]})
 ```
 

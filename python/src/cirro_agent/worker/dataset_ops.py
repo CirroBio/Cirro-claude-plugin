@@ -7,12 +7,10 @@ why the registration lives on this side.
 import shutil
 from pathlib import Path
 from typing import Optional
-
 from .. import errors, summarize as S
 from . import mutations, reads, rows as R
 from .mutations import (Draft, Op, RISK_WRITE, RISK_DESTRUCTIVE, RISK_LOCAL, _inv, _need,
-                        _project, _dataset, _derived_from, _process, _target_folders,
-                        _wire_tags)
+                        _project, _dataset, _target_folders, _wire_tags)
 
 
 def _dataset_edit(row: dict, args: dict) -> Optional[dict]:
@@ -204,7 +202,7 @@ def plan_delete_dataset(reader: reads.Reader, args: dict) -> Draft:
     project = _project(reader, args)
     row = _dataset(reader, project["id"], args["dataset_id"])
     count = reads.file_count(reader, project["id"], row["id"])
-    detail = reads._detail(reader, project["id"], row["id"], row)
+    detail = reads.dataset_detail(reader, project["id"], row["id"], row)
     derived = _derived_from(reader, project["id"], row["id"])
 
     warnings = []
@@ -316,7 +314,7 @@ def plan_upload_dataset(reader: reads.Reader, args: dict) -> Draft:
     # lands in. Both were once called `folder`, which made one of the two a footgun.
     _need(args, "upload_dataset", "name", "process", "source_dir")
     project = _project(reader, args)
-    process = _process(reader, args["process"], ingest=True)
+    process = reader.resolve_process(args["process"], ingest=True)
     source_dir = Path(args["source_dir"]).expanduser().resolve()
     if not source_dir.is_dir():
         raise errors.InvalidQuery(
@@ -483,7 +481,7 @@ def plan_download_files(reader: reads.Reader, args: dict) -> Draft:
     _need(args, "download_files", "dataset_id", "destination")
     project = _project(reader, args)
     row = _dataset(reader, project["id"], args["dataset_id"])
-    entries, total, _artifacts = reads._manifest(
+    entries, total, _artifacts = reads.dataset_manifest(
         reader, project["id"], row["id"],
         is_terminal=bool(row.get("is_terminal")))
     capped = total is not None and len(entries) < total
@@ -561,3 +559,10 @@ DATASET_OPS = [
 ]
 
 mutations.OPS.update({op.name: op for op in DATASET_OPS})
+
+
+def _derived_from(reader: reads.Reader, project_id: str, dataset_id: str) -> list:
+    """Reverse-scan the project for datasets that list this one as a parent."""
+    datasets, _ = reader.datasets(project_id)
+    return [{"id": d["id"], "name": d["name"]}
+            for d in datasets if dataset_id in (d.get("source_dataset_ids") or [])]

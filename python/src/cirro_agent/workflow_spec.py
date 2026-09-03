@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from .. import errors
+from . import errors
 
 NEXTFLOW = "NEXTFLOW"
 CROMWELL = "CROMWELL"

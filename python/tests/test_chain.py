@@ -222,10 +222,13 @@ def _labelled_steps():
 
 
 def _reader_for(session):
+    """A stand-in Reader: the real one derives `session` from the request; a MagicMock
+    would hand back another MagicMock, so it is set explicitly."""
     from unittest.mock import MagicMock
     reader = MagicMock()
     reader.base_url = session.base_url
     reader.session_dir = str(session.path)
+    reader.session = session
     return reader
 
 

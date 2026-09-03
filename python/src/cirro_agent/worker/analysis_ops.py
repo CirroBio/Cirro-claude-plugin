@@ -7,14 +7,14 @@ why the registration lives on this side.
 
 from .. import errors, summarize as S
 from . import mutations, reads, rows as R
-from .mutations import (Draft, Op, RISK_WRITE, _inv, _need, _project, _dataset, _process,
-                        _validate_params, _target_folders, _wire_tags)
+from .mutations import (Draft, Op, RISK_WRITE, _inv, _need, _project, _dataset,
+                        _target_folders, _wire_tags)
 
 
 def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
     _need(args, "run_analysis", "name", "process")
     project = _project(reader, args)
-    process = _process(reader, args["process"], ingest=False)
+    process = reader.resolve_process(args["process"], ingest=False)
     if process["is_archived"]:
         raise errors.WrongStatus(
             f"Process {process['name']!r} is archived and cannot be run.",
@@ -38,7 +38,7 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
     for dataset_id in source_ids:
         row = _dataset(reader, project["id"], dataset_id)
         count = reads.file_count(reader, project["id"], row["id"])
-        detail = reads._detail(reader, project["id"], row["id"], row)
+        detail = reads.dataset_detail(reader, project["id"], row["id"], row)
         total_files += count or 0
         total_bytes += detail.get("total_size_bytes") or 0
         inputs.append({"id": row["id"], "name": row["name"], "file_count": count,
@@ -147,7 +147,7 @@ def plan_resume_analysis(reader: reads.Reader, args: dict) -> Draft:
     _need(args, "resume_analysis", "resume_dataset_id")
     project = _project(reader, args)
     previous = _dataset(reader, project["id"], args["resume_dataset_id"])
-    detail = reads._detail(reader, project["id"], previous["id"], previous)
+    detail = reads.dataset_detail(reader, project["id"], previous["id"], previous)
     merged = dict(args)
     merged.setdefault("name", f"{previous['name']} (resumed)")
     merged.setdefault("process", detail.get("process_id"))
@@ -201,3 +201,40 @@ ANALYSIS_OPS = [
 ]
 
 mutations.OPS.update({op.name: op for op in ANALYSIS_OPS})
+
+
+def _validate_params(reader: reads.Reader, process_id: str, params: dict) -> list:
+    """Validate against the spec, and report undeclared keys separately.
+
+    jsonschema will not flag an unknown key unless the schema sets
+    additionalProperties:false, so a typo silently does nothing. Finding that out
+    six hours into a pipeline is the expensive version of this check.
+    """
+    warnings = []
+    try:
+        spec = reader.client.processes.get_parameter_spec(process_id=process_id)
+        reader.cost.call("processes.parameter_spec")
+    except Exception as exc:
+        return [f"Could not load the parameter spec for validation: {exc}"]
+    try:
+        spec.validate_params(params or {})
+    except Exception as exc:
+        raise errors.InvalidQuery(
+            f"Parameters rejected by the process spec: {exc}",
+            what="Fix the parameters before planning again.",
+            field="params", given=params,
+            retry_with=[{"verb": "get", "entity": "process", "id": process_id},
+                        {"verb": "summarize", "of": "params",
+                         "note": "inspect a previous run's params for a working shape"}],
+        )
+    defaults, declared, required = reads.spec_shape(reader, process_id)
+    if declared is not None:
+        unknown = [k for k in (params or {}) if k not in set(declared)]
+        if unknown:
+            warnings.append(
+                f"Parameters not declared by this process and therefore ignored: "
+                f"{sorted(unknown)} -- usually a typo")
+    missing = [k for k in (required or []) if k not in (params or {})]
+    if missing:
+        warnings.append(f"Required parameters absent: {sorted(missing)}")
+    return warnings

@@ -64,7 +64,8 @@ plan(op="run_analysis", args={
 
 `plan` changes nothing. It resolves names to IDs, validates the parameters against the
 spec, counts the input files and bytes, resolves the compute environment, and returns
-a `rendered` summary plus a single-use `plan_id` that expires in ten minutes.
+a `rendered` summary plus a single-use `plan_id`. It is good for an hour, and
+`apply` re-checks the figures first, refusing if anything you read has changed.
 
 If `plan` returns an error, fix the cause and plan again. Do not attempt `apply`.
 

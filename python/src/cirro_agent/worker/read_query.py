@@ -3,11 +3,10 @@ fully fetched match set, and single-entity reads.
 """
 from typing import Tuple
 from .. import errors, query as Q, schema, summarize as S
-from ..envelope import (CONTRACT, Counts, DEFAULT_MAX_TOKENS, ROWS_ABSENT, build,
-                        estimate_tokens)
+from ..envelope import Counts, DEFAULT_MAX_TOKENS, ROWS_ABSENT, build
 from . import rows as R
-from .reads import (DETAIL_BUDGET, Reader, file_count, _DERIVED_COMPANIONS, _detail,
-                    _is_terminal, _manifest, _near_misses, _process_detail, _sorted, _tasks)
+from .reads import (Reader, dataset_detail, dataset_manifest, dataset_tasks, file_count,
+                    is_terminal, process_detail, resolve_named)
 
 
 def _lineage(rows: list) -> dict:
@@ -61,12 +60,12 @@ def _collect(reader: Reader, entity: str, request: dict) -> Tuple[list, bool, di
                 retry_with=[{"entity": "dataset", "scope": {"project_ids": project_ids}}],
             )
         if entity == "file":
-            entries, total, _artifacts = _manifest(
+            entries, total, _artifacts = dataset_manifest(
                 reader, project_ids[0], dataset_id,
-                is_terminal=_is_terminal(reader, project_ids[0], dataset_id))
+                is_terminal=is_terminal(reader, project_ids[0], dataset_id))
             return entries, len(entries) >= (total or 0), {"project_ids": project_ids,
                                                            "dataset_id": dataset_id}
-        task_rows = _tasks(reader, project_ids[0], dataset_id)
+        task_rows = dataset_tasks(reader, project_ids[0], dataset_id)
         return task_rows, True, {"project_ids": project_ids, "dataset_id": dataset_id}
 
     project_ids = reader.scope_project_ids(scope)
@@ -143,7 +142,7 @@ def _apply_include(reader: Reader, entity: str, matched: list, include: list,
                 retry_with=[{"confirm_detail_cost": True}],
             )
         for row in matched:
-            row.update(_process_detail(reader, row["id"], row))
+            row.update(process_detail(reader, row["id"], row))
         return granted, notes
 
     if entity != "dataset":
@@ -154,7 +153,7 @@ def _apply_include(reader: Reader, entity: str, matched: list, include: list,
     for row in matched:
         project_id = row.get("project_id") or (project_ids[0] if project_ids else None)
         if wants_detail:
-            row.update(_detail(reader, project_id, row["id"], row))
+            row.update(dataset_detail(reader, project_id, row["id"], row))
         elif wants_probe and "file_count" in include:
             row["file_count"] = file_count(reader, project_id, row["id"])
     if wants_detail and wants_probe:
@@ -306,36 +305,6 @@ def do_get(request: dict) -> dict:
                  max_tokens=int(request.get("max_tokens") or DEFAULT_MAX_TOKENS["get"]))
 
 
-def _resolve_one(entity: str, given: str, scanned: list, spec: schema.EntitySpec,
-                 scope_echo: dict) -> dict:
-    for row in scanned:
-        if row.get("id") == given:
-            return row
-    exact = [r for r in scanned if r.get("name") == given]
-    if len(exact) == 1:
-        return exact[0]
-    if len(exact) > 1:
-        raise errors.AmbiguousName(
-            f"{len(exact)} {entity}s are named {given!r}. Names are not unique.",
-            what="Use the ID.", field="id", given=given,
-            candidates=[{"id": r.get("id"), "name": r.get("name"),
-                         "created_at": r.get("created_at"),
-                         "created_by": r.get("created_by")} for r in exact[:10]],
-            retry_with=[{"verb": "get", "entity": entity, "id": r.get("id"),
-                         "scope": scope_echo} for r in exact[:5]],
-        )
-    near = _near_misses(given, [r.get("name") or "" for r in scanned])
-    raise errors.NotFound(
-        f"No {entity} matches {given!r} in this scope.",
-        what="Check the name, or widen the scope.",
-        field="id", given=given,
-        candidates=[{"name": name} for name in near],
-        retry_with=[{"verb": "query", "entity": entity, "scope": scope_echo}]
-        + [{"verb": "get", "entity": entity, "name": name, "scope": scope_echo}
-           for name in near[:3]],
-    )
-
-
 def _project_storage(reader: Reader, project_id: str) -> dict:
     try:
         metrics = reader.client.metrics.get_for_project(project_id=project_id)
@@ -360,50 +329,50 @@ def _project_storage(reader: Reader, project_id: str) -> dict:
     }
 
 
-def do_describe(request: dict) -> dict:
-    entity = request.get("entity", "dataset")
-    spec = schema.get(entity)
-    fields = [
-        {"field": name, "tier": tier, "means": doc}
-        for name, (tier, doc) in spec.fields.items()
-    ]
-    body = {
-        "ok": True,
-        "api": {"contract": CONTRACT},
-        "query": {"verb": "describe", "entity": entity},
-        "result": {
-            "entity": entity,
-            "id_prefix": spec.id_prefix,
-            "scoped_by_project": spec.scoped_by_project,
-            "date_field": spec.date_field,
-            "fields": fields,
-            "tiers": {
-                "list": "free -- already in the paged listing",
-                "derived": "free -- computed locally from list fields",
-                "probe": "one small API call per row",
-                "detail": "one full API call per row; gated above "
-                          f"{DETAIL_BUDGET} matched rows",
-                "manifest": "one or more calls per row, response can be enormous",
-                "execution": "as manifest, and only for some executors",
-            },
-            "projections": spec.projections,
-            "facets_computed": spec.facet_priority,
-            "text_fields_for_q": spec.text_fields,
-            "default_sort": spec.default_sort,
-            "operators": sorted(Q.OPS),
-            "status_classes": Q.STATUS_CLASSES,
-            "date_expressions": ["2026-08-01", "2026-08-01T00:00:00Z", "last-7d",
-                                 "last-3m", "2026-Q2", "2026-08", "2026", "today",
-                                 "yesterday"],
-            "person_expressions": ["@me", "a literal username"],
-            "size_expressions": ["10GB", "10GiB", "10000000000"],
-            "shorthand_example": "status:FAILED created:last-7d owner:@me name~*RNAseq*",
-            "group_by_bins": ["created_at:day|week|month|quarter|year",
-                              "total_size_bytes:log2", "status:class"],
-        },
-        "cost": {"api_calls": 0, "by_kind": {}, "note": "static catalog"},
-    }
-    body["budget"] = {"max_tokens": int(request.get("max_tokens")
-                                        or DEFAULT_MAX_TOKENS["describe"]),
-                      "used_est": estimate_tokens(body), "degraded": []}
-    return body
+def _resolve_one(entity: str, given: str, scanned: list, spec: schema.EntitySpec,
+                 scope_echo: dict) -> dict:
+    return resolve_named(
+        scanned, given, entity=entity, field="id",
+        brief=lambda r: {"id": r.get("id"), "name": r.get("name"),
+                         "created_at": r.get("created_at"),
+                         "created_by": r.get("created_by")},
+        retry=lambda r: {"verb": "get", "entity": entity, "id": r.get("id"),
+                         "scope": scope_echo},
+        near_retry=lambda near: ([{"verb": "query", "entity": entity, "scope": scope_echo}]
+                                 + [{"verb": "get", "entity": entity, "name": n,
+                                     "scope": scope_echo} for n in near[:3]]),
+        missing_what="Check the name, or widen the scope.",
+    )
+
+
+# Fields that are free once their source field has been fetched, so they should
+# travel with it rather than being requested separately.
+_DERIVED_COMPANIONS = {"total_size_bytes": ["total_size_human"]}
+
+
+# `include` on a detail-or-worse tier costs one call per row, so it is gated.
+DETAIL_BUDGET = 25
+
+
+def _sorted(rows: list, sort: list, spec: schema.EntitySpec) -> list:
+    """Sort numerics numerically.
+
+    Stringifying every key made `total_size_bytes`, `file_count`, `exit_code` and
+    `task_id` sort lexicographically, so 9000 came before 10000.
+    """
+    def ordering(field: str):
+        def key(row):
+            value = row.get(field)
+            if value is None:
+                return (2, 0.0, "")
+            if isinstance(value, bool):
+                return (1, float(value), "")
+            if isinstance(value, (int, float)):
+                return (0, float(value), "")
+            return (1, 0.0, str(value))
+        return key
+
+    for entry in reversed(sort or spec.default_sort):
+        descending = entry.startswith("-")
+        rows = sorted(rows, key=ordering(entry.lstrip("-")), reverse=descending)
+    return rows

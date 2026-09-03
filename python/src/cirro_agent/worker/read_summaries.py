@@ -4,8 +4,10 @@ files, logs, tasks, samples, parameters, trace.
 from typing import Optional
 from .. import errors, summarize as S
 from ..envelope import DEFAULT_MAX_TOKENS
-from .reads import (MANIFEST_LIST_LIMIT, Reader, SUMMARIZERS, _detail, _is_terminal, _manifest,
-                    _raw_slice, _spec_shape, _summary_envelope, _tasks)
+from .reads import (MANIFEST_LIST_LIMIT, Reader, dataset_detail, dataset_manifest,
+                    dataset_tasks, is_terminal, spec_shape)
+from ..envelope import CONTRACT
+from ..envelope import estimate_tokens
 
 
 def do_summarize(request: dict) -> dict:
@@ -61,9 +63,9 @@ def do_summarize(request: dict) -> dict:
 
     if of == "files":
         limit = int(request.get("file_limit") or MANIFEST_LIST_LIMIT)
-        entries, total, artifacts = _manifest(
+        entries, total, artifacts = dataset_manifest(
             reader, project_id, dataset_id, file_limit=limit,
-            is_terminal=_is_terminal(reader, project_id, dataset_id))
+            is_terminal=is_terminal(reader, project_id, dataset_id))
         all_entries = entries
         glob = request.get("glob")
         if glob:
@@ -109,7 +111,7 @@ def do_summarize(request: dict) -> dict:
                                  max_tokens, next_calls=next_calls)
 
     if of == "tasks":
-        task_rows = _tasks(reader, project_id, dataset_id)
+        task_rows = dataset_tasks(reader, project_id, dataset_id)
         primary = _primary_failed_index(reader, project_id, dataset_id, task_rows)
         body = S.tasks(task_rows, primary_failed_index=primary)
         reader.cost.strategy = "execution_live"
@@ -131,8 +133,8 @@ def do_summarize(request: dict) -> dict:
                                  max_tokens, next_calls=next_calls)
 
     if of == "params":
-        row = _detail(reader, project_id, dataset_id)
-        defaults, declared, required = _spec_shape(reader, row.get("process_id"))
+        row = dataset_detail(reader, project_id, dataset_id)
+        defaults, declared, required = spec_shape(reader, row.get("process_id"))
         body = S.params(row.get("params") or {}, defaults=defaults, declared=declared,
                         required=required)
         body["process"] = row.get("process")
@@ -210,7 +212,7 @@ def do_task_logs(request: dict) -> dict:
         )
     # task_id is the caller-facing 0-based index into the task list; the API wants the
     # underlying batch job id, so resolve one to the other before calling.
-    task_rows = _tasks(reader, project_id, dataset_id)
+    task_rows = dataset_tasks(reader, project_id, dataset_id)
     try:
         wanted = int(task_id)
     except (TypeError, ValueError):
@@ -247,3 +249,60 @@ def do_task_logs(request: dict) -> dict:
                               "task_id": task_id},
                              int(request.get("max_tokens")
                                  or DEFAULT_MAX_TOKENS["summarize"]), next_calls=[])
+
+
+SUMMARIZERS = ("files", "logs", "tasks", "samples", "params", "trace")
+
+
+def _raw_slice(text: str, request: dict) -> dict:
+    line_range = request.get("line_range")
+    byte_range = request.get("byte_range")
+    if line_range:
+        lines = text.splitlines()
+        # 1-based and clamped: a 0 start would index from the end of the list.
+        start = max(1, int(line_range[0]))
+        end = max(start, int(line_range[1]))
+        return {"line_range": [start, end], "text": "\n".join(lines[start - 1:end])}
+    if byte_range:
+        start, end = int(byte_range[0]), int(byte_range[1])
+        return {"byte_range": [start, end], "text": text[start:end]}
+    raise errors.InvalidQuery(
+        "raw=true needs a line_range or byte_range.",
+        what="Raw log text is only served in bounded slices.",
+        field="raw",
+        retry_with=[{"verb": "summarize", "of": "logs", "raw": True,
+                     "line_range": [1, 200]}],
+    )
+
+
+def _summary_envelope(reader: Reader, request: dict, of: str, body: dict,
+                      complete: bool, scope_echo: dict, max_tokens: int,
+                      next_calls: list) -> dict:
+    envelope = {
+        "ok": True,
+        "api": {"contract": CONTRACT},
+        "query": {"verb": "summarize", "of": of, "scope": scope_echo,
+                  "dataset_id": request.get("dataset_id")},
+        "result": {"summary_of": of, "scan_complete": complete, of: body,
+                   "next_calls": next_calls},
+        "cost": reader.cost.to_dict(),
+        "budget": {"max_tokens": max_tokens, "degraded": []},
+    }
+    # Summaries are already collapsed; if one still overruns, drop the most verbose
+    # sections in a fixed order rather than cutting a structure open.
+    shrinkable = {
+        "files": ["tree", "largest", "extensions", "name_patterns"],
+        "logs": ["head", "signature_counts", "tail", "error_blocks"],
+        "tasks": ["retries", "counts_by_process", "failed"],
+        "samples": ["examples", "inconsistencies", "keys"],
+        "params": ["defaulted_keys"],
+        "trace": ["processes"],
+    }.get(of, [])
+    for key in shrinkable:
+        if estimate_tokens(envelope) <= max_tokens:
+            break
+        if key in body:
+            body.pop(key)
+            envelope["budget"]["degraded"].append({"what": f"{of}.{key}", "to": "dropped"})
+    envelope["budget"]["used_est"] = estimate_tokens(envelope)
+    return envelope

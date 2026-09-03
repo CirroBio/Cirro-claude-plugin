@@ -11,12 +11,12 @@ Registers its operations into `mutations.OPS` on import; see mutations.py for wh
 registration lives on this side.
 """
 from typing import Iterator, Optional
-
 from .. import errors, plans
-from ..session import Session
 from . import mutations, portal, reads
-from .mutations import (Draft, Op, RISK_DESTRUCTIVE, RISK_LOCAL, RISK_WRITE,
-                        RISK_WRITE_LOCAL, _inv, get_op)
+from .mutations import (Draft, Op, RISK_DESTRUCTIVE, RISK_LOCAL, RISK_WRITE, RISK_WRITE_LOCAL,
+                        _inv, get_op)
+from ..session import Session
+
 
 # Reviewability bounds. Eight steps is about what one approval can be read in full;
 # past five attempts a "retry" has stopped being a fix and become a compute budget.
@@ -308,10 +308,6 @@ def plan_chain(reader: reads.Reader, args: dict) -> Draft:
 # ----------------------------------------------------------------------- restarts
 
 
-def _session(reader: reads.Reader) -> Session:
-    return Session(base_url=reader.base_url, dir=reader.session_dir)
-
-
 def _restart_request(args: dict) -> dict:
     request = args.get("restart_from")
     if not isinstance(request, dict) or not request.get("plan_id") \
@@ -489,7 +485,7 @@ def _plan_restart(reader: reads.Reader, args: dict) -> Draft:
     from the attempt before -- checked against the same rules as a fresh chain.
     """
     request = _restart_request(args)
-    session = _session(reader)
+    session = reader.session
     root, attempts = _lineage(session, request["plan_id"])
     policy = root.args.get("retry")
     if not policy:

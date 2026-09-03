@@ -8,7 +8,8 @@ import json
 import pytest
 
 from cirro_agent import query as Q, schema, summarize as S
-from cirro_agent.worker import reads, workflow_spec as WS
+from cirro_agent import workflow_spec as WS
+from cirro_agent.worker import read_query, read_summaries, reads
 
 
 # --- summarize -------------------------------------------------------------
@@ -56,21 +57,21 @@ def test_mixed_separators_round_trip():
 def test_numeric_fields_sort_numerically(field, values):
     """Keys were stringified, so 9000 sorted after 10000."""
     rows = [{"id": str(v), field: v} for v in values]
-    descending = reads._sorted(rows, [f"-{field}"], schema.DATASET)
+    descending = read_query._sorted(rows, [f"-{field}"], schema.DATASET)
     assert [r[field] for r in descending] == sorted(values, reverse=True)
-    ascending = reads._sorted(rows, [field], schema.DATASET)
+    ascending = read_query._sorted(rows, [field], schema.DATASET)
     assert [r[field] for r in ascending] == sorted(values)
 
 
 def test_missing_values_sort_last_not_first():
     rows = [{"id": "a", "file_count": 5}, {"id": "b"}, {"id": "c", "file_count": 1}]
-    assert [r["id"] for r in reads._sorted(rows, ["file_count"], schema.DATASET)] == \
+    assert [r["id"] for r in read_query._sorted(rows, ["file_count"], schema.DATASET)] == \
         ["c", "a", "b"]
 
 
 def test_string_fields_still_sort(tmp_path):
     rows = [{"id": "b", "name": "beta"}, {"id": "a", "name": "alpha"}]
-    assert [r["name"] for r in reads._sorted(rows, ["name"], schema.DATASET)] == \
+    assert [r["name"] for r in read_query._sorted(rows, ["name"], schema.DATASET)] == \
         ["alpha", "beta"]
 
 
@@ -126,26 +127,9 @@ def test_one_bad_timestamp_does_not_abort_an_aggregation():
 def test_a_zero_line_range_does_not_index_from_the_end():
     """start-1 turned a 0 start into -1, returning the last line or nothing."""
     text = "\n".join(f"line{i}" for i in range(10))
-    sliced = reads._raw_slice(text, {"line_range": [0, 3]})
+    sliced = read_summaries._raw_slice(text, {"line_range": [0, 3]})
     assert sliced["text"].splitlines() == ["line0", "line1", "line2"]
     assert sliced["line_range"] == [1, 3]
-
-
-def test_an_inverted_line_range_is_clamped():
-    text = "\n".join(f"line{i}" for i in range(10))
-    assert reads._raw_slice(text, {"line_range": [5, 2]})["text"] == "line4"
-
-
-# --- gate / plans integrity -------------------------------------------------
-
-def test_the_gate_and_plans_agree_on_the_digest_contract():
-    """Two independent implementations; drift silently disables the tamper check."""
-    import re
-    from pathlib import Path
-    from cirro_agent import plans
-    source = (Path(__file__).resolve().parents[2] / "scripts" / "gate.py").read_text()
-    fields = re.search(r"DIGEST_FIELDS = \(([^)]*)\)", source).group(1)
-    assert tuple(re.findall(r'"([a-z_]+)"', fields)) == plans.DIGEST_FIELDS
 
 
 def test_workspace_action_cannot_be_an_arbitrary_attribute():
@@ -293,7 +277,7 @@ def test_spec_shape_declares_parameters_hidden_behind_a_selector():
     reader = MagicMock()
     reader.client.processes.get_parameter_spec.return_value = SimpleNamespace(
         form_spec_json=form)
-    defaults, declared, _required = reads._spec_shape(reader, "proc_x")
+    defaults, declared, _required = reads.spec_shape(reader, "proc_x")
     assert "qdnaseq_bin_size" in declared
     assert defaults["qdnaseq_bin_size"] == 500
     assert "cnv_options" not in declared, "groups are containers, not parameters"

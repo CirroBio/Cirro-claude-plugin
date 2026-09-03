@@ -16,7 +16,6 @@ does not know. It makes accidental bypass impossible and deliberate bypass
 conspicuous. It is not a sandbox. The real boundary is a `permissions.deny` rule
 in the user's own settings, which a plugin cannot ship -- see the README.
 """
-import hashlib
 import json
 import os
 import re
@@ -27,11 +26,12 @@ from pathlib import Path
 
 MAX_PLAN_AGE_GRACE = 5  # seconds of clock slack when checking expiry
 
-# Must stay identical to cirro_agent.plans.DIGEST_FIELDS and PLAN_ID_PATTERN;
-# test_gate.py asserts the two agree.
-DIGEST_FIELDS = ("op", "args", "request_args", "base_url", "summary", "username",
-                 "expires_at", "session_dir", "risk")
-PLAN_ID_PATTERN = re.compile(r"^plan_\d{10,}_[0-9a-f]{8}$")
+# The digest contract is imported from the plugin's own plans module rather than
+# copied here. plans imports only stdlib (test_gate asserts it stays that way), so the
+# hook still runs with a bare system Python and no virtualenv -- and there is now one
+# definition of what a plan's integrity covers instead of two kept in step by a test.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python" / "src"))
+from cirro_agent.plans import PLAN_ID_PATTERN, canonical_digest  # noqa: E402
 
 # Text that means a command is talking to the Cirro SDK.
 SDK_MARKERS = re.compile(
@@ -276,9 +276,7 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
               "approval reflects current figures.\n")
     # Recomputed from the stored record, so an edit that leaves the digest field alone
     # is still caught. Must match cirro_agent.plans.canonical_digest exactly.
-    payload = json.dumps({k: plan.get(k) for k in DIGEST_FIELDS},
-                         sort_keys=True, default=str)
-    if hashlib.sha256(payload.encode()).hexdigest() != plan.get("digest"):
+    if canonical_digest(plan) != plan.get("digest"):
         block(f"Blocked by the Cirro plugin: plan {plan_id} does not match its own "
               "digest; it was modified after it was created.\n")
     supplied = tool_input.get("digest")

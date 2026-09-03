@@ -108,7 +108,7 @@ def _owned_process(reader: reads.Reader, process_id: str) -> dict:
     found = reader.processes(include_archived=True)
     row = next((p for p in found if p["id"] == process_id), None)
     if row is None:
-        near = reads._near_misses(process_id, [p["id"] for p in found])
+        near = reads.near_misses(process_id, [p["id"] for p in found])
         raise errors.NotFound(
             f"No process {process_id!r} on this tenant.",
             what="Check the process ID.", field="process_id", given=process_id,
@@ -129,7 +129,7 @@ def _owned_process(reader: reads.Reader, process_id: str) -> dict:
             what="This plugin only modifies pipelines you own.",
             user_action=(f"Ask {owner} to make the change, or register your own process."),
         )
-    return reads._process_detail(reader, process_id, row)
+    return reads.process_detail(reader, process_id, row)
 
 
 def _check_name(name: str) -> None:

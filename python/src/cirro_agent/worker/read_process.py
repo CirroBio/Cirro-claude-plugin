@@ -5,7 +5,7 @@ import json
 from .. import errors
 from ..envelope import CONTRACT, DEFAULT_MAX_TOKENS, estimate_tokens
 from . import rows as R
-from .reads import CONFIG_SLOTS, Reader, _near_misses, _process_detail, _spec_shape
+from .reads import Reader, near_misses, process_detail, spec_shape
 
 
 def do_process_params(request: dict) -> dict:
@@ -22,27 +22,9 @@ def do_process_params(request: dict) -> dict:
             what="Name the process.", field="id",
             retry_with=[{"verb": "query", "entity": "process"}],
         )
-    found = reader.processes(include_archived=True)
-    match = next((p for p in found if p["id"] == given), None)
-    if match is None:
-        named = [p for p in found if p["name"] == given]
-        if len(named) > 1:
-            raise errors.AmbiguousName(
-                f"{len(named)} processes are named {given!r}.",
-                what="Use the process ID.", field="id", given=given,
-                candidates=[{"id": p["id"], "name": p["name"]} for p in named],
-                retry_with=[{"verb": "process_params", "id": p["id"]} for p in named],
-            )
-        if not named:
-            near = _near_misses(given, [p["name"] for p in found])
-            raise errors.NotFound(
-                f"No process matches {given!r}.", what="Pick an available process.",
-                field="id", given=given, candidates=[{"name": n} for n in near],
-                retry_with=[{"verb": "query", "entity": "process"}],
-            )
-        match = named[0]
+    match = reader.resolve_process(given)
 
-    defaults, declared, required = _spec_shape(reader, match["id"])
+    defaults, declared, required = spec_shape(reader, match["id"])
     parameters = [
         {"key": key, "required": key in (required or []),
          "default": defaults.get(key, None), "has_default": key in defaults}
@@ -101,13 +83,13 @@ def do_process_config(request: dict) -> dict:
     found = reader.processes(include_archived=True)
     row = next((p for p in found if p["id"] == given), None)
     if row is None:
-        near = _near_misses(given, [p["name"] for p in found])
+        near = near_misses(given, [p["name"] for p in found])
         raise errors.NotFound(
             f"No process {given!r}.", what="Check the process ID.", field="id",
             given=given, candidates=[{"name": n} for n in near],
             retry_with=[{"verb": "query", "entity": "process"}],
         )
-    row = _process_detail(reader, row["id"], row)
+    row = process_detail(reader, row["id"], row)
     source = row.get("config_source")
 
     result = {
@@ -253,164 +235,5 @@ def _repo_config(row: dict) -> dict:
     return out
 
 
-def do_workflow_spec(request: dict) -> dict:
-    """Parse a workflow's declared inputs and parameters. Touches no Cirro API."""
-    from pathlib import Path
-    from . import workflow_spec as WS
-
-    target = request.get("target")
-    if not target:
-        raise errors.InvalidQuery(
-            "workflow_spec needs a target: a local checkout path or a repository.",
-            what="Name the workflow to parse.", field="target",
-            retry_with=[{"target": "epi2me-labs/wf-human-variation", "ref": "v2.8.1"},
-                        {"target": "/path/to/local/checkout"}],
-        )
-    cache_root = Path(request.get("cache_root") or ".")
-    source = WS.resolve_source(target, request.get("ref"), cache_root)
-    root = Path(source["local_path"])
-    engine = WS.detect_engine(root)
-    parsed = WS.parse(root, engine)
-    hints = WS.candidates(parsed["params"])
-
-    wanted_group = request.get("group")
-    params = parsed["params"]
-    if wanted_group:
-        params = [p for p in params if p["group"] == wanted_group]
-    if not request.get("include_hidden"):
-        shown = [p for p in params if not p["hidden"] and not p["is_infrastructure"]]
-    else:
-        shown = params
-
-    counts = {
-        "params_declared": len(parsed["params"]),
-        "params_visible": sum(1 for p in parsed["params"]
-                              if not p["hidden"] and not p["is_infrastructure"]),
-        "params_hidden": sum(1 for p in parsed["params"] if p["hidden"]),
-        "params_infrastructure": sum(1 for p in parsed["params"]
-                                     if p["is_infrastructure"]),
-        "params_returned": len(shown),
-        "groups": len(parsed["groups"]),
-        "must_set": sum(1 for p in parsed["params"]
-                        if p["declared_required"] and not p["has_default"]),
-    }
-
-    result = {
-        "engine": parsed["engine"],
-        "source": source,
-        "entrypoint": parsed["entrypoint"],
-        "declared_engine_version": parsed["declared_engine_version"],
-        "parse_confidence": parsed["parse_confidence"],
-        "counts": counts,
-        "groups": parsed["groups"],
-        "candidates": hints,
-        "params": shown,
-        "samplesheet_columns": parsed["samplesheet_columns"],
-        "outputs": parsed["outputs"],
-        "test_profiles": parsed["test_profiles"],
-        "flags": parsed["flags"],
-        "note": ("candidates are hints with reasons, not decisions -- classify the "
-                 "primary data input, managed parameters and file pickers yourself, "
-                 "and leave executor_version unpinned unless a run fails to compile"),
-    }
-    envelope = {"ok": True, "api": {"contract": CONTRACT},
-                "query": {"verb": "workflow_spec", "target": target,
-                          "ref": request.get("ref"), "group": wanted_group},
-                "result": result,
-                "cost": {"api_calls": 0, "by_kind": {}, "note": "local parse only"}}
-
-    max_tokens = int(request.get("max_tokens") or 12000)
-    degraded = []
-    # Enum lists dominate the payload for pipelines like this one (a 34-value basecaller
-    # list); summarize them before dropping anything a caller cannot recover.
-    if estimate_tokens(envelope) > max_tokens:
-        for entry in result["params"]:
-            values = entry.get("enum")
-            if values and len(values) > 8:
-                entry["enum"] = list(values[:8])
-                entry["enum_truncated_to"] = 8
-                entry["enum_total"] = len(values)
-        degraded.append({"what": "params.enum", "to": "first 8 values"})
-    if estimate_tokens(envelope) > max_tokens:
-        for entry in result["params"]:
-            entry.pop("help_text", None)
-        degraded.append({"what": "params.help_text", "to": "dropped"})
-    if estimate_tokens(envelope) > max_tokens:
-        keep = max(10, len(result["params"]) // 2)
-        result["params"] = result["params"][:keep]
-        result["params_truncated_to"] = keep
-        result["how_to_see_the_rest"] = "re-run with --group <key> to page by group"
-        degraded.append({"what": "params", "to": str(keep)})
-    envelope["budget"] = {"max_tokens": max_tokens,
-                          "used_est": estimate_tokens(envelope), "degraded": degraded}
-    return envelope
-
-
-def do_check_config(request: dict) -> dict:
-    """Validate a folder of configuration assets before it goes anywhere.
-
-    Local only: no session, no auth, no network. Catches the failures that are
-    expensive to discover later -- an unknown form keyword the portal rejects, a
-    mapping to a form field that does not exist, and the `../` literal that Cirro's
-    WAF blocks before the request reaches the app.
-    """
-    from pathlib import Path
-    from ..envelope import CONTRACT, estimate_tokens
-    from .. import formcheck, formgen
-
-    target = request.get("path")
-    if not target:
-        raise errors.InvalidQuery(
-            "check_config needs a path to a configuration folder.",
-            what="Point at the folder holding the generated assets.", field="path",
-            retry_with=[{"path": "./.cirro"}],
-        )
-    folder = Path(target).expanduser()
-    if not folder.is_dir():
-        raise errors.NotFound(
-            f"{folder} is not a directory.",
-            what="Point at the folder holding the assets.", field="path", given=target,
-            retry_with=[{"path": str(folder.parent)}],
-        )
-
-    assets = {}
-    for name in formgen.SLOTS:
-        candidate = folder / name
-        if candidate.is_file():
-            assets[name] = candidate.read_text()
-    extra = sorted(p.name for p in folder.iterdir()
-                   if p.is_file() and p.name not in formgen.SLOTS)
-
-    report = formcheck.check_assets(assets) if assets else {
-        "ok": False, "n_errors": 1, "n_warnings": 0, "checked": [],
-        "problems": [{"level": "error", "where": str(folder),
-                      "message": "no Cirro configuration assets found here",
-                      "fix": f"expected one or more of: {', '.join(formgen.SLOTS)}"}]}
-
-    missing = [n for n in ("process-form.json", "process-input.json",
-                           "process-output.json", "process-compute.config")
-               if n not in assets]
-    if missing:
-        report["problems"].append({
-            "level": "warning", "where": str(folder),
-            "message": f"not present: {', '.join(missing)}",
-            "fix": "a pipeline normally needs all four core assets"})
-        report["n_warnings"] += 1
-
-    if "preprocess.py" in assets and not (folder / "test_preprocess.py").is_file():
-        report["problems"].append({
-            "level": "error", "where": "preprocess.py",
-            "message": ("a preprocess script must ship with an offline unit test; "
-                        "there is no test_preprocess.py beside it"),
-            "fix": "extract a pure make_manifest() and test it with unittest"})
-        report["n_errors"] += 1
-        report["ok"] = False
-
-    body = {"ok": True, "api": {"contract": CONTRACT},
-            "query": {"verb": "check_config", "path": str(folder)},
-            "result": {"folder": str(folder), "assets": sorted(assets),
-                       "other_files": extra, **report},
-            "cost": {"api_calls": 0, "by_kind": {}, "note": "local validation only"}}
-    body["budget"] = {"max_tokens": int(request.get("max_tokens") or 6000),
-                      "used_est": estimate_tokens(body), "degraded": []}
-    return body
+CONFIG_SLOTS = ("form", "input", "output", "compute", "preprocess", "documentation",
+                "metadata")

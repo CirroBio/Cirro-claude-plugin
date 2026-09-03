@@ -1,4 +1,11 @@
-"""Gated operations: one planner and one executor each.
+"""The shared core of the gated operations.
+
+The operations themselves live in analysis_ops, dataset_ops, project_ops, share_ops,
+chain_ops and pipeline_ops. This module holds what every family needs -- Draft, Op,
+the risk classes, the resolvers, the folder/tag rule -- and the registry they all
+register into.
+
+Each operation is one planner and one executor.
 
 The planner is read-only. It resolves every name to an ID, validates what can be
 validated before anything happens, works out the blast radius, and renders the
@@ -126,80 +133,6 @@ def _dataset(reader: reads.Reader, project_id: str, given: str) -> dict:
         retry_with=[{"verb": "query", "entity": "dataset",
                      "scope": {"project_ids": [project_id]}}],
     )
-
-
-def _derived_from(reader: reads.Reader, project_id: str, dataset_id: str) -> list:
-    """Reverse-scan the project for datasets that list this one as a parent."""
-    datasets, _ = reader.datasets(project_id)
-    return [{"id": d["id"], "name": d["name"]}
-            for d in datasets if dataset_id in (d.get("source_dataset_ids") or [])]
-
-
-def _process(reader: reads.Reader, given: str, *, ingest: Optional[bool] = None) -> dict:
-    found = reader.processes(include_archived=True)
-    if ingest is not None:
-        pool = [p for p in found
-                if (p["executor"] == "INGEST") == ingest]
-    else:
-        pool = found
-    by_id = next((p for p in pool if p["id"] == given), None)
-    if by_id:
-        return by_id
-    named = [p for p in pool if p["name"] == given]
-    if len(named) == 1:
-        return named[0]
-    if len(named) > 1:
-        raise errors.AmbiguousName(
-            f"{len(named)} processes are named {given!r}.",
-            what="Use the process ID.", field="process", given=given,
-            candidates=[{"id": p["id"], "name": p["name"], "executor": p["executor"],
-                         "pipeline_type": p["pipeline_type"]} for p in named],
-            retry_with=[{"process_id": p["id"]} for p in named],
-        )
-    near = reads._near_misses(given, [p["name"] for p in pool])
-    raise errors.NotFound(
-        f"No process matches {given!r}.",
-        what="Pick an available process.", field="process", given=given,
-        candidates=[{"name": n} for n in near],
-        retry_with=[{"verb": "query", "entity": "process"}],
-    )
-
-
-def _validate_params(reader: reads.Reader, process_id: str, params: dict) -> list:
-    """Validate against the spec, and report undeclared keys separately.
-
-    jsonschema will not flag an unknown key unless the schema sets
-    additionalProperties:false, so a typo silently does nothing. Finding that out
-    six hours into a pipeline is the expensive version of this check.
-    """
-    warnings = []
-    try:
-        spec = reader.client.processes.get_parameter_spec(process_id=process_id)
-        reader.cost.call("processes.parameter_spec")
-    except Exception as exc:
-        return [f"Could not load the parameter spec for validation: {exc}"]
-    try:
-        spec.validate_params(params or {})
-    except Exception as exc:
-        raise errors.InvalidQuery(
-            f"Parameters rejected by the process spec: {exc}",
-            what="Fix the parameters before planning again.",
-            field="params", given=params,
-            retry_with=[{"verb": "get", "entity": "process", "id": process_id},
-                        {"verb": "summarize", "of": "params",
-                         "note": "inspect a previous run's params for a working shape"}],
-        )
-    defaults, declared, required = reads._spec_shape(reader, process_id)
-    if declared is not None:
-        unknown = [k for k in (params or {}) if k not in set(declared)]
-        if unknown:
-            warnings.append(
-                f"Parameters not declared by this process and therefore ignored: "
-                f"{sorted(unknown)} -- usually a typo")
-    missing = [k for k in (required or []) if k not in (params or {})]
-    if missing:
-        warnings.append(f"Required parameters absent: {sorted(missing)}")
-    return warnings
 
 
 # ------------------------------------------------------------------ registry

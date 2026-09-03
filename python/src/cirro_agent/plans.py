@@ -5,7 +5,8 @@ single-use record. `apply` takes only a plan id, so the model cannot swap the
 target after a human approved a specific one. Every refusal below exists because
 the alternative is a mutation nobody agreed to:
 
-  expired          an approval given ten minutes ago is not consent now
+  expired          an approval from an hour ago may no longer be meant; the figures
+                   it showed are checked separately by re-planning at apply
   replayed         a plan is one mutation, not a reusable capability
   digest mismatch  the file was edited between plan and apply
   session/tenant   the plan was made against a different Cirro instance

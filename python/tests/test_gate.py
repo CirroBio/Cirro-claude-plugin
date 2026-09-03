@@ -215,6 +215,11 @@ def test_the_gate_needs_no_virtualenv():
         if isinstance(node, ast.Import):
             imported.update(a.name.split(".")[0] for a in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
+            if node.module.split(".")[0] == "cirro_agent":
+                # The gate imports its digest contract from the plugin's own plans
+                # module. That is allowed only while plans stays stdlib-only, which
+                # the check below proves with a bare interpreter.
+                continue
             imported.add(node.module.split(".")[0])
     third_party = imported - set(sys.stdlib_module_names)
     assert not third_party, (
@@ -231,22 +236,18 @@ def test_the_gate_catches_a_plan_edited_on_disk(workdir):
     assert run(apply_event(workdir, plan_id=plan.plan_id, digest=plan.digest)) == DENY
 
 
-def test_the_gate_digest_matches_the_python_implementation(workdir):
-    """The hook recomputes the digest independently; the two must agree exactly."""
-    import re as _re
-    from cirro_agent import plans
+def test_the_gate_uses_the_one_digest_implementation(workdir):
+    """The gate used to carry its own copy of DIGEST_FIELDS and the sha256 over them,
+    held in step with plans.py by a test. It now imports canonical_digest, so there is
+    nothing left to agree: the check is that it really does import it, computes nothing
+    of its own, and -- run as the hook is run, with a bare interpreter -- still asks."""
     plan = make_plan(workdir)
-    assert plans.canonical_digest(plan.to_dict()) == plan.digest
     assert run(apply_event(workdir, plan_id=plan.plan_id, digest=plan.digest)) == ASK
-
-    # The two implementations are separate code; drift between them silently disables
-    # the tamper check, so compare the field lists directly.
     source = GATE.read_text()
-    fields = _re.search(r"DIGEST_FIELDS = \(([^)]*)\)", source).group(1)
-    gate_fields = tuple(_re.findall(r'"([a-z_]+)"', fields))
-    assert gate_fields == plans.DIGEST_FIELDS
-    assert _re.search(r'PLAN_ID_PATTERN = re\.compile\(r"([^"]+)"', source).group(1) \
-        == plans.PLAN_ID_PATTERN.pattern
+    assert "from cirro_agent.plans import" in source
+    assert "canonical_digest" in source
+    assert "hashlib" not in source, "a second digest implementation crept back in"
+    assert "DIGEST_FIELDS = (" not in source, "a second copy of the field list crept back in"
 
 
 def test_the_approval_text_shows_the_real_operation_and_arguments(workdir):
@@ -265,3 +266,18 @@ def test_the_approval_text_shows_the_real_operation_and_arguments(workdir):
     reason = _json.loads(done.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
     assert "delete_dataset" in reason
     assert "D-VICTIM" in reason, "the real target must be visible, not just the prose"
+
+
+def test_the_plans_module_the_gate_imports_is_stdlib_only():
+    """Importing it under a system Python with no cirro installed must load nothing but
+    the plugin's own pure modules -- that is what lets the gate run with no venv."""
+    import subprocess
+    import sys
+    code = ("import sys; sys.path.insert(0, 'python/src'); import cirro_agent.plans; "
+            "bad = [m for m in sys.modules if m.startswith('cirro') and "
+            "not m.startswith('cirro_agent')]; assert not bad, bad; "
+            "print(sorted(m for m in sys.modules if m.startswith('cirro_agent')))")
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                          cwd=GATE.parents[1])
+    assert done.returncode == 0, done.stderr[-600:]
+    assert "cirro_agent.plans" in done.stdout

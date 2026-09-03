@@ -179,8 +179,9 @@ def logout() -> dict:
     title="Plan a Cirro change (read-only)",
     description=(
         "Resolve and validate a change without making it. Returns `rendered` -- the text "
-        "to show the person -- plus a single-use plan_id and digest that expire in ten "
-        "minutes. Makes no modification of any kind.\n\n"
+        "to show the person -- plus a single-use plan_id and digest, good for an hour "
+        "and refused sooner if the facts behind them change. Makes no modification of "
+        "any kind.\n\n"
         "Operations: run_analysis, resume_analysis, stop_analysis, upload_dataset, "
         "upload_reference, import_public, update_dataset, update_samplesheet, "
         "delete_dataset, create_project, update_project_tags, archive_project, "
@@ -198,15 +199,16 @@ def logout() -> dict:
         "{\"from_step\": N, \"field\": \"...\"} and resolved from that step's recorded "
         "output. Add `retry` = {redo: [labels], max_attempts: 2-5, may_change: "
         "[fields]} to authorize bounded reruns, then resume with `restart_from` = "
-        "{plan_id, label, attempt} -- which reuses what earlier steps produced instead "
-        "of repeating them. Destructive operations cannot go in a chain.\n\n"
+        "{plan_id, label} -- which reuses what earlier steps produced instead of "
+        "repeating them, and counts the attempt itself. Destructive operations cannot "
+        "go in a chain.\n\n"
         "For run_analysis, read `cirro-agent read process-params <process>` first: it is "
         "the authoritative list of accepted parameter keys."
     ),
 )
 def plan(op: str, args: Optional[dict] = None,
          renew_from: Optional[str] = None) -> dict:
-    """Resolve, validate and price a change without performing it."""
+    """Resolve, validate and describe a change without performing it."""
     # `verb` routes to the handler; `op` names the mutation being planned.
     return runner.call({"verb": "plan", "op": op, "args": args or {},
                         "renew_from": renew_from})

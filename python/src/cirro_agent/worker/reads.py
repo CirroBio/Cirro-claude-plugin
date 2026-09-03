@@ -3,9 +3,10 @@
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Callable, Optional, Tuple
-from .. import errors, formcheck, query as Q, schema
+from .. import errors, formcheck, query as Q
+from ..session import Session
 from ..cache import SnapshotCache, FRESH_DEFAULT, manifest_ttl
-from ..envelope import CONTRACT, Cost, estimate_tokens
+from ..envelope import Cost
 from . import portal, rows as R
 
 
@@ -15,10 +16,6 @@ SCAN_LIMIT = 50_000
 
 
 PAGE_SIZE = 5_000
-
-
-# `include` on a detail-or-worse tier costs one call per row, so it is gated.
-DETAIL_BUDGET = 25
 
 
 FANOUT_LIMIT = 25
@@ -38,6 +35,11 @@ class Reader:
         self._client = None
         self._username = None
         self._cache = None
+
+    @property
+    def session(self) -> Session:
+        """The one place the request's tenant and folder become a Session."""
+        return Session(base_url=self.base_url, dir=self.session_dir)
 
     # ---------------------------------------------------------------- plumbing
 
@@ -185,33 +187,37 @@ class Reader:
     def resolve_project(self, given: str) -> dict:
         """ID first, then exact name, then case-insensitive. Never fuzzy."""
         available = self.projects()
-        for row in available:
-            if row["id"] == given:
-                return row
-        exact = [r for r in available if r["name"] == given]
-        if len(exact) == 1:
-            return exact[0]
-        if len(exact) > 1:
-            raise errors.AmbiguousName(
-                f"{len(exact)} projects are named {given!r}.",
-                what="Use the project ID.",
-                field="scope.project", given=given,
-                candidates=[{"id": r["id"], "name": r["name"],
-                             "organization": r.get("organization")} for r in exact],
-                retry_with=[{"scope": {"project_ids": [r["id"]]}} for r in exact],
-            )
-        loose = [r for r in available if r["name"].lower() == str(given).lower()]
-        if len(loose) == 1:
-            return loose[0]
-        near = _near_misses(given, [r["name"] for r in available])
-        raise errors.NotFound(
-            f"No project matches {given!r}.",
-            what="Pick a project you can see, by name or ID.",
-            field="scope.project", given=given,
-            candidates=[{"name": name} for name in near],
-            retry_with=[{"entity": "project"}]
-            + [{"scope": {"project": name}} for name in near[:3]],
+
+        def brief(row):
+            return {"id": row["id"], "name": row["name"],
+                    "organization": row.get("organization")}
+
+        def near_retry(near):
+            return [{"entity": "project"}] + [{"scope": {"project": n}} for n in near[:3]]
+
+        return resolve_named(
+            available, given, entity="project", field="scope.project", loose=True,
+            brief=brief, retry=lambda row: {"scope": {"project_ids": [row["id"]]}},
+            near_retry=near_retry,
+            missing_what="Pick a project you can see, by name or ID.",
             visible_projects=len(available),
+        )
+
+    def resolve_process(self, given: str, *, ingest=None) -> dict:
+        """ID first, then unique exact name. `ingest` narrows to data types or pipelines."""
+        found = self.processes(include_archived=True)
+        pool = found if ingest is None else [
+            p for p in found if (p["executor"] == "INGEST") == ingest]
+
+        def brief(row):
+            return {"id": row["id"], "name": row["name"], "executor": row["executor"],
+                    "pipeline_type": row["pipeline_type"]}
+
+        return resolve_named(
+            pool, given, entity="process", field="process", brief=brief,
+            retry=lambda row: {"process_id": row["id"]},
+            near_retry=lambda near: [{"verb": "query", "entity": "process"}],
+            missing_what="Pick an available process.",
         )
 
     def scope_project_ids(self, scope: dict) -> list:
@@ -245,7 +251,7 @@ class Reader:
         )
 
 
-def _near_misses(given: str, names: list, limit: int = 5) -> list:
+def near_misses(given: str, names: list, limit: int = 5) -> list:
     import difflib
     close = difflib.get_close_matches(str(given), names, n=limit, cutoff=0.5)
     lowered = str(given).lower()
@@ -253,45 +259,52 @@ def _near_misses(given: str, names: list, limit: int = 5) -> list:
     return (close + substring)[:limit]
 
 
-# Fields that are free once their source field has been fetched, so they should
-# travel with it rather than being requested separately.
-_DERIVED_COMPANIONS = {"total_size_bytes": ["total_size_human"]}
+def resolve_named(rows: list, given: str, *, entity: str, field: str, brief, retry,
+                  near_retry, missing_what: str, loose: bool = False, **detail) -> dict:
+    """ID first, then unique exact name, then (optionally) unique case-insensitive name.
 
-
-def _sorted(rows: list, sort: list, spec: schema.EntitySpec) -> list:
-    """Sort numerics numerically.
-
-    Stringifying every key made `total_size_bytes`, `file_count`, `exit_code` and
-    `task_id` sort lexicographically, so 9000 came before 10000.
+    Never fuzzy: a close match appears only as a candidate inside NotFound. This is the
+    one implementation -- it existed four times and had drifted, so a name the
+    process_params read accepted could be one the run_analysis planner refused.
     """
-    def ordering(field: str):
-        def key(row):
-            value = row.get(field)
-            if value is None:
-                return (2, 0.0, "")
-            if isinstance(value, bool):
-                return (1, float(value), "")
-            if isinstance(value, (int, float)):
-                return (0, float(value), "")
-            return (1, 0.0, str(value))
-        return key
+    for row in rows:
+        if row.get("id") == given:
+            return row
+    exact = [r for r in rows if r.get("name") == given]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        raise errors.AmbiguousName(
+            f"{len(exact)} {entity}s are named {given!r}.",
+            what=f"Use the {entity} ID.", field=field, given=given,
+            candidates=[brief(r) for r in exact[:10]],
+            retry_with=[retry(r) for r in exact[:5]],
+        )
+    if loose:
+        relaxed = [r for r in rows
+                   if str(r.get("name") or "").lower() == str(given).lower()]
+        if len(relaxed) == 1:
+            return relaxed[0]
+    near = near_misses(given, [r.get("name") or "" for r in rows])
+    raise errors.NotFound(
+        f"No {entity} matches {given!r}.",
+        what=missing_what, field=field, given=given,
+        candidates=[{"name": name} for name in near],
+        retry_with=near_retry(near),
+        **detail,
+    )
 
-    for entry in reversed(sort or spec.default_sort):
-        descending = entry.startswith("-")
-        rows = sorted(rows, key=ordering(entry.lstrip("-")), reverse=descending)
-    return rows
 
-
-def _is_terminal(reader: Reader, project_id: str, dataset_id: str) -> bool:
+def is_terminal(reader: Reader, project_id: str, dataset_id: str) -> bool:
     """Whether the dataset can still change, read from the cached project listing."""
     datasets, _ = reader.datasets(project_id)
     row = next((d for d in datasets if d["id"] == dataset_id), None)
     return bool(row and row.get("is_terminal"))
 
 
-def _manifest(reader: Reader, project_id: str, dataset_id: str,
-              *, file_limit: int = MANIFEST_LIST_LIMIT,
-              is_terminal: bool = True) -> Tuple[list, Optional[int], list]:
+def dataset_manifest(reader: Reader, project_id: str, dataset_id: str,
+                     *, file_limit: int = MANIFEST_LIST_LIMIT,
+                     is_terminal: bool = True) -> Tuple[list, Optional[int], list]:
     def load():
         from cirro_api_client.v1.api.datasets import get_dataset_manifest
         manifest = get_dataset_manifest.sync(
@@ -330,8 +343,8 @@ def file_count(reader: Reader, project_id: str, dataset_id: str) -> Optional[int
     return R.plain(manifest.total_files) if manifest else None
 
 
-def _detail(reader: Reader, project_id: str, dataset_id: str,
-            base: Optional[dict] = None) -> dict:
+def dataset_detail(reader: Reader, project_id: str, dataset_id: str,
+                   base: Optional[dict] = None) -> dict:
     detail = reader.client.datasets.get(project_id=project_id, dataset_id=dataset_id)
     reader.cost.call("datasets.get", detail=True)
     if detail is None:
@@ -344,7 +357,7 @@ def _detail(reader: Reader, project_id: str, dataset_id: str,
                             process_names=reader.process_names())
 
 
-def _tasks(reader: Reader, project_id: str, dataset_id: str) -> list:
+def dataset_tasks(reader: Reader, project_id: str, dataset_id: str) -> list:
     detail = reader.client.datasets.get(project_id=project_id, dataset_id=dataset_id)
     reader.cost.call("datasets.get", detail=True)
     executor = None
@@ -372,7 +385,7 @@ def _tasks(reader: Reader, project_id: str, dataset_id: str) -> list:
     return [R.task(t, index) for index, t in enumerate(found)]
 
 
-def _process_detail(reader: Reader, process_id: str, base: dict) -> dict:
+def process_detail(reader: Reader, process_id: str, base: dict) -> dict:
     """One call per process. `config_source` lives only on the detail payload."""
     detail = reader.client.processes.get(process_id=process_id)
     reader.cost.call("processes.get", detail=True)
@@ -385,32 +398,8 @@ def _process_detail(reader: Reader, process_id: str, base: dict) -> dict:
     return R.process_detail(detail, base)
 
 
-SUMMARIZERS = ("files", "logs", "tasks", "samples", "params", "trace")
-
-
-def _raw_slice(text: str, request: dict) -> dict:
-    line_range = request.get("line_range")
-    byte_range = request.get("byte_range")
-    if line_range:
-        lines = text.splitlines()
-        # 1-based and clamped: a 0 start would index from the end of the list.
-        start = max(1, int(line_range[0]))
-        end = max(start, int(line_range[1]))
-        return {"line_range": [start, end], "text": "\n".join(lines[start - 1:end])}
-    if byte_range:
-        start, end = int(byte_range[0]), int(byte_range[1])
-        return {"byte_range": [start, end], "text": text[start:end]}
-    raise errors.InvalidQuery(
-        "raw=true needs a line_range or byte_range.",
-        what="Raw log text is only served in bounded slices.",
-        field="raw",
-        retry_with=[{"verb": "summarize", "of": "logs", "raw": True,
-                     "line_range": [1, 200]}],
-    )
-
-
-def _spec_shape(reader: Reader, process_id: Optional[str]) -> Tuple[dict, Optional[list],
-                                                                    Optional[list]]:
+def spec_shape(reader: Reader, process_id: Optional[str]) -> Tuple[dict, Optional[list],
+                                                                   Optional[list]]:
     if not process_id:
         return {}, None, None
     try:
@@ -436,40 +425,3 @@ def _spec_shape(reader: Reader, process_id: Optional[str]) -> Tuple[dict, Option
             defaults[key] = field["default"]
     required = list(form.get("required") or [])
     return defaults, declared, required
-
-
-def _summary_envelope(reader: Reader, request: dict, of: str, body: dict,
-                      complete: bool, scope_echo: dict, max_tokens: int,
-                      next_calls: list) -> dict:
-    envelope = {
-        "ok": True,
-        "api": {"contract": CONTRACT},
-        "query": {"verb": "summarize", "of": of, "scope": scope_echo,
-                  "dataset_id": request.get("dataset_id")},
-        "result": {"summary_of": of, "scan_complete": complete, of: body,
-                   "next_calls": next_calls},
-        "cost": reader.cost.to_dict(),
-        "budget": {"max_tokens": max_tokens, "degraded": []},
-    }
-    # Summaries are already collapsed; if one still overruns, drop the most verbose
-    # sections in a fixed order rather than cutting a structure open.
-    shrinkable = {
-        "files": ["tree", "largest", "extensions", "name_patterns"],
-        "logs": ["head", "signature_counts", "tail", "error_blocks"],
-        "tasks": ["retries", "counts_by_process", "failed"],
-        "samples": ["examples", "inconsistencies", "keys"],
-        "params": ["defaulted_keys"],
-        "trace": ["processes"],
-    }.get(of, [])
-    for key in shrinkable:
-        if estimate_tokens(envelope) <= max_tokens:
-            break
-        if key in body:
-            body.pop(key)
-            envelope["budget"]["degraded"].append({"what": f"{of}.{key}", "to": "dropped"})
-    envelope["budget"]["used_est"] = estimate_tokens(envelope)
-    return envelope
-
-
-CONFIG_SLOTS = ("form", "input", "output", "compute", "preprocess", "documentation",
-                "metadata")

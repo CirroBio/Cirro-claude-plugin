@@ -1,5 +1,5 @@
-"""The read pipeline against a fake tenant on the wire."""
-from cirro_agent.worker import dispatch, read_query, reads
+from cirro_agent import local_reads
+from cirro_agent.worker import dispatch, read_query
 
 
 def _call(fake_tenant, session_dir, verb, **overrides):
@@ -91,7 +91,7 @@ def test_include_is_gated_by_cost_not_silently_sampled(fake_tenant, session_dir)
 def test_include_is_granted_once_the_match_set_is_small(fake_tenant, session_dir):
     result = _query(fake_tenant, session_dir, filter="status:@bad",
                     include=["total_size_bytes", "status_message"])
-    assert result["result"]["counts"]["matched"] <= reads.DETAIL_BUDGET
+    assert result["result"]["counts"]["matched"] <= read_query.DETAIL_BUDGET
     assert result["ok"], result
     row = result["result"]["rows"][0]
     assert row["total_size_bytes"] == 41203118
@@ -186,7 +186,7 @@ def test_summarize_files_collapses_a_large_manifest(fake_tenant, session_dir):
 
 
 def test_describe_needs_no_tenant(fake_tenant, session_dir):
-    result = read_query.do_describe({"entity": "dataset"})
+    result = local_reads.do_describe({"entity": "dataset"})
     assert result["ok"]
     tiers = {field["tier"] for field in result["result"]["fields"]}
     assert {"list", "probe", "detail", "execution"} <= tiers
@@ -211,7 +211,8 @@ def test_detail_cost_can_be_accepted_explicitly(fake_tenant, session_dir):
 
     small = _query(fake_tenant, session_dir, filter="name~*batch1_*", max_tokens=6000)
     n = small["result"]["counts"]["matched"]
-    assert n > reads.DETAIL_BUDGET, "need a set above the gate for this test to mean anything"
+    budget = read_query.DETAIL_BUDGET
+    assert n > budget, "need a set above the gate for this test to mean anything"
 
     allowed = _query(fake_tenant, session_dir, filter="name~*batch1_*",
                      include=["total_size_bytes"], confirm_detail_cost=True)
