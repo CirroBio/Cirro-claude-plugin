@@ -1,4 +1,5 @@
 """Route one worker request to one handler, and render any failure as a typed error."""
+from types import SimpleNamespace
 from typing import Any
 
 from .. import errors, plans
@@ -59,19 +60,27 @@ def do_plan(request: dict) -> dict:
     return response
 
 
-def _same_plan(session: Session, previous_id: str, record) -> bool:
-    """Would re-approving cost the person anything new to read?
+def _same_disclosure(record, other) -> bool:
+    """Do two plans show the person the same thing and execute the same thing?
 
     Compared on what the approval actually depends on -- the operation, the resolved
-    arguments and the rendered figures -- not on the digest, which includes the plan
-    id and expiry and so never matches.
+    arguments, the rendered figures and the warnings (render prints them) -- not on
+    the digest, which includes the plan id and expiry and so never matches. This is
+    the one definition; the renew path and the stale check both use it, so a change
+    that counts as "new to read" on one cannot be invisible to the other.
     """
+    return (record.op == other.op and record.args == other.args
+            and record.summary == other.summary
+            and list(record.warnings) == list(other.warnings))
+
+
+def _same_plan(session: Session, previous_id: str, record) -> bool:
+    """Would re-approving cost the person anything new to read?"""
     try:
         stale = plans.load(session, previous_id)
     except errors.AgentError:
         return False
-    return (stale.op == record.op and stale.args == record.args
-            and stale.summary == record.summary and stale.warnings == record.warnings)
+    return _same_disclosure(stale, record)
 
 
 def _revalidated(reader: reads.Reader, op, record) -> dict:
@@ -82,8 +91,8 @@ def _revalidated(reader: reads.Reader, op, record) -> dict:
     and this guards accuracy: if the same request now resolves to different arguments
     or renders different text, what they approved is not what would run.
 
-    Returns the freshly resolved arguments, so what executes is computed from the
-    world as it is now rather than from a snapshot.
+    Returns the record's arguments, which the re-plan has just shown to be what the
+    same request resolves to now.
     """
     if not record.request_args:
         # Plans written before request_args existed, and any op planned with no
@@ -98,8 +107,10 @@ def _revalidated(reader: reads.Reader, op, record) -> dict:
             retry_with=[{"tool": "plan", "op": record.op,
                          "renew_from": record.plan_id}],
         )
-    if draft.args == record.args and draft.summary == record.summary:
-        return draft.args
+    fresh = SimpleNamespace(op=record.op, args=draft.args, summary=draft.summary,
+                            warnings=draft.warnings)
+    if _same_disclosure(record, fresh):
+        return record.args
     raise errors.PlanStale(
         "The facts behind this plan changed since it was approved.",
         what=("Re-planning the same request produced a different result, so executing "

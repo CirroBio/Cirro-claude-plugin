@@ -273,3 +273,36 @@ def test_a_cold_fetch_is_not_reported_as_a_cache_hit():
     assert cost.to_dict()["cache"]["fraction_from_cache"] == 0.0
     cost.snapshot("processes@t", age_s=10.0, ttl_s=86400, item_count=3, fresh=True)
     assert cost.to_dict()["cache"]["fraction_from_cache"] == 0.5
+
+
+# --- the form walk sees conditional fields ----------------------------------
+
+def test_spec_shape_declares_parameters_hidden_behind_a_selector():
+    """Walking `properties` alone reported every conditional parameter as undeclared,
+    so run_analysis warned "usually a typo" on live, correctly mapped fields."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    form = {"type": "object", "properties": {
+        "cnv_options": {"type": "object", "properties": {
+            "use_qdnaseq": {"type": "boolean", "default": False}},
+            "dependencies": {"use_qdnaseq": {"oneOf": [
+                {"properties": {"use_qdnaseq": {"enum": [True]},
+                                "qdnaseq_bin_size": {"type": "integer",
+                                                     "default": 500}}},
+                {"properties": {"use_qdnaseq": {"enum": [False]}}}]}}}}}
+    reader = MagicMock()
+    reader.client.processes.get_parameter_spec.return_value = SimpleNamespace(
+        form_spec_json=form)
+    defaults, declared, _required = reads._spec_shape(reader, "proc_x")
+    assert "qdnaseq_bin_size" in declared
+    assert defaults["qdnaseq_bin_size"] == 500
+    assert "cnv_options" not in declared, "groups are containers, not parameters"
+
+
+def test_the_root_cause_lookup_books_its_detail_call():
+    from unittest.mock import MagicMock
+    from cirro_agent.worker import read_summaries
+    reader = MagicMock()
+    reader.cost = MagicMock()
+    read_summaries._primary_failed_index(reader, "proj_a", "ds_1", [])
+    reader.cost.call.assert_called_with("datasets.get", detail=True)

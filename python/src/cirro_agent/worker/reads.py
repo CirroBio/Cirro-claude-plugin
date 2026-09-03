@@ -3,7 +3,7 @@
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Callable, Optional, Tuple
-from .. import errors, query as Q, schema
+from .. import errors, formcheck, query as Q, schema
 from ..cache import SnapshotCache, FRESH_DEFAULT, manifest_ttl
 from ..envelope import CONTRACT, Cost, estimate_tokens
 from . import portal, rows as R
@@ -419,22 +419,22 @@ def _spec_shape(reader: Reader, process_id: Optional[str]) -> Tuple[dict, Option
     except Exception:
         return {}, None, None
     form = getattr(spec, "form_spec_json", None) or {}
-    properties = (form.get("properties") if isinstance(form, dict) else None) or {}
+    if not isinstance(form, dict):
+        return {}, None, None
+    # formcheck owns the one correct walk over a form: conditional fields live inside
+    # dependencies.<selector>.oneOf[].properties, and walking `properties` alone --
+    # as this used to -- reported every conditional parameter as undeclared.
     defaults, declared = {}, []
-    required = list(form.get("required") or []) if isinstance(form, dict) else []
-
-    def walk(props: dict) -> None:
-        for key, value in props.items():
-            if not isinstance(value, dict):
-                continue
-            if value.get("type") == "object" and "properties" in value:
-                walk(value["properties"])
-                continue
+    for path, field in formcheck._iter_fields(form):
+        if isinstance(field, dict) and field.get("type") == "object" \
+                and "properties" in field:
+            continue
+        key = path.rsplit(".", 1)[-1]
+        if key not in declared:
             declared.append(key)
-            if "default" in value:
-                defaults[key] = value["default"]
-
-    walk(properties)
+        if isinstance(field, dict) and "default" in field and key not in defaults:
+            defaults[key] = field["default"]
+    required = list(form.get("required") or [])
     return defaults, declared, required
 
 

@@ -372,3 +372,26 @@ def test_the_plan_response_reports_the_risk_the_record_carries(
                          "tags": ["new-tag"]})
     from cirro_agent import plans
     assert planned["risk"] == plans.load(session_dir, planned["plan_id"]).risk
+
+
+def test_a_warnings_only_change_counts_as_stale(writable_tenant, session_dir,
+                                                monkeypatch):
+    """render prints warnings in the approved text, so a change to them is a change
+    to what the person read; renew and apply now agree on that."""
+    from cirro_agent.worker import dataset_ops
+    planned = call(writable_tenant, session_dir, "plan", op="update_dataset",
+                   args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                         "tags": ["new-tag"]})
+    original = dataset_ops.plan_update_dataset
+
+    def louder(reader, args):
+        draft = original(reader, args)
+        draft.warnings = list(draft.warnings) + ["something new to know"]
+        return draft
+    monkeypatch.setitem(dataset_ops.mutations.OPS, "update_dataset",
+                        dataset_ops.mutations.Op("update_dataset", "cirro_write",
+                                                 louder,
+                                                 dataset_ops.apply_update_dataset))
+    applied = apply_from(writable_tenant, session_dir, planned)
+    assert applied["error"]["code"] == "PLAN_STALE"
+    assert applied["error"]["detail"]["changed"] == "disclosure"

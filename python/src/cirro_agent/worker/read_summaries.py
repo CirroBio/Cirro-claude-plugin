@@ -161,6 +161,8 @@ def _primary_failed_index(reader: Reader, project_id: str, dataset_id: str,
     try:
         from cirro.sdk.dataset import DataPortalDataset
         detail = reader.client.datasets.get(project_id=project_id, dataset_id=dataset_id)
+        # Booked like every other detail fetch, or the cost block under-reports.
+        reader.cost.call("datasets.get", detail=True)
         wrapped = DataPortalDataset(detail, reader.client)
         primary = wrapped.primary_failed_task
         if primary is not None:

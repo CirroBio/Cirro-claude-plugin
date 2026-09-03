@@ -87,6 +87,9 @@ def split_inputs(spec: dict) -> tuple:
     return primary, pickers
 
 
+MANAGED_PATHS = {"output_directory": "$.dataset.dataPath"}
+
+
 def managed_names(spec: dict) -> dict:
     return {m["name"]: m.get("role", "output_directory")
             for m in ((spec.get("cirro") or {}).get("managed_parameters") or [])}
@@ -265,9 +268,11 @@ def build_input_map(spec: dict) -> dict:
 
     if primary:
         mapping[primary["name"]] = "$.inputs[0].dataPath"
+    # Every managed parameter Cirro supplies today is the output location, so every
+    # role maps to the dataset path. Keyed by role so a second role has a place to
+    # land, rather than a conditional whose branches were identical.
     for name, role in managed.items():
-        mapping[name] = ("$.dataset.dataPath" if role == "output_directory"
-                         else "$.dataset.dataPath")
+        mapping[name] = MANAGED_PATHS[role]
     for entry in pickers:
         mapping[entry["name"]] = f"$.dataset.params.{entry['group']}.{entry['name']}"
     for entry in spec.get("parameters") or []:
