@@ -227,8 +227,8 @@ def test_an_unknown_operation_lists_the_supported_ones(writable_tenant, session_
     assert len(result["error"]["remediation"]["retry_with"]) > 20
 
 
-def test_a_schema_plan_will_not_claim_nothing_was_removed(writable_tenant, session_dir,
-                                                          monkeypatch):
+def test_a_schema_plan_will_not_claim_nothing_was_removed(
+        writable_tenant, session_dir, monkeypatch):
     """An unreadable baseline used to render as "keys removed []" with no warning."""
     from cirro_agent.worker import mutations
 
@@ -251,8 +251,8 @@ def test_a_schema_plan_will_not_claim_nothing_was_removed(writable_tenant, sessi
 
 # --- the approval must still describe reality when it executes ---------------
 
-def test_apply_refuses_when_the_facts_changed_after_approval(writable_tenant,
-                                                             session_dir, monkeypatch):
+def test_apply_refuses_when_the_facts_changed_after_approval(
+        writable_tenant, session_dir, monkeypatch):
     """A ten-minute clock cannot tell whether the figures are still true.
 
     Re-planning can, so the expiry only has to guard intent, and accuracy is checked
@@ -292,8 +292,8 @@ def test_apply_proceeds_when_nothing_changed(writable_tenant, session_dir):
     assert applied["result"]["n_updated"] == 1
 
 
-def test_a_plan_whose_target_disappeared_is_stale_not_a_crash(writable_tenant,
-                                                              session_dir, monkeypatch):
+def test_a_plan_whose_target_disappeared_is_stale_not_a_crash(
+        writable_tenant, session_dir, monkeypatch):
     planned = call(writable_tenant, session_dir, "plan", op="update_dataset",
                    args={"project_id": "proj_a", "dataset_id": "ds_0000",
                          "tags": ["new-tag"]})
@@ -314,3 +314,61 @@ def test_a_plan_whose_target_disappeared_is_stale_not_a_crash(writable_tenant,
 def test_the_expiry_is_generous_now_that_accuracy_is_checked_separately():
     from cirro_agent import plans
     assert plans.TTL_SECONDS == 3600
+
+
+def test_a_stale_plan_is_finished_not_left_applying(
+        writable_tenant, session_dir, monkeypatch):
+    """Revalidation refusing after claim used to leave the plan APPLYING with an
+    intent record and no outcome -- a mutation that looks like it never finished."""
+    from cirro_agent import plans
+    from cirro_agent.worker import dataset_ops
+    planned = call(writable_tenant, session_dir, "plan", op="update_dataset",
+                   args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                         "tags": ["new-tag"]})
+    original = dataset_ops._dataset
+
+    def drifted(reader, project_id, given):
+        row = dict(original(reader, project_id, given))
+        row["tags"] = row["tags"] + ["elsewhere"]
+        return row
+    monkeypatch.setattr(dataset_ops, "_dataset", drifted)
+
+    applied = apply_from(writable_tenant, session_dir, planned)
+
+    assert applied["error"]["code"] == "PLAN_STALE"
+    record = plans.load(session_dir, planned["plan_id"])
+    assert record.status == plans.FAILED
+    assert plans.outcome(session_dir, record)["error"].startswith("PLAN_STALE")
+
+
+def test_a_scope_less_invalidation_drops_every_snapshot_of_that_kind(
+        writable_tenant, session_dir):
+    """Snapshots are stored under a scope key, so invalidating with no scope used to
+    compute a key nothing was stored under and remove nothing. Snapshot files are
+    named by hash, so this is proved through the cache, not the filenames."""
+    from cirro_agent.worker import reads
+    request = {"base_url": writable_tenant["base_url"],
+               "session_dir": str(session_dir.path)}
+    warm = reads.Reader(request)
+    warm.processes(include_archived=True)
+    warm.processes(include_archived=False)
+    assert warm.cost.to_dict()["api_calls"] > 0
+
+    served = reads.Reader(request)
+    served.processes(include_archived=True)
+    assert served.cost.to_dict()["api_calls"] == 0, "answered from the snapshot"
+
+    assert warm.cache.invalidate_kinds(["processes"]), "both archived scopes dropped"
+
+    cold = reads.Reader(request)
+    cold.processes(include_archived=True)
+    assert cold.cost.to_dict()["api_calls"] > 0, "refetched after invalidation"
+
+
+def test_the_plan_response_reports_the_risk_the_record_carries(
+        writable_tenant, session_dir):
+    planned = call(writable_tenant, session_dir, "plan", op="update_dataset",
+                   args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                         "tags": ["new-tag"]})
+    from cirro_agent import plans
+    assert planned["risk"] == plans.load(session_dir, planned["plan_id"]).risk

@@ -494,8 +494,16 @@ def plan_download_files(reader: reads.Reader, args: dict) -> Draft:
     total_bytes = sum(e.get("size") or 0 for e in entries)
 
     destination = Path(args["destination"]).expanduser().resolve()
-    free = shutil.disk_usage(destination if destination.exists()
-                             else destination.parent).free
+    probe = destination if destination.exists() else destination.parent
+    try:
+        free = shutil.disk_usage(probe).free
+    except FileNotFoundError:
+        raise errors.InvalidQuery(
+            f"{destination} has no existing parent directory.",
+            what="The destination must be somewhere that already exists, or one level "
+                 "below it.", field="destination", given=str(destination),
+            retry_with=[{"destination": str(Path.home() / "Downloads")}],
+        )
     warnings = []
     if total_bytes > free * 0.9:
         warnings.append(
@@ -514,12 +522,15 @@ def plan_download_files(reader: reads.Reader, args: dict) -> Draft:
         f"Download {len(entries)} files ({S.human_bytes(total_bytes)}) from "
         f"{row['name']} ({row['id']}) to local disk.",
         "", f"  Destination  {destination}",
-        f"  Free space   {S.human_bytes(free)}",
         f"  Filter       {glob or '(all files)'}",
         "", "  Files:",
     ]
     lines += [f"    {p['template']}  x{p['n']}" for p in patterns]
     lines += ["", "This writes to the local filesystem, not to Cirro."]
+    # Free space is advisory and changes constantly, so it is a warning: in the
+    # summary it made every apply stale after unrelated disk activity.
+    warnings.append(f"{S.human_bytes(free)} free at the destination.")
+
     return Draft(args={"project_id": project["id"], "dataset_id": row["id"],
                        "destination": str(destination),
                        "files": [e["path"] for e in entries] if glob else None,

@@ -17,7 +17,11 @@ def test_log_head_and_tail_do_not_overlap():
     """A 40-line log with head=30/tail=60 used to emit 30 lines then all 40 again."""
     body = S.logs("\n".join(f"line{i}" for i in range(40)), head=30, tail=60)
     assert len(body["head"]) == 30
-    assert body["tail"] == [], "nothing is left over once head covers the log"
+    # The old assertion encoded a bug: lines past the head were dropped rather than
+    # shown. Head and tail must be disjoint, and together must cover the log.
+    assert body["tail"], "lines past the head are shown as the tail"
+    assert not set(body["head"]) & set(body["tail"])
+    assert len(body["head"]) + len(body["tail"]) == 40
 
     body = S.logs("\n".join(f"line{i}" for i in range(200)), head=10, tail=20)
     assert body["head"][-1] == "line9"

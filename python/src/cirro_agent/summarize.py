@@ -268,7 +268,7 @@ def logs(text: str, *, head: int = 30, tail: int = 60, max_blocks: int = 5) -> d
         "head": lines[:head],
         # Compared against head + tail, not head: otherwise a 40-line log with
         # head=30/tail=60 returns the first 30 lines and then all 40 again.
-        "tail": lines[head:][-tail:] if len(lines) > head + tail else [],
+        "tail": lines[head:][-tail:],
         "error_blocks": blocks,
         "signature_counts": repeated,
         "raw_available": {

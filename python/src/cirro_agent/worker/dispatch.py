@@ -1,9 +1,7 @@
 """Route one worker request to one handler, and render any failure as a typed error."""
-from pathlib import Path
 from typing import Any
 
 from .. import errors, plans
-from ..cache import SnapshotCache
 from ..session import Session
 from . import auth, portal, read_listings, read_process, read_query, read_summaries, reads
 
@@ -28,7 +26,7 @@ def do_plan(request: dict) -> dict:
         "plan_id": record.plan_id,
         "digest": record.digest,
         "op": op.name,
-        "risk": op.risk,
+        "risk": record.risk,
         "expires_at": record.expires_at,
         "expires_in_s": int(record.expires_at - record.created_at),
         "warnings": record.warnings,
@@ -120,9 +118,9 @@ def do_apply(request: dict) -> dict:
         session, request["plan_id"], digest=request.get("digest", ""),
         approved_summary=request.get("approved_summary", ""), username=reader.username)
     op = mutations.get_op(record.op)
-    resolved = _revalidated(reader, op, record)
 
     try:
+        resolved = _revalidated(reader, op, record)
         result = op.apply(reader, resolved)
     except errors.AgentError as exc:
         plans.finish(session, record, error=f"{exc.code}: {exc.message}")
@@ -136,12 +134,20 @@ def do_apply(request: dict) -> dict:
 
     # Synchronous invalidation: the next read must not answer from a snapshot this
     # mutation just made wrong.
-    cache = SnapshotCache(Path(request["session_dir"]), request["base_url"],
-                          reader.username)
+    cache = reader.cache
     invalidated = []
-    for entry in record.invalidates:
+    touched = list(record.invalidates)
+    if isinstance(result, dict):
+        touched += result.get("invalidates") or []
+    for entry in touched:
         scope = {k: v for k, v in entry.items() if k != "kind"}
-        invalidated.append(cache.invalidate(entry["kind"], **scope))
+        if scope:
+            invalidated.append(cache.invalidate(entry["kind"], **scope))
+        else:
+            # No scope means every snapshot of this kind, whatever it was keyed by;
+            # `invalidate` with an empty scope would compute a key nothing was stored
+            # under and remove nothing.
+            invalidated += cache.invalidate_kinds([entry["kind"]])
     return {
         "ok": True,
         "applied": record.op,

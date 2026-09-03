@@ -253,44 +253,74 @@ def finish(session: Session, plan: Plan, *, result: Any = None,
     record(session, plan, phase="outcome", result=result, error=error)
 
 
-def outcomes(session: Session, plan: Plan) -> dict:
-    """Per-step results a completed chain recorded, keyed by step index as a string.
-
-    Read from the audit file rather than kept in the plan, because the audit is the
-    record that already has to be trustworthy -- and because the file name is derived
-    from the plan, one apply's records are always in one place.
-    """
+def _audit_path(session: Session, plan: Plan) -> Path:
+    # Stamped from the plan, not from now: stamping at write time split one apply
+    # across two files whenever intent and outcome straddled a second boundary,
+    # leaving a file holding an intent that appeared never to have completed.
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(plan.created_at))
-    path = session.path / "runs" / f"{stamp}-{plan.op}-{plan.plan_id}.jsonl"
-    found = {}
+    return session.path / "runs" / f"{stamp}-{plan.op}-{plan.plan_id}.jsonl"
+
+
+def outcome(session: Session, plan: Plan) -> dict:
+    """The single outcome entry a finished plan recorded.
+
+    The audit file feeds values back into later approvals (a resumed chain reuses
+    what its earlier steps produced), so it is held to the same standard as the plan
+    file: it must exist, every line must name this plan, and there must be exactly
+    one outcome. A second outcome line is not a retry; it is someone appending.
+    """
+    path = _audit_path(session, plan)
     try:
         lines = path.read_text().splitlines()
     except OSError:
-        return found
+        raise errors.PlanInvalid(
+            f"Plan {plan.plan_id} has no audit record.",
+            what="A finished plan always has one; this one cannot be resumed from.",
+            retry_with=[{"op": "chain", "note": "plan a fresh chain"}],
+        )
+    outcomes = []
     for line in lines:
         try:
             entry = json.loads(line)
         except ValueError:
-            continue
-        if entry.get("phase") != "outcome":
-            continue
-        for step in (entry.get("result") or {}).get("completed") or []:
-            index = step.get("step")
-            if isinstance(index, int) and isinstance(step.get("result"), dict):
-                found[str(index - 1)] = step["result"]
+            raise errors.PlanInvalid(
+                f"The audit record for {plan.plan_id} is not valid JSON.",
+                what="It has been edited or damaged.", user_action="Plan a fresh chain.",
+            )
+        if entry.get("plan_id") != plan.plan_id:
+            raise errors.PlanInvalid(
+                f"The audit record for {plan.plan_id} contains an entry for "
+                f"{entry.get('plan_id')!r}.",
+                what="Each plan's audit file holds only its own records.",
+                user_action="Plan a fresh chain.",
+            )
+        if entry.get("phase") == "outcome":
+            outcomes.append(entry)
+    if len(outcomes) != 1:
+        raise errors.PlanInvalid(
+            f"The audit record for {plan.plan_id} has {len(outcomes)} outcome entries; "
+            "a plan finishes exactly once.",
+            what="Extra outcome lines mean the file was appended to after the fact.",
+            user_action="Plan a fresh chain.",
+        )
+    return outcomes[0]
+
+
+def outcomes(session: Session, plan: Plan) -> dict:
+    """Per-step results a completed chain recorded, keyed by absolute step index."""
+    found = {}
+    for step in (outcome(session, plan).get("result") or {}).get("completed") or []:
+        index = step.get("step")
+        if isinstance(index, int) and isinstance(step.get("result"), dict):
+            found[index - 1] = step["result"]
     return found
 
 
 def record(session: Session, plan: Plan, *, phase: str, result: Any = None,
            error: Optional[str] = None) -> None:
     """Append-only audit log. Written before the mutation and after it."""
-    runs = session.path / "runs"
-    runs.mkdir(parents=True, exist_ok=True)
-    # Stamped from the plan, not from now: stamping at write time split one apply
-    # across two files whenever intent and outcome straddled a second boundary,
-    # leaving a file holding an intent that appeared never to have completed.
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(plan.created_at))
-    path = runs / f"{stamp}-{plan.op}-{plan.plan_id}.jsonl"
+    path = _audit_path(session, plan)
+    path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "phase": phase, "plan_id": plan.plan_id, "op": plan.op,
@@ -300,7 +330,10 @@ def record(session: Session, plan: Plan, *, phase: str, result: Any = None,
         entry["result"] = result
     if error is not None:
         entry["error"] = error
-    with path.open("a") as stream:
+    # 0600 like the plan files: the audit carries the same arguments, and a resumed
+    # chain reads values back out of it.
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a") as stream:
         stream.write(json.dumps(entry, default=str) + "\n")
 
 

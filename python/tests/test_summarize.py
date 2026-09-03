@@ -232,3 +232,12 @@ def test_no_trace_is_stated_not_implied():
 ])
 def test_human_bytes(size, text):
     assert S.human_bytes(size) == text
+
+
+def test_a_log_between_head_and_head_plus_tail_loses_nothing():
+    """Fifty lines with head=30, tail=60 used to show 30 lines and an empty tail."""
+    text = "\n".join(f"line {i}" for i in range(50))
+    body = S.logs(text, head=30, tail=60)
+    shown = body["head"] + body["tail"]
+    assert len(shown) == 50, f"{len(shown)} of 50 lines shown"
+    assert shown[-1] == "line 49"

@@ -209,7 +209,16 @@ def do_task_logs(request: dict) -> dict:
     # task_id is the caller-facing 0-based index into the task list; the API wants the
     # underlying batch job id, so resolve one to the other before calling.
     task_rows = _tasks(reader, project_id, dataset_id)
-    row = next((t for t in task_rows if t["task_id"] == int(task_id)), None)
+    try:
+        wanted = int(task_id)
+    except (TypeError, ValueError):
+        raise errors.InvalidQuery(
+            f"task_id must be the integer index from `summarize tasks`, not {task_id!r}.",
+            what="Tasks are addressed by their position in the task summary.",
+            field="task_id", given=task_id,
+            retry_with=[{"verb": "summarize", "of": "tasks"}],
+        )
+    row = next((t for t in task_rows if t["task_id"] == wanted), None)
     if row is None:
         raise errors.NotFound(
             f"This execution has no task {task_id}.",
