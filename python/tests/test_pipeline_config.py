@@ -503,3 +503,152 @@ def test_the_plan_names_the_local_files_it_would_replace(tmp_path, monkeypatch):
 
     assert "process-form.json" in draft.summary.split("Replaced locally")[1]
     assert any("will be overwritten" in w for w in draft.warnings)
+
+
+# --- hand-authored assets ---------------------------------------------------
+
+# A form a design spec cannot express: two selectors each revealing their own block,
+# which is the reason authored assets exist at all.
+AUTHORED_FORM = {
+    "form": {
+        "type": "object",
+        "properties": {
+            "mode": {"type": "string", "enum": ["fast", "thorough"], "title": "Mode"},
+            "call_variants": {"type": "boolean", "title": "Call variants"},
+        },
+        "dependencies": {
+            "mode": {"oneOf": [
+                {"properties": {"mode": {"enum": ["fast"]}}},
+                {"properties": {"mode": {"enum": ["thorough"]},
+                                "passes": {"type": "integer", "title": "Passes"}}},
+            ]},
+            "call_variants": {"oneOf": [
+                {"properties": {"call_variants": {"enum": [False]}}},
+                {"properties": {"call_variants": {"enum": [True]},
+                                "min_depth": {"type": "integer", "title": "Depth"}}},
+            ]},
+        },
+    },
+    "ui": {},
+}
+
+AUTHORED_INPUT = {
+    "mode": "$.dataset.params.mode",
+    "passes": "$.dataset.params.passes",
+    "call_variants": "$.dataset.params.call_variants",
+    "min_depth": "$.dataset.params.min_depth",
+}
+
+
+def _authored(tmp_path, form=None, extra=None):
+    directory = tmp_path / "config"
+    directory.mkdir()
+    (directory / "process-form.json").write_text(
+        json.dumps(form if form is not None else AUTHORED_FORM, indent=2))
+    (directory / "process-input.json").write_text(json.dumps(AUTHORED_INPUT, indent=2))
+    (directory / "process-output.json").write_text(json.dumps({"commands": []}))
+    for name, text in (extra or {}).items():
+        (directory / name).write_text(text)
+    return directory
+
+
+def test_authored_assets_are_accepted_verbatim(tmp_path):
+    directory = _authored(tmp_path)
+    assets, report = pipeline_ops._authored_assets(str(directory))
+    assert report["ok"], report["problems"]
+    assert set(assets) == {"process-form.json", "process-input.json",
+                           "process-output.json"}
+    # Byte-for-byte: the whole point is that nothing regenerates or reformats them.
+    assert assets["process-form.json"] == \
+        (directory / "process-form.json").read_text()
+    assert "min_depth" in assets["process-form.json"]
+
+
+def test_conditional_fields_from_two_selectors_are_not_reported_dangling(tmp_path):
+    """The walk that only looked at `properties` called these live fields dangling."""
+    _, report = pipeline_ops._authored_assets(str(_authored(tmp_path)))
+    assert report["n_errors"] == 0
+    assert not any("min_depth" in p["message"] or "passes" in p["message"]
+                   for p in report["problems"])
+
+
+def test_authored_assets_that_would_not_render_are_refused(tmp_path):
+    directory = _authored(tmp_path)
+    (directory / "process-form.json").write_text("{not json")
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops._authored_assets(str(directory))
+    assert caught.value.code == "INVALID_QUERY"
+    assert caught.value.retry_with[0]["verb"] == "check_config"
+
+
+def test_a_folder_without_a_form_names_what_it_found(tmp_path):
+    directory = tmp_path / "config"
+    directory.mkdir()
+    (directory / "form.json").write_text("{}")
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops._authored_assets(str(directory))
+    assert caught.value.code == "INVALID_QUERY"
+    assert "process-form.json" in caught.value.message
+
+
+def test_unrecognized_files_in_the_folder_are_left_alone(tmp_path):
+    directory = _authored(tmp_path, extra={"notes.md": "scratch", "old.json.bak": "{}"})
+    assets, _ = pipeline_ops._authored_assets(str(directory))
+    assert "notes.md" not in assets and "old.json.bak" not in assets
+
+
+def test_upload_takes_authored_assets_instead_of_a_spec(tmp_path, monkeypatch):
+    directory = _authored(tmp_path, extra={"preprocess.py": "def x(): pass\n"})
+    reader = MagicMock()
+    reader.base_url = "app.cirro.test"
+    monkeypatch.setattr(pipeline_ops, "_owned_process",
+                        lambda _r, _p: {"name": "Demo", "id": "p1",
+                                        "config_source": pipeline_ops.STORAGE})
+    draft = pipeline_ops.plan_upload_process_config(reader, {
+        "process_id": "process-abc", "assets_dir": str(directory)})
+    assert "process-form.json" in draft.args["assets"]
+    assert draft.args["assets_dir"] == str(directory.resolve())
+    # Nothing is staged: the files already live where the person put them, and
+    # rewriting their own source would be a surprise.
+    assert draft.args["stage_dir"] is None
+    assert "Staged to" not in draft.summary
+    assert f"hand-authored in {directory}" in draft.summary
+    assert "exactly as written" in draft.summary
+
+
+def test_upload_needs_exactly_one_asset_source(tmp_path):
+    """Refused before the process is even fetched: it is a malformed request."""
+    reader = MagicMock()
+    for args in ({},
+                 {"design_spec": _write_spec(tmp_path),
+                  "assets_dir": str(_authored(tmp_path))}):
+        with pytest.raises(errors.AgentError) as caught:
+            pipeline_ops.plan_upload_process_config(
+                reader, {"process_id": "process-abc", **args})
+        assert caught.value.code == "INVALID_QUERY"
+        assert {"design_spec", "assets_dir"} <= {
+            key for retry in caught.value.retry_with for key in retry.get("args", {})}
+
+
+def test_a_preprocess_path_conflicts_with_an_authored_folder(tmp_path):
+    script = tmp_path / "pre.py"
+    script.write_text("x = 1\n")
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops._assets_for({"assets_dir": str(_authored(tmp_path))},
+                                 preprocess=script.read_text())
+    assert caught.value.field == "preprocess_path"
+
+
+def test_create_process_validates_the_authored_assets_it_will_upload(tmp_path):
+    """Otherwise the pre-flight vouches for assets that are never uploaded."""
+    directory = _authored(tmp_path)
+    reader = MagicMock()
+    reader.processes.return_value = []
+    reader.base_url = "app.cirro.test"
+    draft = pipeline_ops.plan_create_process(reader, {
+        "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
+        "assets_dir": str(directory)})
+    assert draft.args["assets_dir"] == str(directory.resolve())
+    assert f"hand-authored in {directory}" in draft.summary
+    assert "3 assets, validated clean" in draft.summary
+    assert str(directory.resolve()) in draft.summary.split("Registering does not")[1]

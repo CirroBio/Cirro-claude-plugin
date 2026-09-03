@@ -78,22 +78,89 @@ def test_ordinary_work_is_not_obstructed(command):
     assert run(bash(command)) == ALLOW
 
 
-def test_writing_sdk_code_asks_rather_than_denies():
-    """Authoring a script is legitimate; running it outside the gate is not."""
+def test_editing_sdk_code_is_not_obstructed():
+    """Editing a file is not running it.
+
+    The gate used to ask on every Write or Edit of a .py mentioning the SDK, which
+    made a project that uses cirro -- including this repo -- unpleasant to work in
+    while the plugin was installed, and stopped nothing: `python that_file.py` was
+    allowed. Enforcement lives at execution instead.
+    """
     assert run({"tool_name": "Write",
                 "tool_input": {"file_path": "/tmp/a.py",
-                               "content": "from cirro import DataPortal\n"}}) == ASK
+                               "content": "from cirro import DataPortal\n"}}) == ALLOW
+    assert run({"tool_name": "Edit",
+                "tool_input": {"file_path": "/tmp/a.py",
+                               "new_string": "DataPortal().list_projects()\n"}}) == ALLOW
 
 
-def test_writing_unrelated_code_is_allowed():
-    assert run({"tool_name": "Write",
-                "tool_input": {"file_path": "/tmp/a.py", "content": "print(1)\n"}}) == ALLOW
+# --- executing a script that drives the SDK ---------------------------------
+
+def _script(tmp_path, name, body):
+    target = tmp_path / name
+    target.write_text(body)
+    return target
 
 
-def test_prose_mentioning_cirro_is_allowed():
-    assert run({"tool_name": "Write",
-                "tool_input": {"file_path": "/tmp/a.md",
-                               "content": "run `import cirro` yourself"}}) == ALLOW
+SDK_SCRIPT = "from cirro import DataPortal\nDataPortal().list_projects()\n"
+
+
+@pytest.mark.parametrize("template", [
+    "python3 {path}",
+    "python {path} --project X",
+    "{path}",
+    "uv run {path}",
+    "uv run python {path}",
+    "env FOO=1 python3 {path}",
+    "ls && python3 {path}",
+    'bash -c "python3 {path}"',
+])
+def test_running_a_script_that_drives_the_sdk_is_denied(tmp_path, template):
+    path = _script(tmp_path, "analyse.py", SDK_SCRIPT)
+    assert run(bash(template.format(path=path))) == DENY
+
+
+def test_running_a_shell_script_that_drives_the_cli_is_denied(tmp_path):
+    path = _script(tmp_path, "run.sh", "#!/bin/sh\ncirro upload -p X -n Y\n")
+    assert run(bash(f"bash {path}")) == DENY
+    assert run(bash(str(path))) == DENY
+
+
+def test_a_script_naming_no_sdk_is_allowed(tmp_path):
+    path = _script(tmp_path, "plot.py", "import pandas\nprint(1)\n")
+    assert run(bash(f"python3 {path}")) == ALLOW
+
+
+def test_pointing_a_tool_at_sdk_code_is_not_running_it(tmp_path):
+    """The distinction the old Write matcher could not make.
+
+    pytest, flake8 and grep all take paths to files full of SDK imports. Reading the
+    argument list rather than what is executed would block the repo's own test suite.
+    """
+    path = _script(tmp_path, "test_reads.py", SDK_SCRIPT)
+    for command in (f"python3 -m pytest {path}", f"pytest {path}",
+                    f"flake8 {path}", f"grep -n DataPort '{path}'",
+                    f"cat {path}", f"git add {path}"):
+        assert run(bash(command)) == ALLOW, command
+
+
+def test_a_missing_script_path_is_not_an_error(tmp_path):
+    assert run(bash(f"python3 {tmp_path / 'gone.py'}")) == ALLOW
+
+
+def test_a_wrapper_script_does_not_launder_the_one_underneath(tmp_path):
+    inner = _script(tmp_path, "analyse.py", SDK_SCRIPT)
+    outer = _script(tmp_path, "run.sh", f"#!/bin/sh\nset -e\npython3 {inner}\n")
+    assert run(bash(f"bash {outer}")) == DENY
+
+
+def test_a_self_invoking_script_still_answers(tmp_path):
+    """The nesting bound: a cycle must not spin the hook past its timeout."""
+    path = tmp_path / "loop.sh"
+    path.write_text(f"#!/bin/sh\nbash {path}\n")
+    started = time.monotonic()
+    assert run(bash(f"bash {path}")) == ALLOW
+    assert time.monotonic() - started < 10
 
 
 # --- the apply gate ---

@@ -118,6 +118,41 @@ def _manifest_payload():
     ).to_dict()
 
 
+def _metrics_payload(project_id, *, storage_unit="GB"):
+    """Both metrics series, through the generated models.
+
+    The shape is the point: a record carries `unit`, `date` and a `services` map, and
+    has no scalar value. Reading a `value` attribute made project storage report null
+    for every project, and no fixture existed to catch it.
+    """
+    from cirro_api_client.v1.models import ProjectMetrics, MetricRecord
+    from cirro_api_client.v1.models.metric_record_services import MetricRecordServices
+
+    def record(day, unit, services):
+        from datetime import date
+        return MetricRecord(
+            unit=unit, date=date.fromisoformat(day),
+            services=MetricRecordServices.from_dict(services))
+
+    return ProjectMetrics(
+        project_id=project_id,
+        costs=[
+            record("2026-07-01", "$", {"Amazon Elastic Compute Cloud - Compute": 140.59,
+                                       "Amazon Simple Storage Service": 24.91,
+                                       "EC2 - Other": 3.66}),
+            record("2026-08-01", "$", {"Amazon Elastic Compute Cloud - Compute": 210.10,
+                                       "Amazon Simple Storage Service": 25.40}),
+        ],
+        storage_metrics=[
+            record("2026-08-30", storage_unit, {"StandardStorage": 1.0}),
+            # The later record must win, and its tiers must be summed rather than
+            # one tier being reported as the whole figure.
+            record("2026-08-31", storage_unit, {"StandardStorage": 1.5,
+                                                "IntelligentTieringIAStorage": 2.5}),
+        ],
+    ).to_dict()
+
+
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch):
     from cirro_agent import session as session_mod
@@ -178,6 +213,12 @@ def fake_tenant(monkeypatch):
             router.get(f"{API}/projects/proj_b/datasets").respond(
                 json={"data": [], "nextToken": None})
             router.get(url__regex=rf"{API}/projects/[^/]+/shares$").respond(json=[])
+            router.get(f"{API}/projects/proj_a/metrics").respond(
+                json=_metrics_payload("proj_a"))
+            router.get(f"{API}/projects/proj_b/metrics").respond(
+                json=_metrics_payload("proj_b"))
+            router.get(f"{API}/metrics").respond(
+                json=[_metrics_payload("proj_a"), _metrics_payload("proj_b")])
             router.get(url__regex=rf"{API}/projects/proj_a/datasets/ds_\d+$"
                        ).respond(json=_detail_payload(datasets[0]))
             router.get(url__regex=rf"{API}/projects/[^/]+/datasets/[^/]+/files"

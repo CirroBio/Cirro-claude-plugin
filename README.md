@@ -55,6 +55,10 @@ from the `~/.cirro` used by the standalone `cirro` CLI — the plugin never touc
 One directory, one Cirro tenant. If you work with two, use two directories; the plugin
 will not guess between them.
 
+You do not have to move to use another one. Ask Claude to work against a different
+signed-in directory and it will, naming the tenant it used — the same thing
+`cirro-agent read ... --dir <path>` does on the command line.
+
 ## Looking at things
 
 Ask in plain language and Claude handles the rest. Underneath it uses a read-only
@@ -74,6 +78,7 @@ cirro-agent read tasks -p "My Project" -d ds_123
 | Runs | `logs`, `tasks`, `task-logs`, `trace`, `chain-status` |
 | Pipelines | `processes`, `process`, `process-params`, `process-config`, `workflow-spec`, `check-config` |
 | Project resources | `samples`, `references`, `reference-types`, `compute-envs`, `shares`, `workspaces`, `project-users`, `users` |
+| Money | `spend` |
 
 **Big answers stay useful.** Ask about a project with 4,000 datasets and you will not get
 4,000 rows, and you will not get an arbitrary 40 either. You get the shape of all of them
@@ -151,8 +156,10 @@ Every change is written to a log in `.cirro/runs/` — what was done, when, and 
 
 A few things worth knowing:
 
-- **Cirro has no pricing API**, so a plan tells you what will run and on what, rather
-  than inventing a cost estimate.
+- **Nothing prices a run before it happens**, so a plan tells you what will run and on
+  what rather than inventing an estimate. What a project has *already* cost is real and
+  readable: `cirro-agent read spend -p "My Project"` breaks it down by month and AWS
+  service, and `--all-projects` compares every project you can see in a single call.
 - **Folders are safe, and they come along for the ride.** Cirro stores folder
   membership alongside tags, so a careless tag edit could quietly move a dataset out of
   its folder. Every plan resolves folder membership explicitly and tells you it is
@@ -231,11 +238,19 @@ Either way you keep the files. Uploading into Cirro also saves a copy in a
 `pipeline-config/` folder next to the design spec, so months later you can read what a
 pipeline is actually configured to do without asking Cirro for it back.
 
+**You can write the configuration yourself.** Generating it from a spec is the quick
+path, but some forms cannot be described in one — a field revealed by two different
+selectors, a custom widget, an input map tuned by hand. Point Claude at a folder of
+`process-form.json` and friends instead of a spec and those files go up exactly as
+written: validated, never reformatted, never regenerated. No copy is staged in that
+case, because the files are already yours and already where you put them.
+
 Two things worth knowing:
 
 - **Claude only edits pipelines you own.** One belonging to a colleague, or curated by
   Cirro, is refused rather than changed.
-- **The generated configuration is checked before it goes anywhere.** `cirro-agent read
+- **Configuration is checked before it goes anywhere**, whether generated or written by
+  hand. `cirro-agent read
   check-config` catches the failures the portal reports unhelpfully or not at all — form
   fields the renderer will ignore, file pickers that will show an empty list, parameters
   wired to fields that do not exist. Nothing in that check can tell you whether the form
@@ -244,10 +259,14 @@ Two things worth knowing:
 ## Locking it down further
 
 The plugin already blocks the obvious ways around the gate: driving the Cirro SDK
-directly from a Python one-liner, using the standalone `cirro` CLI's upload or configure
-commands, or moving data with the AWS CLI. Be clear about the limit, though — that check
-reads shell commands as text. It makes accidental bypass impossible and deliberate bypass
-obvious. It is not a sandbox.
+directly from a Python one-liner, running a script or shell script that drives it, using
+the standalone `cirro` CLI's upload or configure commands, or moving data with the AWS
+CLI. Be clear about the limit, though — that check reads commands, and the scripts they
+launch, as text. It makes accidental bypass impossible and deliberate bypass obvious. It
+is not a sandbox.
+
+Editing files is never blocked and never prompts. Writing Python that uses the Cirro SDK
+is ordinary work; only running it is gated.
 
 Plugins are not allowed to grant themselves permissions, so if you want a hard boundary,
 add this to your own Claude Code settings:

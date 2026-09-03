@@ -35,6 +35,84 @@ def test_an_empty_listing_is_an_honest_empty_list(fake_tenant, session_dir):
     assert out["cost"]["api_calls"] == 1
 
 
+def test_spend_reports_dollars_by_month_newest_first(fake_tenant, session_dir):
+    out = _read(fake_tenant, session_dir, "list", of="spend",
+                scope={"project_ids": ["proj_a"]})
+    assert out["ok"], out
+    result = out["result"]
+    assert [item["month"] for item in result["items"]] == ["2026-08", "2026-07"]
+    assert result["items"][0]["unit"] == "$"
+    # Each month's figure is the sum across services, not one service's share.
+    assert result["items"][0]["total"] == 235.50
+    assert result["items"][0]["by_service"]["Amazon Elastic Compute Cloud - Compute"] \
+        == 210.10
+    assert result["totals"] == {"unit": "$", "months": 2, "total": 404.66,
+                                "latest_month": "2026-08", "latest_total": 235.50}
+    assert result["next_calls"][0]["call"]["scope"] == {"projects": "*"}
+
+
+def test_spend_across_every_project_is_one_call(fake_tenant, session_dir):
+    out = _read(fake_tenant, session_dir, "list", of="spend",
+                scope={"projects": "*"})
+    assert out["ok"], out
+    items = out["result"]["items"]
+    assert {item["project_id"] for item in items} == {"proj_a", "proj_b"}
+    # Labeled, not bare IDs, and the tenant total is one call rather than one per
+    # project -- which is why this scope does not go through the fan-out gate.
+    assert items[0]["project"] == "Immuno-Oncology Core"
+    assert out["cost"]["by_kind"].get("metrics.get_all") == 1
+    assert "metrics.get" not in out["cost"]["by_kind"]
+    assert out["result"]["totals"]["projects"] == 2
+
+
+def test_spend_is_served_from_the_snapshot_on_a_second_read(fake_tenant, session_dir):
+    first = _read(fake_tenant, session_dir, "list", of="spend",
+                  scope={"project_ids": ["proj_a"]})
+    second = _read(fake_tenant, session_dir, "list", of="spend",
+                   scope={"project_ids": ["proj_a"]})
+    assert first["cost"]["api_calls"] == 1
+    assert second["cost"]["api_calls"] == 0
+    assert second["result"]["totals"] == first["result"]["totals"]
+
+
+def test_project_storage_sums_the_tiers_of_the_latest_record(fake_tenant, session_dir):
+    """The metrics record carries a `services` map and no scalar value.
+
+    Reading a `value` attribute the model never had made this null for every project,
+    and the note still claimed records had been found.
+    """
+    out = _read(fake_tenant, session_dir, "get", entity="project", id="proj_a",
+                include=["storage_bytes"])
+    assert out["ok"], out
+    row = out["result"]["rows"][0]
+    assert row["storage_as_of"] == "2026-08-31", "the later of the two daily records"
+    assert row["storage_amount"] == 4.0, "1.5 + 2.5 across two tiers"
+    assert row["storage_unit"] == "GB"
+    assert row["storage_bytes"] == 4 * 1024 ** 3
+    assert "1 GB as 1073741824 bytes" in row["storage_note"], \
+        "the binary convention is stated rather than left to the reader to guess"
+    assert set(row["storage_by_tier"]) == {"StandardStorage",
+                                           "IntelligentTieringIAStorage"}
+
+
+def test_an_unconvertible_storage_unit_is_reported_not_guessed(monkeypatch):
+    from cirro_agent.worker import read_query
+    monkeypatch.setattr(read_query, "project_metrics", lambda reader, project_id: [
+        {"series": "storage", "date": "2026-08-31", "unit": "objects",
+         "total": 7.0, "by_service": {"StandardStorage": 7.0}}])
+    row = read_query._project_storage(object(), "proj_a")
+    assert row["storage_bytes"] is None and row["storage_amount"] == 7.0
+    assert "'objects'" in row["storage_note"]
+
+
+def test_a_project_with_no_metrics_says_so(monkeypatch):
+    from cirro_agent.worker import read_query
+    monkeypatch.setattr(read_query, "project_metrics", lambda reader, project_id: [])
+    row = read_query._project_storage(object(), "proj_a")
+    assert row["storage_bytes"] is None
+    assert "no storage records" in row["storage_note"]
+
+
 def test_an_unknown_listing_names_the_ones_that_exist(fake_tenant, session_dir):
     out = _read(fake_tenant, session_dir, "list", of="nonesuch",
                 scope={"project_ids": ["proj_a"]})

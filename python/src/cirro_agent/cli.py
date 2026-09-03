@@ -8,6 +8,8 @@ which in turn removes the pressure that otherwise produces an over-broad rule.
 import argparse
 import json
 import sys
+from pathlib import Path
+from typing import Optional
 
 from . import errors, runner
 
@@ -43,6 +45,12 @@ def _common(request: dict, args) -> dict:
     return request
 
 
+def _start(args) -> Optional[Path]:
+    """Where session resolution begins: the given directory, or the process's own."""
+    directory = getattr(args, "dir", None)
+    return Path(directory).expanduser() if directory else None
+
+
 def _run(request: dict, args) -> int:
     verb = request.get("verb")
     if verb not in READ_VERBS:
@@ -53,11 +61,12 @@ def _run(request: dict, args) -> int:
             what="Mutations go through the plan and apply MCP tools.",
             retry_with=[{"tool": "plan"}],
         ).to_dict())
-    return _emit(runner.call(_common(request, args)))
+    return _emit(runner.call(_common(request, args), start=_start(args)))
 
 
 def _doctor(args) -> int:
     from . import session as session_mod
+    start = _start(args)
     report = {"ok": True, "checks": []}
 
     def check(name, status, **detail):
@@ -66,7 +75,7 @@ def _doctor(args) -> int:
             report["ok"] = False
 
     try:
-        found = session_mod.find_session_dir()
+        found = session_mod.find_session_dir(start)
         check("session_folder", "ok", path=str(found),
               gitignored=(found / ".gitignore").is_file(),
               git_tracked=session_mod.is_git_tracked(found))
@@ -75,7 +84,7 @@ def _doctor(args) -> int:
         return _emit(report)
 
     try:
-        current = session_mod.load()
+        current = session_mod.load(start)
         check("session_config", "ok", base_url=current.base_url, auth=current.auth)
     except errors.AgentError as exc:
         check("session_config", "fail", detail=exc.message, remedy=exc.user_action)
@@ -88,7 +97,7 @@ def _doctor(args) -> int:
         check("runtime", "fail", detail=exc.message, remedy=exc.user_action)
         return _emit(report)
 
-    identity = runner.call({"verb": "whoami"})
+    identity = runner.call({"verb": "whoami"}, start=start)
     if identity.get("ok") and identity.get("authenticated"):
         check("authentication", "ok", username=identity.get("username"),
               verified_by=identity.get("verified_by"))
@@ -119,6 +128,8 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--fresh", action="store_true", help="bypass the snapshot cache")
         sub.add_argument("--stale-ok", action="store_true",
                          help="serve an expired snapshot (reported in notes)")
+        sub.add_argument("--dir", help="resolve the session folder from this directory"
+                                       " instead of the working directory")
         if project:
             sub.add_argument("-p", "--project", help="project name or ID")
             sub.add_argument("--all-projects", action="store_true",
@@ -183,6 +194,8 @@ def build_parser() -> argparse.ArgumentParser:
         project=True)
     add("reference-types", "reference types this deployment accepts")
     add("compute-envs", "compute environments available to a project", project=True)
+    add("spend", "dollar cost already incurred, by month and AWS service;"
+                 " --all-projects compares every project in one call", project=True)
     add("shares", "data shares in a project", project=True)
     add("workspaces", "interactive workspaces in a project", project=True)
     add("users", "users in this tenant")
@@ -215,7 +228,8 @@ def build_parser() -> argparse.ArgumentParser:
     add("describe", "field catalog, tiers and query grammar for an entity").add_argument(
         "entity", nargs="?", default="dataset")
     add("whoami", "identity, tenant and runtime")
-    read.add_parser("doctor", help="diagnose session, runtime and auth")
+    read.add_parser("doctor", help="diagnose session, runtime and auth").add_argument(
+        "--dir", help="resolve the session folder from this directory")
     return parser
 
 
@@ -301,7 +315,7 @@ def main(argv=None) -> int:
         return _run(request, args)
 
     listings = {"folders": "folders", "reference-types": "reference_types",
-                "users": "users",
+                "users": "users", "spend": "spend",
                 "compute-envs": "compute_envs", "shares": "shares",
                 "workspaces": "workspaces", "project-users": "project_users"}
     if command in listings:

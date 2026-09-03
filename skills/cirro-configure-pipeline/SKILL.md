@@ -61,6 +61,32 @@ Read the generated form for sense, not just validity. Groups in a sane order, ti
 biologist would recognize, pickers pointing at the right library, conditional fields
 where a large parameter set would otherwise be a wall.
 
+## When generation is not enough
+
+Some forms cannot be described by a spec: a field revealed by two independent
+selectors, a custom widget, an input map tuned by hand. Do not contort the spec to
+approximate one. Write the files and pass `assets_dir` instead of `design_spec`:
+
+```
+plan(op="upload_process_config",
+     args={"process_id": "...", "assets_dir": "path/to/config"})
+```
+
+`assets_dir` is a folder holding `process-form.json` and any of `process-input.json`,
+`process-output.json`, `process-compute.config`, `preprocess.py`, `README.md`. They go
+up **exactly as written** — validated by the same checker, never reformatted, never
+regenerated. Anything else in the folder is ignored. Nothing is staged, because the
+files are already where the user put them.
+
+Exactly one of `design_spec` and `assets_dir` on an upload. `create_process` still
+takes the spec for the process record's own fields — name, version, repository — and
+accepts `assets_dir` alongside it so its pre-flight validates the files that will
+actually be uploaded rather than ones nobody will send.
+
+Run `cirro-agent read check-config <dir>` on a hand-written folder before planning.
+Its errors are defects Cirro would reject or mis-render, and the upload refuses on
+them.
+
 ## Register, then deliver
 
 Registering the process and delivering the configuration are **separate steps**. The

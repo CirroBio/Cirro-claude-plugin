@@ -47,6 +47,20 @@ INTERPRETERS = re.compile(
     r"^(?:python[0-9.]*|ipython[0-9.]*|jupyter|uv|uvx|pipx|poetry|conda|hatch|pdm)$",
     re.I)
 
+# What gets read when a command executes a file rather than inline code. The SDK is
+# named in the file, not in the command, so `python analyse.py` says nothing on its
+# own -- and that was the one bypass route left open.
+SHELL_SUFFIXES = (".sh", ".bash", ".zsh")
+SCRIPT_SUFFIXES = (".py", ".ipynb") + SHELL_SUFFIXES
+SCRIPT_READ_LIMIT = 512 * 1024
+# A script that runs a script that runs a script. Bounded so a self-invoking wrapper
+# cannot spin the hook past its timeout.
+MAX_NESTING = 3
+
+USE_INSTEAD = ("Use instead:\n"
+               "  reads   cirro-agent read --help\n"
+               "  writes  the plan and apply MCP tools\n")
+
 # A shell re-enters the parser: its -c payload is a command in its own right, and
 # without this `bash -c "python -c 'import cirro'"` sails past every other check.
 SHELLS = re.compile(r"^(?:sh|bash|zsh|dash|ksh|fish)$", re.I)
@@ -131,7 +145,46 @@ def tokens_of(segment: str) -> list:
         return segment.split()
 
 
-def inspect_bash(command: str) -> None:
+def executed_script(words: list, index: int, program: str) -> str | None:
+    """The file this segment actually runs, if it runs one.
+
+    Only the file that is executed -- never one that merely appears in the argument
+    list, or `pytest test_reads.py` and `flake8 src/mutations.py` would be read as
+    running the SDK code they are pointed at.
+    """
+    if words[index].endswith(SCRIPT_SUFFIXES):
+        return words[index]
+    if not (INTERPRETERS.match(program) or SHELLS.match(program)):
+        return None
+    for argument in words[index + 1:]:
+        # A module or an inline program: any path after it is that program's own
+        # argv, which is why `python -m pytest test_x.py` runs pytest, not test_x.
+        if argument in ("-m", "-c"):
+            return None
+        if argument.startswith("-"):
+            continue
+        name = Path(argument).name
+        if argument in EXECUTING_SUBCOMMANDS or INTERPRETERS.match(name) \
+                or SHELLS.match(name):
+            continue
+        return argument if argument.endswith(SCRIPT_SUFFIXES) else None
+    return None
+
+
+def read_script(target: str, cwd: str) -> str | None:
+    path = Path(target)
+    if not path.is_absolute():
+        path = Path(cwd or ".") / path
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(SCRIPT_READ_LIMIT).decode("utf-8", "replace")
+    except OSError:
+        # Nothing readable at that path: there is no script here to judge, and the
+        # command's own text has already been searched for inline SDK use.
+        return None
+
+
+def inspect_bash(command: str, cwd: str = "", depth: int = 0) -> None:
     # A heredoc puts the payload on later lines, which segment splitting separates
     # from the interpreter that consumes it. So an interpreter anywhere in a command
     # that mentions the SDK anywhere is treated as driving it.
@@ -172,11 +225,26 @@ def inspect_bash(command: str) -> None:
             continue
         program = Path(words[index]).name
 
+        # Executing a file that drives the SDK is the same act as `python -c` doing it
+        # inline, so it gets the same answer. Editing that file is not, and no longer
+        # prompts. A shell script is a command payload like any other, so it is judged
+        # by every detector here rather than only by the SDK markers -- otherwise a
+        # one-line run.sh calling the upstream CLI walks straight through.
+        target = executed_script(words, index, program)
+        body = read_script(target, cwd) if target and depth < MAX_NESTING else None
+        if body is not None:
+            if target.endswith(SHELL_SUFFIXES):
+                inspect_bash(body, cwd, depth + 1)
+            elif SDK_MARKERS.search(body):
+                block(f"Blocked by the Cirro plugin: `{target}` drives the Cirro SDK, so "
+                      "running it would bypass the approval gate on every create, update "
+                      f"and delete.\n\n{USE_INSTEAD}")
+
         # A shell's -c payload is itself a command; re-enter the parser on it.
         if SHELLS.match(program):
             for offset, token in enumerate(words[index + 1:], start=index + 1):
-                if token == "-c" and offset + 1 < len(words):
-                    inspect_bash(words[offset + 1])
+                if token == "-c" and offset + 1 < len(words) and depth < MAX_NESTING:
+                    inspect_bash(words[offset + 1], cwd, depth + 1)
             continue
 
         if program in PACKAGE_RUNNERS:
@@ -189,9 +257,7 @@ def inspect_bash(command: str) -> None:
                     f"Blocked by the Cirro plugin: `{program}` is being used to fetch and "
                     "run the cirro package directly, which bypasses the approval gate on "
                     "every create, update and delete.\n\n"
-                    "Use instead:\n"
-                    "  reads   cirro-agent read --help\n"
-                    "  writes  the plan and apply MCP tools\n")
+                    f"{USE_INSTEAD}")
 
         if INTERPRETERS.match(program) and (SDK_MARKERS.search(segment)
                                             or whole_mentions_sdk):
@@ -199,9 +265,7 @@ def inspect_bash(command: str) -> None:
                 f"Blocked by the Cirro plugin: `{program}` is being used to drive the "
                 "Cirro SDK directly, which bypasses the approval gate on every create, "
                 "update and delete.\n\n"
-                "Use instead:\n"
-                "  reads   cirro-agent read --help\n"
-                "  writes  the plan and apply MCP tools\n")
+                f"{USE_INSTEAD}")
 
         if UPSTREAM_CLI.match(program):
             first = next((w for w in words[index + 1:] if not w.startswith("-")), "")
@@ -211,9 +275,7 @@ def inspect_bash(command: str) -> None:
                     f"uploads, logins and downloads ({first or 'interactive mode'}) with "
                     "no plan and no approval, and writes credentials to the global "
                     "~/.cirro.\n\n"
-                    "Use instead:\n"
-                    "  reads   cirro-agent read --help\n"
-                    "  writes  the plan and apply MCP tools\n")
+                    f"{USE_INSTEAD}")
 
         if program == "cirro-agent" and words[index + 1:]:
             if words[index + 1] not in ("read", "-h", "--help"):
@@ -343,23 +405,6 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
                               "approved_summary": plan.get("summary") or ""}})
 
 
-# --------------------------------------------------------------------------- write
-
-
-def inspect_write(tool_input: dict) -> None:
-    target = tool_input.get("file_path") or ""
-    if not target.endswith((".py", ".ipynb", ".sh")):
-        passthrough()
-    body = " ".join(str(tool_input.get(key) or "")
-                    for key in ("content", "new_string", "new_source"))
-    if not SDK_MARKERS.search(body):
-        passthrough()
-    respond("ask",
-            f"This writes Cirro SDK code to {target}. Authoring a script is legitimate, "
-            "but running it would bypass the plugin's approval gate on creates, updates "
-            "and deletes. Approve if you intend to review and run it yourself.")
-
-
 def main() -> None:
     try:
         event = json.load(sys.stdin)
@@ -370,11 +415,9 @@ def main() -> None:
     tool_input = event.get("tool_input") or {}
 
     if tool == "Bash":
-        inspect_bash(tool_input.get("command") or "")
+        inspect_bash(tool_input.get("command") or "", event.get("cwd") or "")
     if tool.endswith("__apply") and "cirro" in tool:
         inspect_apply(tool_input, event.get("cwd") or "")
-    if tool in ("Write", "Edit", "NotebookEdit"):
-        inspect_write(tool_input)
     passthrough()
 
 

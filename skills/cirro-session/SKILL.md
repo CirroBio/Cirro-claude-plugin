@@ -89,6 +89,22 @@ work through `cirro-agent read` and writes through `plan` / `apply`.
 The plugin refuses to guess. Two tenants means two directories, each with its own
 `.cirro/`. Do not attempt to repoint an existing folder at a different host.
 
+You do not have to move the session to use another folder. Every tool that resolves a
+session takes `directory`, and every read takes `--dir`:
+
+```
+login_start(directory="/path/to/other-project")
+plan(op="update_dataset", args={...}, directory="/path/to/other-project")
+```
+```bash
+cirro-agent read datasets -p "Their Project" --dir /path/to/other-project
+```
+
+Pass it consistently: a `plan` made in one folder cannot be applied from another, so
+`plan` and `apply` must name the same directory. Name the tenant you acted against
+whenever it is not the working directory's own — the response carries it, and a reader
+who cannot tell which tenant was touched has been failed.
+
 ## Logging out
 
 `logout` removes this folder's credential. On macOS the token itself lives in the

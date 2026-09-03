@@ -50,6 +50,15 @@ reads   (ungated) ──▶ bin/cirro-agent ─┐
 writes  (gated)   ──▶ MCP server (7) ──┘         the only code importing cirro
 ```
 
+**The gate judges execution, never authoring.** A `Write|Edit` matcher used to `ask` on
+any .py mentioning the SDK. It made every project that uses cirro -- this repo above all
+-- unpleasant to work in while the plugin was installed, and it stopped nothing:
+`python that_file.py` was allowed, because only the command's own text was searched. The
+hook now reads the file a command actually executes -- an interpreter's script argument,
+a bare `./x.py`, or a shell script, which re-enters the parser as the command payload it
+is -- and blocks on that instead. Do not reintroduce a write-time prompt; if a new
+bypass appears, it is an execution the parser is not reading yet.
+
 **Two surfaces, split by the gate.** Writes must prompt every time, which only an MCP
 tool can guarantee — `_meta["anthropic/requiresUserInteraction"]` is not defeated by an
 allow rule, any permission mode, or a hook returning `allow`. Bash has no equivalent.
@@ -75,7 +84,8 @@ configuration is impossible without them. `test_runtime_contract.py` fails if a 
 **Reads are split by verb, with one shared fetch layer.** `worker/reads.py` holds
 `Reader` -- the client, cache, cost accounting and name resolution -- plus the single
 implementation of each expensive fetch (`dataset_detail`, `dataset_manifest`,
-`dataset_tasks`, `process_detail`, `spec_shape`, `file_count`). The verbs live in `read_query` (query, get),
+`dataset_tasks`, `process_detail`, `spec_shape`, `file_count`, `project_metrics`,
+`all_project_metrics`). The verbs live in `read_query` (query, get),
 `read_summaries` (summarize, task_logs), `read_listings` (list), `read_process`
 (process_params, process_config) and `read_chains` (chain_status, which reads plan
 records and the audit and touches no API); each imports from `reads` and nothing
@@ -93,6 +103,15 @@ exact predicted counts for follow-up filters are free, while rows are the expens
 thing. That is the whole justification for the envelope shape.
 
 ## Things that will bite you
+
+**Session resolution starts wherever it is told to.** `find_session_dir(start)` walks up
+from `start`, defaulting to the process's working directory. Every MCP tool that
+resolves a session takes `directory`, and every read subcommand takes `--dir`, so one
+Claude session can work across several bound folders without being moved -- which is
+what people actually do. A test asserts each tool still takes it. The safety rules are
+unchanged and do the work: the machine-wide global credential folder is still refused,
+nothing is created implicitly, and `session_dir` is inside `DIGEST_FIELDS`, so a plan
+made in one folder cannot be applied in another.
 
 **`CIRRO_HOME` is frozen at import time.** `cirro.config.Constants` reads it in a class
 body, so it must be in a child process's environment *before* Python starts. Setting
@@ -119,6 +138,15 @@ names*, not a nesting level. Any analysis that walks only `properties` will repo
 correctly-mapped fields as dangling — this has already produced one wrong answer to a
 user. Use `formcheck.form_paths()`, which is the one implementation of that walk.
 
+**Configuration assets may be authored, not only generated.** `assets_dir` is a
+first-class alternative to `design_spec` on `create_process` and
+`upload_process_config`, because a form with two independent selectors, a custom widget
+or a hand-tuned input map cannot survive a round trip through a spec. Authored files go
+up byte-for-byte: `_authored_assets` reads them, `formcheck` validates them, and nothing
+rewrites or reformats them. Nothing is staged either -- the files are already where the
+person put them, so `stage_dir` is None and apply does not write over their source.
+`_one_asset_source` enforces exactly one of the two on upload.
+
 **The form validator is calibrated, not invented.** Its three tiers come from measuring
 the 213 forms and 72 input maps in Cirro-pipelines: 2 errors and 5 errors respectively,
 each a genuine defect. If a change to `formcheck.py` starts flagging production
@@ -134,6 +162,17 @@ and the registration sits on the module side, so any of them can be imported fir
 Putting the registration on the `mutations` side reintroduces a circular-import failure
 for whoever imports an op module before `mutations`. A new op goes in the family it
 belongs to, not in `mutations.py`.
+
+**Cirro reports spend, just not in advance.** `metrics.get_for_project` returns two
+series in one call -- dollars by AWS service by month, and storage by tier by day -- and
+`get_all_metrics` returns them for every visible project in a single request, the one
+cross-project read that does not fan out. A `MetricRecord` carries `unit`, `date` and a
+`services` map and **no scalar value**; reading a `value` attribute it never had made
+project storage null for every project, undetected because no fixture served the
+endpoint. Storage arrives in GB, so `storage_amount` with `storage_unit` is the figure
+to read and `storage_bytes` states the 2**30 convention it derives from. None of this is
+a forecast, so plans still carry no estimate -- say "nothing prices a run before it
+happens", never "there is no pricing API".
 
 **Never call `DataPortal()` bare.** With no cached token it enters a device-code login
 and blocks until the code expires. Build auth explicitly via `worker/portal.py`.

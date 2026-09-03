@@ -100,6 +100,26 @@ For whole-project storage there is a cheap path with no per-dataset cost:
 cirro-agent read project "My Project" --include storage_bytes
 ```
 
+It comes from the daily metrics record, so it lags by up to 48h and reports the sum
+across storage tiers. Read `storage_amount` with `storage_unit` (the figures Cirro
+gave); `storage_bytes` is derived from them.
+
+## Money
+
+Cirro reports what has **already** been spent, by month and by AWS service:
+
+```bash
+cirro-agent read spend -p "My Project"     # months, newest first, plus by_service
+cirro-agent read spend --all-projects      # every project, in ONE api call
+```
+
+`--all-projects` here does not fan out — it is a single request, so it is the right
+answer to "which project is costing us the most" and needs no `--confirm-fanout`.
+
+Nothing prices a run *before* it happens. There is no such API, so never estimate what
+an analysis will cost; say what will run instead, and offer this read for what similar
+work has cost so far.
+
 ## The other things worth knowing
 
 ```bash

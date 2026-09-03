@@ -95,6 +95,87 @@ def _validated_assets(spec: dict, preprocess: Optional[str] = None) -> tuple:
     return assets, report
 
 
+def _authored_assets(path: str) -> tuple:
+    """Read configuration assets a person wrote, and upload them exactly as written.
+
+    Generation cannot express every form. Conditional blocks driven by more than one
+    selector, custom widgets, and input maps tuned by hand are all legitimate and all
+    lost in a round trip through a design spec -- so a folder of files is a first-class
+    alternative to one, not a fallback. Nothing here rewrites or reformats them; they
+    are validated by the same checker `check-config` runs and sent verbatim.
+    """
+    directory = Path(path).expanduser()
+    if not directory.is_dir():
+        raise errors.NotFound(
+            f"No configuration folder at {directory}.",
+            what="assets_dir is a folder holding the process-*.json files you wrote.",
+            field="assets_dir", given=path,
+            retry_with=[{"note": "check the path, or pass design_spec to generate them"}],
+        )
+    assets = {name: (directory / name).read_text(encoding="utf-8")
+              for name in formgen.SLOTS if (directory / name).is_file()}
+    if formgen.FORM not in assets:
+        raise errors.InvalidQuery(
+            f"{directory} holds no {formgen.FORM}.",
+            what=f"The form is the one required asset. Recognized names: "
+                 f"{', '.join(sorted(formgen.SLOTS))}.",
+            field="assets_dir", given=path,
+            found=sorted(p.name for p in directory.iterdir() if p.is_file()),
+            retry_with=[{"note": f"name the form file {formgen.FORM}"}],
+        )
+    report = formcheck.check_assets(assets)
+    if not report["ok"]:
+        detail = "; ".join(f"{p['where']}: {p['message']}"
+                           for p in report["problems"] if p["level"] == "error")
+        raise errors.InvalidQuery(
+            f"The configuration in {directory} would not render: {detail}",
+            what="Fix the files; these are defects Cirro would reject or mis-render.",
+            field="assets_dir", given=path,
+            retry_with=[{"verb": "check_config", "path": str(directory)}],
+        )
+    return assets, report
+
+
+def _assets_for(args: dict, spec: Optional[dict] = None, *,
+                preprocess: Optional[str] = None) -> tuple:
+    """The assets an operation will act on: authored by hand, or generated from a spec."""
+    if args.get("assets_dir"):
+        if preprocess:
+            raise errors.InvalidQuery(
+                "assets_dir and preprocess_path conflict.",
+                what="An authored folder supplies its own preprocess.py.",
+                field="preprocess_path", given=args.get("preprocess_path"),
+                retry_with=[{"note": "drop preprocess_path; put the script in the "
+                                     "folder as preprocess.py"}],
+            )
+        return _authored_assets(args["assets_dir"])
+    if spec is None:
+        spec = _load_spec(args["design_spec"])
+    return _validated_assets(spec, preprocess=preprocess)
+
+
+def _asset_origin(args: dict) -> str:
+    return (f"hand-authored in {Path(args['assets_dir']).expanduser()}"
+            if args.get("assets_dir")
+            else f"generated from {Path(args['design_spec']).name}")
+
+
+def _one_asset_source(args: dict, op: str) -> None:
+    """Exactly one of the two: a spec to generate from, or a folder already written."""
+    given = [key for key in ("design_spec", "assets_dir") if args.get(key)]
+    if len(given) == 1:
+        return
+    raise errors.InvalidQuery(
+        f"{op} needs either design_spec or assets_dir"
+        + (", not both." if given else ", and got neither."),
+        what=("design_spec generates the assets; assets_dir uploads files you wrote, "
+              "verbatim, for form logic a spec cannot express."),
+        field="assets_dir", given=given or None,
+        retry_with=[{"op": op, "args": {"design_spec": "path/to/design-spec.md"}},
+                    {"op": op, "args": {"assets_dir": "path/to/config"}}],
+    )
+
+
 def _owned_process(reader: reads.Reader, process_id: str) -> dict:
     """Fetch a process and refuse to mutate one belonging to someone else.
 
@@ -231,7 +312,7 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
             "folder": args.get("config_folder") or R.DEFAULT_CONFIG_FOLDER,
         }
 
-    assets, report = _validated_assets(spec)
+    assets, report = _assets_for(args, spec)
     executor = str(workflow.get("executor", "NEXTFLOW")).upper()
     if executor not in ("NEXTFLOW", "CROMWELL"):
         raise errors.NotSupported(
@@ -261,6 +342,8 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
         "file_mapping_rules": _file_mapping_rules(spec),
         "design_spec": str(Path(args["design_spec"]).expanduser().resolve()),
     }
+    if args.get("assets_dir"):
+        resolved["assets_dir"] = str(Path(args["assets_dir"]).expanduser().resolve())
 
     where = {
         STORAGE: "uploaded into Cirro storage (a separate upload step after this)",
@@ -283,8 +366,9 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
         f"  Engine version  {resolved['executor_version'] or 'Cirro default'}",
         f"  Configuration   {source} — {where}",
         "",
-        f"  Form            {len(assets)} assets generated, validated clean"
+        f"  Form            {len(assets)} assets, validated clean"
         + (f" ({report['n_warnings']} warnings)" if report["n_warnings"] else ""),
+        f"  Assets          {_asset_origin(args)}",
     ]
     warnings = [p["message"] for p in report["problems"] if p["level"] == "warning"]
     if resolved["executor_version"]:
@@ -292,8 +376,11 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
             "executor_version is pinned. Cirro's default engine is right for most "
             "pipelines; pin only to recover from a compilation failure.")
     if source == STORAGE:
+        follow = "upload_process_config"
+        if args.get("assets_dir"):
+            follow += f" with the same assets_dir ({resolved['assets_dir']})"
         lines += ["", "Registering does not upload the configuration. Follow this with "
-                      "upload_process_config."]
+                      f"{follow}."]
     else:
         lines += ["", "Registering does not fetch the configuration. Write the assets "
                       "into the repository, commit and push them, then run "
@@ -390,7 +477,8 @@ def _stage(directory: Path, assets: dict) -> list:
 
 def plan_upload_process_config(reader: reads.Reader, args: dict) -> Draft:
     """STORAGE only: push the assets into Cirro as a new config revision."""
-    _need(args, "upload_process_config", "process_id", "design_spec")
+    _need(args, "upload_process_config", "process_id")
+    _one_asset_source(args, "upload_process_config")
     detail = _owned_process(reader, args["process_id"])
     if detail.get("config_source") != STORAGE:
         raise errors.InvalidQuery(
@@ -402,8 +490,7 @@ def plan_upload_process_config(reader: reads.Reader, args: dict) -> Draft:
                          "args": {"process_id": args["process_id"]}}],
         )
 
-    spec = _load_spec(args["design_spec"])
-    assets, report = _validated_assets(spec, preprocess=_read_optional(
+    assets, report = _assets_for(args, preprocess=_read_optional(
         args.get("preprocess_path")))
 
     token, current = None, {}
@@ -419,8 +506,10 @@ def plan_upload_process_config(reader: reads.Reader, args: dict) -> Draft:
     except Exception:
         token = None
 
-    staging = _staging_dir(args)
-    replaced = sorted(name for name in assets if (staging / name).exists()
+    # Authored assets are already on disk where the person put them; there is nothing
+    # to stage, and writing over their own source files would be a surprise.
+    staging = None if args.get("assets_dir") else _staging_dir(args)
+    replaced = sorted(name for name in assets if staging and (staging / name).exists()
                       and (staging / name).read_text() != assets[name])
     changed, added = [], []
     for name, text in sorted(assets.items()):
@@ -436,15 +525,21 @@ def plan_upload_process_config(reader: reads.Reader, args: dict) -> Draft:
         "",
         f"  Current revision  {token or 'none — this would be the first'}",
         f"  Assets            {len(assets)}: {', '.join(sorted(assets))}",
+        f"  Source            {_asset_origin(args)}",
         f"  New               {', '.join(added) or 'none'}",
         f"  Changed           {', '.join(changed) or 'none'}",
-        f"  Staged to         {staging}",
-        f"  Replaced locally  {', '.join(replaced) or 'none'}",
+    ]
+    if staging:
+        lines += [f"  Staged to         {staging}",
+                  f"  Replaced locally  {', '.join(replaced) or 'none'}"]
+    lines += [
         "",
         "All slots go up in one revision, so the configuration is never half-applied.",
-        "A copy is kept in the folder above so you can read it later without asking "
-        "Cirro for it back.",
     ]
+    lines.append("The files go up exactly as written; nothing is reformatted."
+                 if args.get("assets_dir") else
+                 "A copy is kept in the folder above so you can read it later without "
+                 "asking Cirro for it back.")
     warnings = [p["message"] for p in report["problems"] if p["level"] == "warning"]
     if replaced:
         warnings.append(f"{len(replaced)} file(s) in {staging} will be overwritten: "
@@ -452,11 +547,14 @@ def plan_upload_process_config(reader: reads.Reader, args: dict) -> Draft:
     if token and not changed and not added:
         warnings.append("Nothing differs from the current revision; this would be a "
                         "no-op revision.")
+    source = args.get("design_spec") or args["assets_dir"]
     return Draft(
         args={"process_id": args["process_id"], "assets": assets, "if_match": token,
-              "stage_dir": str(staging),
+              "stage_dir": str(staging) if staging else None,
+              "assets_dir": (str(Path(args["assets_dir"]).expanduser().resolve())
+                             if args.get("assets_dir") else None),
               "commit_message": args.get("commit_message")
-              or f"Configuration from {Path(args['design_spec']).name}"},
+              or f"Configuration from {Path(source).name}"},
         summary="\n".join(lines), warnings=warnings,
         invalidates=[_inv("processes")])
 
@@ -535,6 +633,8 @@ def apply_upload_process_config(reader: reads.Reader, args: dict) -> dict:
             "why": f"{stage_dir}: {exc}",
             "note": "the revision itself was accepted and is live",
             "fix": {"verb": "process_config", "id": args["process_id"]}}]
+    if args.get("assets_dir"):
+        result["authored_from"] = args["assets_dir"]
     return result
 
 

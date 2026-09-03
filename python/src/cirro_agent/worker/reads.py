@@ -329,6 +329,51 @@ def resolve_named(rows: list, given: str, *, entity: str, field: str, brief, ret
     )
 
 
+def project_metrics(reader: Reader, project_id: str) -> list:
+    """Both metrics series for one project, from one cached call.
+
+    The endpoint returns dollar cost by service by month and storage by tier by day
+    together, and two reads want one series each, so it is fetched once and tagged
+    with the series it came from.
+    """
+    def load():
+        found = reader.client.metrics.get_for_project(project_id=project_id)
+        reader.cost.call("metrics.get", probe=True)
+        return _series_rows(found, project_id), True
+
+    items, _ = reader._snapshot("metrics", load, project=project_id)
+    return items
+
+
+def all_project_metrics(reader: Reader) -> list:
+    """Every visible project's metrics in a single call.
+
+    The only cross-project read in the plugin that does not fan out: one request
+    covers every project, so spend across a tenant costs no more than one project's.
+    """
+    def load():
+        found = reader.client.metrics.get_all_metrics() or []
+        reader.cost.call("metrics.get_all")
+        rows = []
+        for record in found:
+            rows.extend(_series_rows(record, R.plain(getattr(record, "project_id", None))))
+        return rows, True
+
+    items, _ = reader._snapshot("metrics", load, project="*")
+    return items
+
+
+def _series_rows(metrics, project_id: Optional[str]) -> list:
+    if metrics is None:
+        return []
+    rows = []
+    for attribute, series in (("costs", "cost"), ("storage_metrics", "storage")):
+        for record in getattr(metrics, attribute, None) or []:
+            rows.append({"series": series, "project_id": project_id,
+                         **R.metric_record(record)})
+    return rows
+
+
 def is_terminal(reader: Reader, project_id: str, dataset_id: str) -> bool:
     """Whether the dataset can still change, read from the cached project listing."""
     datasets, _ = reader.datasets(project_id)

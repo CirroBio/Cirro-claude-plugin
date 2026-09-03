@@ -44,8 +44,21 @@ server = MCPServer(
     name="cirro",
     title="Cirro Data Platform",
     instructions=INSTRUCTIONS,
-    version="0.3.0",
+    version="0.4.0",
 )
+
+# Every tool that resolves a session takes this. Without it the only way to work
+# against a second bound folder was to move the whole Claude session, because the
+# walk started at the process's working directory and nothing could redirect it.
+DIRECTORY_DOC = (
+    " Pass `directory` to work against a session folder outside the current working "
+    "directory; the resolved folder and tenant are echoed in the response either way."
+)
+
+
+def _start(directory: Optional[str]) -> Optional[Path]:
+    """The directory to resolve the session from, or None for the process's own."""
+    return Path(directory).expanduser() if directory else None
 
 
 @server.tool(
@@ -55,7 +68,8 @@ server = MCPServer(
         "Create the .cirro session folder in a working directory and bind it to one "
         "Cirro tenant. The folder holds this directory's credential and cache, kept "
         "separate from the machine-wide ~/.cirro. Call this once per project directory; "
-        "it is never created implicitly. Creates a directory and writes to it."
+        "it is never created implicitly. Pass `directory` to bind one other than the "
+        "working directory. Creates a directory and writes to it."
     ),
 )
 def session_init(base_url: str, directory: Optional[str] = None) -> dict:
@@ -98,20 +112,22 @@ def session_init(base_url: str, directory: Optional[str] = None) -> dict:
         "but relay verification_url in your very next message regardless -- printing "
         "is a courtesy that may not have reached them. Nothing opens a browser. Call "
         "login_wait only after that message."
-    ),
+    ) + DIRECTORY_DOC,
 )
-def login_start(base_url: Optional[str] = None) -> dict:
+def login_start(base_url: Optional[str] = None,
+                directory: Optional[str] = None) -> dict:
     """Start a device-code login without waiting for it."""
     request: dict[str, Any] = {"verb": "login_start"}
+    start = _start(directory)
     try:
-        current = session_mod.load()
+        current = session_mod.load(start)
     except errors.NoSessionFolder as exc:
         # Only a missing folder may be created here. Anything else -- a tenant conflict
         # above all -- must surface, not be papered over by binding a new session.
         if not base_url:
             return exc.to_dict()
         try:
-            current = session_mod.init(Path.cwd(), base_url)
+            current = session_mod.init(start or Path.cwd(), base_url)
         except errors.AgentError as init_error:
             return init_error.to_dict()
     except errors.AgentError as exc:
@@ -140,11 +156,12 @@ def login_start(base_url: Optional[str] = None) -> dict:
         "failure -- it can never hang. A pending result is not an error: relay the link "
         "again and call this once more. Only needed when login_start returned pending; "
         "on a folder that was already logged in it simply confirms the identity."
-    ),
+    ) + DIRECTORY_DOC,
 )
-def login_wait(timeout_s: int = 120) -> dict:
+def login_wait(timeout_s: int = 120, directory: Optional[str] = None) -> dict:
     """Wait, boundedly, for the sign-in to land."""
-    return runner.call({"verb": "login_wait", "timeout_s": timeout_s})
+    return runner.call({"verb": "login_wait", "timeout_s": timeout_s},
+                       start=_start(directory))
 
 
 @server.tool(
@@ -153,11 +170,11 @@ def login_wait(timeout_s: int = 120) -> dict:
     description=(
         "Report the authenticated user, tenant, session folder, and the resolved cirro "
         "SDK version, including whether it is an editable local checkout. Read-only."
-    ),
+    ) + DIRECTORY_DOC,
 )
-def whoami() -> dict:
+def whoami(directory: Optional[str] = None) -> dict:
     """Who am I, against which tenant, with which SDK."""
-    return runner.call({"verb": "whoami"})
+    return runner.call({"verb": "whoami"}, start=_start(directory))
 
 
 @server.tool(
@@ -167,11 +184,11 @@ def whoami() -> dict:
         "Remove the cached credential for this session folder, forcing a fresh login. "
         "On macOS the token itself lives in the login Keychain; this reports the command "
         "to remove that entry rather than editing the keychain itself."
-    ),
+    ) + DIRECTORY_DOC,
 )
-def logout() -> dict:
+def logout(directory: Optional[str] = None) -> dict:
     """Forget this folder's credential."""
-    return runner.call({"verb": "logout"})
+    return runner.call({"verb": "logout"}, start=_start(directory))
 
 
 @server.tool(
@@ -203,15 +220,20 @@ def logout() -> dict:
         "repeating them, and counts the attempt itself. Destructive operations cannot "
         "go in a chain.\n\n"
         "For run_analysis, read `cirro-agent read process-params <process>` first: it is "
-        "the authoritative list of accepted parameter keys."
-    ),
+        "the authoritative list of accepted parameter keys.\n\n"
+        "create_process and upload_process_config generate the configuration from "
+        "`design_spec`, or take `assets_dir` -- a folder of process-form.json and "
+        "friends written by hand, uploaded verbatim -- for form logic a spec cannot "
+        "express. Exactly one of the two on an upload."
+    ) + DIRECTORY_DOC,
 )
 def plan(op: str, args: Optional[dict] = None,
-         renew_from: Optional[str] = None) -> dict:
+         renew_from: Optional[str] = None,
+         directory: Optional[str] = None) -> dict:
     """Resolve, validate and describe a change without performing it."""
     # `verb` routes to the handler; `op` names the mutation being planned.
     return runner.call({"verb": "plan", "op": op, "args": args or {},
-                        "renew_from": renew_from})
+                        "renew_from": renew_from}, start=_start(directory))
 
 
 @server.tool(
@@ -222,10 +244,11 @@ def plan(op: str, args: Optional[dict] = None,
         "comes from the stored plan, so what the person approved is exactly what runs. "
         "Refuses an expired, already-used, tampered, or different-user plan. Show the "
         "plan's `rendered` text to the person before calling this."
-    ),
+    ) + DIRECTORY_DOC,
     meta={"anthropic/requiresUserInteraction": True},
 )
-def apply(plan_id: str, digest: str, approved_summary: str = "") -> dict:
+def apply(plan_id: str, digest: str, approved_summary: str = "",
+          directory: Optional[str] = None) -> dict:
     """Perform the change a plan describes, after approval.
 
     `approved_summary` is supplied by the approval hook, which reads it from the
@@ -234,7 +257,8 @@ def apply(plan_id: str, digest: str, approved_summary: str = "") -> dict:
     works, and is the fallback when hooks are disabled.
     """
     return runner.call({"verb": "apply", "plan_id": plan_id, "digest": digest,
-                        "approved_summary": approved_summary})
+                        "approved_summary": approved_summary},
+                       start=_start(directory))
 
 
 def main() -> None:

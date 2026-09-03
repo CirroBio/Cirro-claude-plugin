@@ -63,8 +63,23 @@ def _search_ceiling(start: Path) -> Path:
 
 
 def find_session_dir(start: Optional[Path] = None) -> Path:
-    """Walk up for a `.cirro/session.json`. Refuse every unsafe resolution."""
-    start = (start or Path.cwd()).resolve()
+    """Walk up for a `.cirro/session.json`. Refuse every unsafe resolution.
+
+    `start` defaults to the process's working directory, which is the session's own.
+    Passing it explicitly is how one Claude session works across several bound
+    folders without being moved -- the resolved folder is echoed in every response,
+    so which tenant an operation hit stays visible either way.
+    """
+    start = (start or Path.cwd()).expanduser()
+    if not start.is_dir():
+        raise errors.NoSessionFolder(
+            f"{start} is not a directory, so there is nothing to resolve a Cirro "
+            "session from.",
+            what="A session folder is found by walking up from a real directory.",
+            user_action="Give the path of a directory that exists.",
+            searched_from=str(start),
+        )
+    start = start.resolve()
     ceiling = _search_ceiling(start)
     home = Path.home().resolve()
 

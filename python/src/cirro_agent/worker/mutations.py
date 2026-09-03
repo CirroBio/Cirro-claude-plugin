@@ -11,9 +11,10 @@ The planner is read-only. It resolves every name to an ID, validates what can be
 validated before anything happens, works out the blast radius, and renders the
 text a human will approve. The executor receives only what the planner stored.
 
-Deliberately absent: a cost estimate. Cirro's SDK exposes no pricing API -- the
-billing service only lists accounts and metrics are project-level -- so a dollar
-figure here would be invented. Plans say what will run instead.
+Deliberately absent: a cost estimate. Cirro reports spend that has already happened
+-- `metrics.get_for_project().costs` is real dollars by service by month, and the
+`spend` read surfaces it -- but nothing prices a run before it starts, so a figure
+here would be invented. Plans say what will run instead.
 """
 from dataclasses import dataclass, field
 from typing import Callable, Optional

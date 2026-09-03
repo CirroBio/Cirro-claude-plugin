@@ -73,3 +73,54 @@ def test_session_file_round_trips(tmp_path):
     stored = json.loads((current.path / "session.json").read_text())
     assert stored["base_url"] == "app.cirro.bio"
     assert "dir" not in stored, "the folder's own path is not stored inside it"
+
+
+def test_a_second_folder_is_reachable_without_moving_the_session(tmp_path):
+    """One Claude session, two bound folders.
+
+    Every write tool used to resolve the session from the process's working
+    directory with no way to redirect it, so working across two tenants meant
+    moving the session. `start` is that redirect, and it is threaded through the
+    MCP tools and `cirro-agent read --dir`.
+    """
+    here, there = tmp_path / "here", tmp_path / "there"
+    here.mkdir()
+    there.mkdir()
+    session_mod.init(here, "app.cirro.bio")
+    session_mod.init(there, "dev.cirro.bio")
+    assert session_mod.load(here).base_url == "app.cirro.bio"
+    assert session_mod.load(there).base_url == "dev.cirro.bio"
+    assert session_mod.load(there).path == (there / ".cirro")
+
+
+def test_a_directory_that_does_not_exist_is_refused_by_name(tmp_path):
+    with pytest.raises(errors.AgentError) as caught:
+        session_mod.find_session_dir(tmp_path / "nowhere")
+    assert caught.value.code == "NO_SESSION_FOLDER"
+    assert "not a directory" in caught.value.message
+    assert caught.value.user_action
+
+
+def test_every_session_resolving_tool_takes_a_directory():
+    """A new tool must not quietly reintroduce the working-directory-only limit."""
+    import inspect
+    from cirro_agent import mcp_server
+    for name in ("session_init", "login_start", "login_wait", "whoami", "logout",
+                 "plan", "apply"):
+        tool = getattr(mcp_server, name)
+        assert "directory" in inspect.signature(tool).parameters, name
+
+
+def test_the_read_cli_resolves_the_directory_it_is_given(tmp_path, monkeypatch):
+    from cirro_agent import cli, runner
+    session_mod.init(tmp_path, "dev.cirro.bio")
+    seen = {}
+
+    def record(request, **kwargs):
+        seen.update(request=request, start=kwargs.get("start"))
+        return {"ok": True}
+
+    monkeypatch.setattr(runner, "call", record)
+    cli.main(["read", "folders", "-p", "X", "--dir", str(tmp_path)])
+    assert seen["start"] == tmp_path
+    assert session_mod.load(seen["start"]).base_url == "dev.cirro.bio"

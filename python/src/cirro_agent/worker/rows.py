@@ -6,7 +6,7 @@ import and testable without a tenant, and it is also where the API's `Unset`
 sentinel is dealt with once instead of everywhere.
 """
 import enum
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from .. import errors
@@ -49,13 +49,17 @@ def folder_tag(name: str) -> str:
 
 
 def plain(value: Any) -> Any:
-    """Unwrap Unset, enums and datetimes into JSON-safe values."""
+    """Unwrap Unset, enums, dates and datetimes into JSON-safe values."""
     from cirro_api_client.v1.types import Unset
     if isinstance(value, Unset) or value is None:
         return None
     if isinstance(value, datetime):
         moment = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
         return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # datetime is a subclass of date, so this must come second. The metrics series
+    # are dated with a bare date, which otherwise reached the envelope as an object.
+    if isinstance(value, date):
+        return value.isoformat()
     # isinstance, not a name whitelist: RepositoryType, SharingType and ProjectRole
     # were falling through and serializing as "RepositoryType.GITHUB_PUBLIC".
     if isinstance(value, enum.Enum):
@@ -342,3 +346,23 @@ def user(obj) -> dict:
 def project_user(obj) -> dict:
     return {"username": plain(getattr(obj, "username", None)),
             "role": plain(getattr(obj, "role", None))}
+
+
+def metric_record(obj) -> dict:
+    """One dated point of a metrics series.
+
+    `services` maps a service or storage-tier name to its number, and the unit is on
+    the record -- so the day's or month's figure is the sum across that map, and
+    nothing here assumes dollars or bytes. Reading a `value` attribute the model has
+    never had is what made project storage report null for every project.
+    """
+    # `services` is a generated model whose keys live in additional_properties, not a
+    # dict -- the same wrapper that made spec_shape declare nothing.
+    raw = getattr(obj, "services", None)
+    services = plain(raw.to_dict() if hasattr(raw, "to_dict") else raw) or {}
+    numbers = {k: v for k, v in services.items() if isinstance(v, (int, float))}
+    return {"date": plain(getattr(obj, "date", None)),
+            "unit": plain(getattr(obj, "unit", None)),
+            "total": round(sum(numbers.values()), 2),
+            "by_service": {k: round(v, 2) for k, v in
+                           sorted(numbers.items(), key=lambda kv: -kv[1])}}

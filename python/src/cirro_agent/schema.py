@@ -126,7 +126,9 @@ PROJECT = EntitySpec(
         "created_at": (DETAIL, "ISO-8601 UTC"),
         "contacts": (DETAIL, "named contacts"),
         "settings": (DETAIL, "project settings blob"),
-        "storage_bytes": (PROBE, "current storage from the metrics API; one call per project"),
+        "storage_bytes": (PROBE, "current storage from the metrics API; one call per "
+                                 "project, and brings the per-tier split, the unit and "
+                                 "the record's date with it"),
         "dataset_count": (DETAIL, "requires listing the project's datasets"),
     },
     projections={

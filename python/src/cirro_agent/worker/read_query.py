@@ -3,11 +3,15 @@ fully fetched match set, and single-entity reads.
 """
 from typing import Tuple
 
-from .. import errors, query as Q, schema, summarize as S
+from .. import errors, query as Q, schema
 from ..envelope import Counts, DEFAULT_MAX_TOKENS, ROWS_ABSENT, build
-from . import rows as R
 from .reads import (Reader, dataset_detail, dataset_manifest, dataset_tasks, file_count,
-                    is_terminal, process_detail, resolve_named)
+                    is_terminal, process_detail, project_metrics, resolve_named)
+
+# AWS reports S3 storage in binary units, so a metrics record saying "GB" means 2**30
+# bytes. An unlisted unit is reported as-is rather than converted on a guess.
+STORAGE_UNIT_BYTES = {"B": 1, "KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3,
+                      "TB": 1024 ** 4, "PB": 1024 ** 5}
 
 
 def _lineage(rows: list) -> dict:
@@ -259,6 +263,9 @@ def do_get(request: dict) -> dict:
                      projections={"standard": list(row)}, next_calls=[
                          {"id": "nc_datasets", "why": "list this project's datasets",
                           "call": {"verb": "query", "entity": "dataset",
+                                   "scope": {"project_ids": [row["id"]]}}},
+                         {"id": "nc_spend", "why": "what this project has cost, by month",
+                          "call": {"verb": "list", "of": "spend",
                                    "scope": {"project_ids": [row["id"]]}}}],
                      max_tokens=int(request.get("max_tokens")
                                     or DEFAULT_MAX_TOKENS["get"]))
@@ -308,25 +315,35 @@ def do_get(request: dict) -> dict:
 
 def _project_storage(reader: Reader, project_id: str) -> dict:
     try:
-        metrics = reader.client.metrics.get_for_project(project_id=project_id)
-        reader.cost.call("metrics.get", probe=True)
+        records = [r for r in project_metrics(reader, project_id)
+                   if r["series"] == "storage"]
     except Exception:
         return {"storage_bytes": None,
                 "storage_note": "the metrics API did not return data for this project"}
-    records = R.plain(getattr(metrics, "storage_metrics", None)) or []
-    best, at = None, None
-    for record in getattr(metrics, "storage_metrics", None) or []:
-        value = R.plain(getattr(record, "value", None))
-        stamp = R.plain(getattr(record, "date", None) or getattr(record, "timestamp", None))
-        if isinstance(value, (int, float)) and (at is None or str(stamp) >= str(at)):
-            best, at = value, stamp
+    if not records:
+        return {"storage_bytes": None,
+                "storage_note": "the metrics API holds no storage records for this project"}
+    latest = max(records, key=lambda r: str(r.get("date") or ""))
+    unit = str(latest.get("unit") or "").upper()
+    scale = STORAGE_UNIT_BYTES.get(unit)
+    total = latest["total"]
+    # Daily records that lag; saying so beats implying a live number. `storage_amount`
+    # with its unit is the figure the API actually reported, so it is what a person
+    # should read; `storage_bytes` is derived from it and states its own convention.
+    note = (f"summed across {len(latest['by_service'])} storage tiers on the latest of"
+            f" {len(records)} daily records; may lag by up to 48h")
+    if scale is None:
+        note = (f"{note}. The API reported the unit as {latest.get('unit')!r}, which is"
+                " not a size this read can convert, so only storage_amount is given")
+    elif scale > 1:
+        note = f"{note}. storage_bytes takes 1 {unit} as {scale} bytes, as AWS does"
     return {
-        "storage_bytes": int(best) if best is not None else None,
-        "storage_human": S.human_bytes(int(best)) if best is not None else None,
-        "storage_as_of": at,
-        # Daily records that lag; saying so beats implying a live number.
-        "storage_note": (f"latest of {len(records)} daily storage records;"
-                         " may lag by up to 48h"),
+        "storage_bytes": int(total * scale) if scale else None,
+        "storage_amount": total,
+        "storage_unit": latest.get("unit"),
+        "storage_by_tier": latest["by_service"],
+        "storage_as_of": latest.get("date"),
+        "storage_note": note,
     }
 
 
