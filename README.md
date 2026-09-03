@@ -304,7 +304,9 @@ code, so drift breaks the build rather than accumulating.
 
 `python/tests/test_live_reads.py` runs every read against a real tenant, using the
 session folder of the directory you run it from. It is skipped unless you set
-`CIRRO_AGENT_E2E=1`, and it changes nothing.
+`CIRRO_AGENT_E2E=1`, and it changes nothing. `python/tests/test_live_writes.py` is
+the smallest real check of the change path — add a tag, take it off again — and runs
+only when you also name a disposable project in `CIRRO_AGENT_E2E_WRITE_PROJECT`.
 
 CI (`.github/workflows/ci.yml`) runs the tests, the lint, and `claude plugin validate`
 on every push, and again weekly so a new `cirro` release that breaks the pinned client

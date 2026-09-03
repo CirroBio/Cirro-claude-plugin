@@ -171,3 +171,11 @@ and never to zero suggestions.
 `pytest python/tests -q` and `flake8 python/src python/tests scripts/gate.py` before
 finishing. Tests use a fake tenant over recorded HTTP; nothing in the suite needs a live
 Cirro. When a live check is genuinely required, say so rather than marking work verified.
+
+Two opt-in live checks exist and are skipped without their variables.
+`test_live_reads.py` (`CIRRO_AGENT_E2E=1`) runs every read against the tenant the
+working directory is bound to and changes nothing; run it after touching the read
+layer. `test_live_writes.py` adds `CIRRO_AGENT_E2E_WRITE_PROJECT` (and optionally
+`..._WRITE_DATASET`) and performs two reversible tag writes through plan and apply.
+Never point it at anything that is not disposable, and never choose the project
+yourself -- the person names it.
