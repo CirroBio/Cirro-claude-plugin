@@ -617,3 +617,32 @@ def test_the_audit_file_is_private(tmp_path):
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(plan.created_at))
     audit = session.path / "runs" / f"{stamp}-chain-{plan.plan_id}.jsonl"
     assert oct(audit.stat().st_mode & 0o777) == "0o600"
+
+
+def test_an_applied_chain_points_at_its_status_read(tmp_path, monkeypatch):
+    """The apply result carries the exact read that shows where the chain stands.
+
+    Planned through the real path, because apply re-plans from the stored request and
+    a hand-built record would read as stale."""
+    from cirro_agent import plans
+    from cirro_agent.worker import gated, reads
+    session = _session_for(tmp_path)
+    reader = _reader_for(session)
+    reader.username = "u"
+    reader.cache = reads.SnapshotCache(session.path, session.base_url, "u")
+    reader.cost = reads.Cost()
+    monkeypatch.setattr(reads, "Reader", lambda request: reader)
+    base = {"base_url": session.base_url, "session_dir": str(session.path)}
+    planned = gated.do_plan({**base, "verb": "plan", "op": "chain",
+                             "args": {"steps": [{"label": "make", "op": "producer",
+                                                 "args": {"tag": "z"}}]}})
+    out = gated.do_apply({**base, "plan_id": planned["plan_id"], "digest": planned["digest"],
+                          "approved_summary": plans.load(session, planned["plan_id"]).summary})
+    expected = f"cirro-agent read chain-status {planned['plan_id']}"
+    assert out["result"]["status_read"]["command"] == expected
+
+
+def _session_for(tmp_path):
+    from cirro_agent.session import Session
+    (tmp_path / "plans").mkdir(parents=True, exist_ok=True)
+    return Session(base_url="app.cirro.test", dir=str(tmp_path))

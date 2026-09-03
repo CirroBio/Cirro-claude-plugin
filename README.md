@@ -126,7 +126,8 @@ saw.
 **Multi-step work gets one prompt.** Configuring a pipeline, uploading test data and
 launching a run can be approved together as a chain. Values a later step cannot know
 yet — the ID of a dataset the upload is about to create — appear as exactly that, not
-as a blank cheque. Deletions are never allowed inside a chain.
+as a blank cheque. The approval names every step's operation in order, so nothing can
+hide inside a long argument list. Deletions are never allowed inside a chain.
 
 `cirro-agent read chain-status` shows where a chained workflow stands — each attempt,
 what it produced, where it stopped — without opening anything in `.cirro/`.

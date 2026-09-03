@@ -143,6 +143,10 @@ def do_apply(request: dict) -> dict:
         raise wrapped
 
     plans.finish(session, record, result=result)
+    if record.op == "chain" and isinstance(result, dict):
+        # A chain's state -- attempts, outputs, where it stopped -- outlives this call.
+        result["status_read"] = {"verb": "chain_status", "plan_id": record.plan_id,
+                                 "command": f"cirro-agent read chain-status {record.plan_id}"}
 
     # Synchronous invalidation: the next read must not answer from a snapshot this
     # mutation just made wrong.

@@ -299,6 +299,20 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
     # Derived from op/args, not from the plan's prose. The summary is advisory text;
     # these are the values the executor will actually use.
     args = plan.get("args")
+    if plan.get("op") == "chain" and isinstance(args, dict):
+        # A chain's arguments are a list of steps; one truncated preview of that list
+        # could hide an operation. Every step is named, from the plan file, before the
+        # generic argument dump.
+        steps = args.get("steps") or []
+        lines.append(f"Runs {len(steps)} step(s) in order:")
+        for index, step in enumerate(steps, start=1 + len(args.get("carried") or [])):
+            label = step.get("label") if isinstance(step, dict) else None
+            op_name = step.get("op") if isinstance(step, dict) else "?"
+            lines.append(f"  {index}. {op_name}" + (f"  [{label}]" if label else ""))
+        if args.get("carried"):
+            lines.append(f"  reusing {len(args['carried'])} earlier step(s) unchanged")
+        lines.append("")
+    args = plan.get("args")
     if isinstance(args, dict) and args:
         lines.append("Will run with:")
         for key in sorted(args):

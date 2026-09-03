@@ -273,3 +273,23 @@ def test_the_plans_module_the_gate_imports_is_stdlib_only():
                           cwd=GATE.parents[1])
     assert done.returncode == 0, done.stderr[-600:]
     assert "cirro_agent.plans" in done.stdout
+
+
+def test_a_chain_approval_names_every_step_before_the_argument_dump(workdir):
+    """The prompt renders from args, and a chain's args are one list of dicts -- a
+    single 160-character preview could push an op past the edge. Each step is named."""
+    plan = make_plan(workdir, op="chain", args={"steps": [
+        {"label": "upload", "op": "upload_dataset", "args": {"source_dir": "/d"}},
+        {"label": "run", "op": "run_analysis", "args": {"name": "x" * 300}},
+    ], "carried": [{"dataset_id": "ds_1"}]})
+    done = subprocess.run([sys.executable, str(GATE)],
+                          input=json.dumps(apply_event(workdir, plan_id=plan.plan_id,
+                                                       digest=plan.digest)),
+                          capture_output=True, text=True, timeout=30)
+    payload = json.loads(done.stdout)["hookSpecificOutput"]
+    assert payload["permissionDecision"] == "ask"
+    reason = payload["permissionDecisionReason"]
+    assert "Runs 2 step(s) in order:" in reason
+    assert "2. upload_dataset  [upload]" in reason
+    assert "3. run_analysis  [run]" in reason
+    assert "reusing 1 earlier step(s)" in reason
