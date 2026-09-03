@@ -56,13 +56,30 @@ def test_spend_across_every_project_is_one_call(fake_tenant, session_dir):
                 scope={"projects": "*"})
     assert out["ok"], out
     items = out["result"]["items"]
-    assert {item["project_id"] for item in items} == {"proj_a", "proj_b"}
+    assert {item["project_id"] for item in items} == {"proj_a", "proj_b", "proj_gone"}
     # Labeled, not bare IDs, and the tenant total is one call rather than one per
     # project -- which is why this scope does not go through the fan-out gate.
     assert items[0]["project"] == "Immuno-Oncology Core"
     assert out["cost"]["by_kind"].get("metrics.get_all") == 1
     assert "metrics.get" not in out["cost"]["by_kind"]
-    assert out["result"]["totals"]["projects"] == 2
+    assert out["result"]["totals"]["projects"] == 3
+
+
+def test_spend_for_a_project_the_listing_does_not_carry_says_why(fake_tenant,
+                                                                 session_dir):
+    """A live tenant reports spend for a project not in /projects.
+
+    An unlabeled id with no explanation is exactly what this response shape exists to
+    prevent, so the row is flagged and the note says the total includes it.
+    """
+    out = _read(fake_tenant, session_dir, "list", of="spend", scope={"projects": "*"})
+    stray = next(i for i in out["result"]["items"] if i["project_id"] == "proj_gone")
+    assert stray["project"] is None and stray["unlisted"] is True
+    assert stray["total"] > 0
+    assert out["result"]["totals"]["unlisted"] == 1
+    assert "not in your project list" in out["result"]["note"]
+    named = next(i for i in out["result"]["items"] if i["project_id"] == "proj_a")
+    assert named["unlisted"] is False
 
 
 def test_spend_is_served_from_the_snapshot_on_a_second_read(fake_tenant, session_dir):

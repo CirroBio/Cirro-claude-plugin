@@ -91,7 +91,7 @@ def test_next_calls_predict_counts_that_hold(project):
 
 
 @pytest.mark.parametrize("listing", ["folders", "compute-envs", "shares", "workspaces",
-                                     "project-users"])
+                                     "project-users", "spend"])
 def test_every_project_listing_returns(project, listing):
     out = read(listing, "-p", project, max_tokens=3000)
     _invariants(out, 3000)
@@ -104,6 +104,29 @@ def test_every_tenant_listing_returns(listing):
     out = read(listing, max_tokens=3000)
     _invariants(out, 3000)
     assert "items" in out["result"]
+
+
+def test_spend_across_the_tenant_costs_one_call(project):
+    """The claim that makes --all-projects safe to offer without a fan-out gate."""
+    out = read("spend", "--all-projects", max_tokens=3000)
+    _invariants(out, 3000)
+    assert out["cost"]["api_calls"] <= 2, out["cost"]
+    for item in out["result"]["items"]:
+        assert item["unit"] == "$", item
+        # A name, or an explicit reason there is none. Never a bare unexplained id:
+        # this tenant really does report spend for a project not in the listing.
+        assert item["project"] or item["unlisted"], item
+    if out["result"]["totals"]["unlisted"]:
+        assert "not in your project list" in out["result"]["note"]
+
+
+def test_project_storage_returns_a_figure(project):
+    """The read that reported null for every project until the model was read right."""
+    out = read("project", project, "--include", "storage_bytes", max_tokens=3000)
+    _invariants(out, 3000)
+    row = out["result"]["rows"][0]
+    assert row.get("storage_amount") is not None, row.get("storage_note")
+    assert row["storage_by_tier"], "a figure with no tiers behind it is the old bug"
 
 
 def test_processes_and_a_parameter_spec(project):

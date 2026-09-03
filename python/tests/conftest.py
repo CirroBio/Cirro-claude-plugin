@@ -217,8 +217,11 @@ def fake_tenant(monkeypatch):
                 json=_metrics_payload("proj_a"))
             router.get(f"{API}/projects/proj_b/metrics").respond(
                 json=_metrics_payload("proj_b"))
+            # proj_gone is deliberately absent from /projects: observed live, the
+            # metrics endpoint reports spend for projects the listing does not carry.
             router.get(f"{API}/metrics").respond(
-                json=[_metrics_payload("proj_a"), _metrics_payload("proj_b")])
+                json=[_metrics_payload("proj_a"), _metrics_payload("proj_b"),
+                      _metrics_payload("proj_gone")])
             router.get(url__regex=rf"{API}/projects/proj_a/datasets/ds_\d+$"
                        ).respond(json=_detail_payload(datasets[0]))
             router.get(url__regex=rf"{API}/projects/[^/]+/datasets/[^/]+/files"

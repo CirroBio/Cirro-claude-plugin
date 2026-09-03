@@ -129,6 +129,7 @@ def _spend_by_project(reader: Reader, request: dict) -> dict:
         entry = by_project.setdefault(row["project_id"], {
             "project_id": row["project_id"],
             "project": names.get(row["project_id"]),
+            "unlisted": row["project_id"] not in names,
             "unit": row["unit"], "total": 0.0, "months": 0,
             "latest_month": None, "latest_total": None})
         entry["total"] = round(entry["total"] + row["total"], 2)
@@ -141,12 +142,23 @@ def _spend_by_project(reader: Reader, request: dict) -> dict:
         return _flat(reader, request, "spend", [],
                      note="the metrics API holds no cost records for any visible project")
     top = items[0]["project"] or items[0]["project_id"]
+    note = ("cost already incurred per project, from one call; Cirro prices nothing "
+            "in advance")
+    # Observed live: the metrics endpoint returns projects the project listing does
+    # not, so a name is sometimes genuinely unavailable. An unlabeled id with no
+    # explanation is the thing this response shape exists to avoid.
+    unlisted = [item for item in items if item["unlisted"]]
+    if unlisted:
+        note += (f". {len(unlisted)} of these {'is' if len(unlisted) == 1 else 'are'} "
+                 "not in your project list -- archived, deleted, or access since "
+                 "removed -- so no name is available and only the id is given; the "
+                 "total includes them")
     return _flat(
         reader, request, "spend", items,
         totals={"unit": items[0]["unit"], "projects": len(items),
+                "unlisted": len(unlisted),
                 "total": round(sum(i["total"] for i in items), 2)},
-        note="cost already incurred per project, from one call; Cirro prices nothing "
-             "in advance",
+        note=note,
         next_calls=[{
             "id": "nc_spend_top_project",
             "why": f"month-by-month breakdown for {top}",
