@@ -32,7 +32,7 @@ jobs:
       - name: Test
         # The coverage floor is a ratchet, not a target: it sits just under the
         # measured figure so a change that drops coverage fails, and it only moves up.
-        run: PYTHONPATH=python/src .dev-venv/bin/python -m pytest python/tests -q --cov=cirro_agent --cov-report=term-missing:skip-covered --cov-fail-under=65
+        run: PYTHONPATH=python/src .dev-venv/bin/python -m pytest python/tests -q --cov=cirro_agent --cov-report=term-missing:skip-covered --cov-fail-under=69
 
       - name: The gate runs without the virtualenv
         # scripts/gate.py is a PreToolUse hook and must work with a bare system Python;

@@ -145,6 +145,13 @@ it as exactly what it is: `<dataset_id of step 3: upload>`.
 Waiting for the run is free: `analysis-status`, `tasks` and `logs` are ungated reads.
 Downloading results afterwards is an ordinary plan, because by then the dataset exists.
 
+**To see where a chain stands** — which attempt this is, what each produced, where it
+stopped, and whether a resume is open:
+
+```bash
+cirro-agent read chain-status <plan_id>
+```
+
 **When the run fails**, do not re-plan the whole chain. Diagnose from `tasks` and
 `logs`, fix the design spec, validate it with `check-config`, then resume:
 
