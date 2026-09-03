@@ -1,5 +1,5 @@
 """The read pipeline against a fake tenant on the wire."""
-from cirro_agent.worker import dispatch, reads
+from cirro_agent.worker import dispatch, read_query, reads
 
 
 def _call(fake_tenant, session_dir, verb, **overrides):
@@ -186,7 +186,7 @@ def test_summarize_files_collapses_a_large_manifest(fake_tenant, session_dir):
 
 
 def test_describe_needs_no_tenant(fake_tenant, session_dir):
-    result = reads.do_describe({"entity": "dataset"})
+    result = read_query.do_describe({"entity": "dataset"})
     assert result["ok"]
     tiers = {field["tier"] for field in result["result"]["fields"]}
     assert {"list", "probe", "detail", "execution"} <= tiers

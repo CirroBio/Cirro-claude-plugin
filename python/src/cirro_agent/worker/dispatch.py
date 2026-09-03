@@ -5,7 +5,7 @@ from typing import Any
 from .. import errors, plans
 from ..cache import SnapshotCache
 from ..session import Session
-from . import auth, portal, reads
+from . import auth, portal, read_listings, read_process, read_query, read_summaries, reads
 
 
 def _session(request: dict) -> Session:
@@ -154,16 +154,16 @@ def do_apply(request: dict) -> dict:
 
 
 HANDLERS = {
-    "query": reads.do_query,
-    "get": reads.do_get,
-    "summarize": reads.do_summarize,
-    "describe": reads.do_describe,
-    "list": reads.do_list,
-    "process_params": reads.do_process_params,
-    "process_config": reads.do_process_config,
-    "workflow_spec": reads.do_workflow_spec,
-    "check_config": reads.do_check_config,
-    "task_logs": reads.do_task_logs,
+    "query": read_query.do_query,
+    "get": read_query.do_get,
+    "summarize": read_summaries.do_summarize,
+    "describe": read_query.do_describe,
+    "list": read_listings.do_list,
+    "process_params": read_process.do_process_params,
+    "process_config": read_process.do_process_config,
+    "workflow_spec": read_process.do_workflow_spec,
+    "check_config": read_process.do_check_config,
+    "task_logs": read_summaries.do_task_logs,
     "login_start": auth.login_start,
     "login_wait": auth.login_wait,
     "login_daemon": auth.login_daemon,

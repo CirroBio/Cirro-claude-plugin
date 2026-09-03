@@ -72,6 +72,15 @@ config-revision routes and the `ConfigSource` enum exist only in >=1.6.0, and pi
 configuration is impossible without them. `test_runtime_contract.py` fails if a future
 `cirro` release stops working against that client.
 
+**Reads are split by verb, with one shared fetch layer.** `worker/reads.py` holds
+`Reader` -- the client, cache, cost accounting and name resolution -- plus the single
+implementation of each expensive fetch (`_detail`, `_manifest`, `_tasks`,
+`_process_detail`, `file_count`). The verbs live in `read_query` (query, get,
+describe), `read_summaries` (summarize, task_logs), `read_listings` (list) and
+`read_process` (process_params, process_config, workflow_spec, check_config); each
+imports from `reads` and nothing imports them but `dispatch` and `cli`. A new fetch
+that two verbs need goes in `reads.py`; a new verb goes in the family it belongs to.
+
 **Reads are facet-first because Cirro has no server-side filtering.** A listing has
 already fetched everything before it answers, so facets over the whole match set and
 exact predicted counts for follow-up filters are free, while rows are the expensive

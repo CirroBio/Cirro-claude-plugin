@@ -309,31 +309,31 @@ def main(argv=None) -> int:
 
     if command == "workflow-spec":
         # A local parse: no session, auth or network needed for a checkout on disk.
-        from .worker import reads
+        from .worker import read_process
         request = _common({"verb": "workflow_spec", "target": args.target,
                            "ref": args.ref, "group": args.group,
                            "include_hidden": args.include_hidden,
                            "cache_root": str(runner.plugin_data())}, args)
         try:
-            return _emit(reads.do_workflow_spec(request))
+            return _emit(read_process.do_workflow_spec(request))
         except errors.AgentError as exc:
             return _emit(exc.to_dict())
 
     if command == "check-config":
         # Local validation: no session, auth or network needed.
-        from .worker import reads
+        from .worker import read_process
         request = _common({"verb": "check_config", "path": args.path}, args)
         try:
-            return _emit(reads.do_check_config(request))
+            return _emit(read_process.do_check_config(request))
         except errors.AgentError as exc:
             return _emit(exc.to_dict())
 
     if command == "describe":
         # Static catalog: no session, auth or network needed, so answer directly.
-        from .worker import reads
+        from .worker import read_query
         request = _common({"verb": "describe", "entity": args.entity}, args)
         try:
-            return _emit(reads.do_describe(request))
+            return _emit(read_query.do_describe(request))
         except errors.AgentError as exc:
             return _emit(exc.to_dict())
 
