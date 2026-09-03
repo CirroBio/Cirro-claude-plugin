@@ -1,8 +1,9 @@
 """The four read verbs: query, get, summarize, describe.
 """
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Optional, Tuple
+
 from .. import errors, formcheck, query as Q
 from ..session import Session
 from ..cache import SnapshotCache, FRESH_DEFAULT, manifest_ttl
@@ -77,6 +78,7 @@ class Reader:
         an unconsumed next_token at the ceiling becomes scan_complete=False.
         """
         items, token = [], None
+        from cirro_api_client.v1.types import Unset
         while True:
             response = getter(token, PAGE_SIZE)
             self.cost.call(kind)
@@ -84,7 +86,6 @@ class Reader:
                 return items, True
             items.extend(response.data or [])
             token = getattr(response, "next_token", None)
-            from cirro_api_client.v1.types import Unset
             if not token or isinstance(token, Unset):
                 return items, True
             if len(items) >= scan_limit:
@@ -249,6 +250,39 @@ class Reader:
             retry_with=[{"entity": "project", "note": "list projects to pick one"},
                         {"scope": {"project": "PROJECT_NAME_OR_ID"}}],
         )
+
+    # Collections that the read side listed and the planners re-fetched by hand, each
+    # with its own projection. One fetch, one projection, both sides.
+    def shares(self, project_id: str) -> list:
+        found = self.client.shares.list(project_id=project_id) or []
+        self.cost.call("shares.list")
+        return [R.share(s) for s in found]
+
+    def workspaces(self, project_id: str) -> list:
+        found = self.client.workspaces.list(project_id=project_id) or []
+        self.cost.call("workspaces.list")
+        return [R.workspace(w) for w in found]
+
+    def compute_environments(self, project_id: str) -> list:
+        found = self.client.compute_environments.list_environments_for_project(
+            project_id=project_id) or []
+        self.cost.call("compute_environments.list")
+        return [R.compute_environment(e) for e in found]
+
+    def reference_types(self) -> list:
+        found = self.client.references.get_types() or []
+        self.cost.call("references.get_types")
+        return [R.reference_type(t) for t in found]
+
+    def users(self) -> list:
+        found = self.client.users.list() or []
+        self.cost.call("users.list")
+        return [R.user(u) for u in found]
+
+    def project_users(self, project_id: str) -> list:
+        found = self.client.projects.get_users(project_id=project_id) or []
+        self.cost.call("projects.get_users")
+        return [R.project_user(u) for u in found]
 
 
 def near_misses(given: str, names: list, limit: int = 5) -> list:
@@ -425,3 +459,32 @@ def spec_shape(reader: Reader, process_id: Optional[str]) -> Tuple[dict, Optiona
             defaults[key] = field["default"]
     required = list(form.get("required") or [])
     return defaults, declared, required
+
+
+def portal_dataset(reader: Reader, project_id: str, dataset_id: str):
+    """The SDK's DataPortalDataset for one dataset, with the detail fetch booked.
+
+    Three call sites built this by hand and one of them forgot the cost call.
+    """
+    from cirro.sdk.dataset import DataPortalDataset
+    detail = reader.client.datasets.get(project_id=project_id, dataset_id=dataset_id)
+    reader.cost.call("datasets.get", detail=True)
+    return DataPortalDataset(detail, reader.client)
+
+
+def pick(rows: list, given: str, *, kind: str, field: str, brief=None) -> dict:
+    """The row with this id, or NotFound listing every row there is.
+
+    Six planners did this by hand with their own candidate shapes. `brief` trims a row
+    to what the candidate list should show; by default the whole projected row.
+    """
+    for row in rows:
+        if row.get("id") == given:
+            return row
+    show = brief or (lambda row: row)
+    raise errors.NotFound(
+        f"No {kind} {given!r} in this project.",
+        what=f"Check the {kind} ID.", field=field, given=given,
+        candidates=[show(row) for row in rows],
+        retry_with=[{"verb": "list", "of": f"{kind}s"}],
+    )

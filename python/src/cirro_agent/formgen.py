@@ -319,7 +319,7 @@ def build_documentation(spec: dict) -> str:
     return "\n".join(lines)
 
 
-def generate(spec: dict, *, include_documentation: bool = True,
+def generate(spec: dict, *,
              preprocess: Optional[str] = None) -> dict:
     """Return {filename: text} for the whole asset set."""
     assets = {
@@ -330,8 +330,7 @@ def generate(spec: dict, *, include_documentation: bool = True,
     }
     if preprocess:
         assets[PREPROCESS] = preprocess
-    if include_documentation:
-        assets[DOCUMENTATION] = build_documentation(spec)
+    assets[DOCUMENTATION] = build_documentation(spec)
     return assets
 
 

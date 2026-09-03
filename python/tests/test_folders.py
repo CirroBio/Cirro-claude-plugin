@@ -8,10 +8,8 @@ dataset out of its folder.
 """
 from conftest import approved_summary
 
-from cirro_agent import plans
-
-from cirro_agent import query as Q, schema
-from cirro_agent.worker import rows as R
+from cirro_agent import plans, query as Q, schema
+from cirro_agent.worker import mutations, rows as R
 
 
 class FakeTags:
@@ -210,7 +208,6 @@ def test_an_analysis_can_file_its_output_folder_at_launch(writable_tenant, sessi
 def test_a_new_dataset_with_no_folder_named_is_filed_nowhere(writable_tenant,
                                                              session_dir):
     """Silence means no folder for a new dataset, and current folders for an edit."""
-    from cirro_agent.worker import mutations
     assert mutations._target_folders({}, []) == []
     assert mutations._target_folders({}, ["Immuno"]) == ["Immuno"]
     assert mutations._target_folders({"folder": "A/B"}, ["Immuno"]) == ["A/B"]
@@ -221,7 +218,6 @@ def test_a_new_dataset_with_no_folder_named_is_filed_nowhere(writable_tenant,
 
 def test_folders_ride_in_the_wire_tag_list_on_every_write_path():
     """One list on the wire; a tag write that forgot folders would unfile a dataset."""
-    from cirro_agent.worker import mutations
     assert mutations._wire_tags(["Immuno"], ["qc-pass"]) == [
         "folder://Immuno", "qc-pass"]
     assert mutations._wire_tags(None, None) == []
@@ -294,13 +290,12 @@ def test_a_partly_failed_batch_reports_both_halves(writable_tenant, session_dir,
                                                    monkeypatch):
     """Raising on the first failure would report the whole batch as failed while
     some datasets had already changed, and the audit trail would say so."""
-    from cirro_agent.worker import dispatch, mutations
+    from cirro_agent.worker import dispatch
     planned = _plan(writable_tenant, session_dir, "update_dataset",
                     project_id="proj_a", dataset_ids=["ds_0000", "ds_0001"],
                     folder="QC")
 
     calls = {"n": 0}
-    real = mutations.reads.Reader
 
     def flaky_update(*_args, **kwargs):
         calls["n"] += 1
@@ -322,7 +317,6 @@ def test_a_partly_failed_batch_reports_both_halves(writable_tenant, session_dir,
     assert [f["dataset_id"] for f in result["failed"]] == ["ds_0001"]
     assert "dataset is locked" in result["failed"][0]["error"]
     assert "1 of 2 datasets were updated" in result["note"]
-    assert real is mutations.reads.Reader
 
 
 def test_a_wholly_failed_batch_is_an_error(writable_tenant, session_dir, monkeypatch):

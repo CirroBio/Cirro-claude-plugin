@@ -219,3 +219,24 @@ def approved_summary(session_dir, plan_id):
     """
     from cirro_agent import plans
     return plans.load(session_dir, plan_id).summary
+
+
+def fake_reader(*, processes=(), username=None, base_url="app.cirro.test", session_dir=None):
+    """A MagicMock standing in for reads.Reader, with the fields planners touch.
+
+    Fourteen tests built this by hand; the shape lives here so it cannot drift.
+    """
+    from unittest.mock import MagicMock
+    reader = MagicMock()
+    reader.processes.return_value = list(processes)
+    reader.username = username
+    reader.base_url = base_url
+    if session_dir is not None:
+        reader.session_dir = str(session_dir)
+    return reader
+
+
+@pytest.fixture(autouse=True)
+def _no_project_dir_from_the_outer_session(monkeypatch):
+    """Tests decide their own session folder; the host's must not leak in."""
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)

@@ -2,6 +2,7 @@
 fully fetched match set, and single-entity reads.
 """
 from typing import Tuple
+
 from .. import errors, query as Q, schema, summarize as S
 from ..envelope import Counts, DEFAULT_MAX_TOKENS, ROWS_ABSENT, build
 from . import rows as R

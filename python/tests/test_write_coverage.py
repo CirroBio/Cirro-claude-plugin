@@ -12,6 +12,7 @@ import importlib
 import inspect
 import pkgutil
 import re
+from cirro_agent import cli
 
 WRITE_SHAPED = re.compile(
     r"^(create|update|delete|upload|run_|stop|archive|unarchive|invite|set_|sync_"
@@ -144,7 +145,7 @@ def test_the_read_cli_cannot_reach_a_mutating_verb():
 def test_the_read_cli_module_does_not_import_the_mutations_registry():
     import ast
     import pathlib
-    source = pathlib.Path(cli_path()).read_text()
+    source = pathlib.Path(cli.__file__).read_text()
     tree = ast.parse(source)
     imported = set()
     for node in ast.walk(tree):
@@ -156,8 +157,3 @@ def test_the_read_cli_module_does_not_import_the_mutations_registry():
             imported.update(alias.name for alias in node.names)
     assert not any("mutations" in name for name in imported), \
         "cli.py must not import the mutations registry; it is read-only by construction"
-
-
-def cli_path() -> str:
-    from cirro_agent import cli
-    return cli.__file__

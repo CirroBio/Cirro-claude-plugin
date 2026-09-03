@@ -4,14 +4,13 @@ describe answers from the static catalog, workflow_spec parses a checkout on dis
 check_config validates a configuration folder. They run in the parent process, so
 they live outside worker/ -- the boundary that says only the child imports cirro.
 """
+from pathlib import Path
 from . import errors
 from . import formcheck, schema
 from .worker.read_query import DETAIL_BUDGET
 from . import query as Q
 from . import formgen
-from .envelope import CONTRACT
-from .envelope import DEFAULT_MAX_TOKENS
-from .envelope import estimate_tokens
+from .envelope import DEFAULT_MAX_TOKENS, estimate_tokens, wrap
 
 
 def do_describe(request: dict) -> dict:
@@ -21,51 +20,48 @@ def do_describe(request: dict) -> dict:
         {"field": name, "tier": tier, "means": doc}
         for name, (tier, doc) in spec.fields.items()
     ]
-    body = {
-        "ok": True,
-        "api": {"contract": CONTRACT},
-        "query": {"verb": "describe", "entity": entity},
-        "result": {
-            "entity": entity,
-            "id_prefix": spec.id_prefix,
-            "scoped_by_project": spec.scoped_by_project,
-            "date_field": spec.date_field,
-            "fields": fields,
-            "tiers": {
-                "list": "free -- already in the paged listing",
-                "derived": "free -- computed locally from list fields",
-                "probe": "one small API call per row",
-                "detail": "one full API call per row; gated above "
-                          f"{DETAIL_BUDGET} matched rows",
-                "manifest": "one or more calls per row, response can be enormous",
-                "execution": "as manifest, and only for some executors",
-            },
-            "projections": spec.projections,
-            "facets_computed": spec.facet_priority,
-            "text_fields_for_q": spec.text_fields,
-            "default_sort": spec.default_sort,
-            "operators": sorted(Q.OPS),
-            "status_classes": Q.STATUS_CLASSES,
-            "date_expressions": ["2026-08-01", "2026-08-01T00:00:00Z", "last-7d",
-                                 "last-3m", "2026-Q2", "2026-08", "2026", "today",
-                                 "yesterday"],
-            "person_expressions": ["@me", "a literal username"],
-            "size_expressions": ["10GB", "10GiB", "10000000000"],
-            "shorthand_example": "status:FAILED created:last-7d owner:@me name~*RNAseq*",
-            "group_by_bins": ["created_at:day|week|month|quarter|year",
-                              "total_size_bytes:log2", "status:class"],
-        },
-        "cost": {"api_calls": 0, "by_kind": {}, "note": "static catalog"},
-    }
-    body["budget"] = {"max_tokens": int(request.get("max_tokens")
-                                        or DEFAULT_MAX_TOKENS["describe"]),
-                      "used_est": estimate_tokens(body), "degraded": []}
-    return body
+    max_tokens = int(request.get("max_tokens") or DEFAULT_MAX_TOKENS["describe"])
+    envelope = wrap(
+        query={"verb": "describe", "entity": entity},
+        result={
+                    "entity": entity,
+                    "id_prefix": spec.id_prefix,
+                    "scoped_by_project": spec.scoped_by_project,
+                    "date_field": spec.date_field,
+                    "fields": fields,
+                    "tiers": {
+                        "list": "free -- already in the paged listing",
+                        "derived": "free -- computed locally from list fields",
+                        "probe": "one small API call per row",
+                        "detail": "one full API call per row; gated above "
+                                  f"{DETAIL_BUDGET} matched rows",
+                        "manifest": "one or more calls per row, response can be enormous",
+                        "execution": "as manifest, and only for some executors",
+                    },
+                    "projections": spec.projections,
+                    "facets_computed": spec.facet_priority,
+                    "text_fields_for_q": spec.text_fields,
+                    "default_sort": spec.default_sort,
+                    "operators": sorted(Q.OPS),
+                    "status_classes": Q.STATUS_CLASSES,
+                    "date_expressions": ["2026-08-01", "2026-08-01T00:00:00Z", "last-7d",
+                                         "last-3m", "2026-Q2", "2026-08", "2026", "today",
+                                         "yesterday"],
+                    "person_expressions": ["@me", "a literal username"],
+                    "size_expressions": ["10GB", "10GiB", "10000000000"],
+                    "shorthand_example": ("status:FAILED created:last-7d owner:@me "
+                                          "name~*RNAseq*"),
+                    "group_by_bins": ["created_at:day|week|month|quarter|year",
+                                      "total_size_bytes:log2", "status:class"],
+                },
+        cost={"api_calls": 0, "by_kind": {}, "note": "static catalog"},
+        max_tokens=max_tokens)
+    envelope["budget"]["used_est"] = estimate_tokens(envelope)
+    return envelope
 
 
 def do_workflow_spec(request: dict) -> dict:
     """Parse a workflow's declared inputs and parameters. Touches no Cirro API."""
-    from pathlib import Path
     from . import workflow_spec as WS
 
     target = request.get("target")
@@ -123,14 +119,14 @@ def do_workflow_spec(request: dict) -> dict:
                  "primary data input, managed parameters and file pickers yourself, "
                  "and leave executor_version unpinned unless a run fails to compile"),
     }
-    envelope = {"ok": True, "api": {"contract": CONTRACT},
-                "query": {"verb": "workflow_spec", "target": target,
-                          "ref": request.get("ref"), "group": wanted_group},
-                "result": result,
-                "cost": {"api_calls": 0, "by_kind": {}, "note": "local parse only"}}
-
-    max_tokens = int(request.get("max_tokens") or 12000)
-    degraded = []
+    max_tokens = int(request.get("max_tokens") or DEFAULT_MAX_TOKENS["workflow_spec"])
+    envelope = wrap(
+        query={"verb": "workflow_spec", "target": target,
+               "ref": request.get("ref"), "group": wanted_group},
+        result=result,
+        cost={"api_calls": 0, "by_kind": {}, "note": "local parse only"},
+        max_tokens=max_tokens)
+    degraded = envelope["budget"]["degraded"]
     # Enum lists dominate the payload for pipelines like this one (a 34-value basecaller
     # list); summarize them before dropping anything a caller cannot recover.
     if estimate_tokens(envelope) > max_tokens:
@@ -151,8 +147,7 @@ def do_workflow_spec(request: dict) -> dict:
         result["params_truncated_to"] = keep
         result["how_to_see_the_rest"] = "re-run with --group <key> to page by group"
         degraded.append({"what": "params", "to": str(keep)})
-    envelope["budget"] = {"max_tokens": max_tokens,
-                          "used_est": estimate_tokens(envelope), "degraded": degraded}
+    envelope["budget"]["used_est"] = estimate_tokens(envelope)
     return envelope
 
 
@@ -164,8 +159,6 @@ def do_check_config(request: dict) -> dict:
     mapping to a form field that does not exist, and the `../` literal that Cirro's
     WAF blocks before the request reaches the app.
     """
-    from pathlib import Path
-    from ..envelope import CONTRACT, estimate_tokens
 
     target = request.get("path")
     if not target:
@@ -215,11 +208,12 @@ def do_check_config(request: dict) -> dict:
         report["n_errors"] += 1
         report["ok"] = False
 
-    body = {"ok": True, "api": {"contract": CONTRACT},
-            "query": {"verb": "check_config", "path": str(folder)},
-            "result": {"folder": str(folder), "assets": sorted(assets),
-                       "other_files": extra, **report},
-            "cost": {"api_calls": 0, "by_kind": {}, "note": "local validation only"}}
-    body["budget"] = {"max_tokens": int(request.get("max_tokens") or 6000),
-                      "used_est": estimate_tokens(body), "degraded": []}
-    return body
+    max_tokens = int(request.get("max_tokens") or DEFAULT_MAX_TOKENS["check_config"])
+    envelope = wrap(
+        query={"verb": "check_config", "path": str(folder)},
+        result={"folder": str(folder), "assets": sorted(assets),
+                "other_files": extra, **report},
+        cost={"api_calls": 0, "by_kind": {}, "note": "local validation only"},
+        max_tokens=max_tokens)
+    envelope["budget"]["used_est"] = estimate_tokens(envelope)
+    return envelope

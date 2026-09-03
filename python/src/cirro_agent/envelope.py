@@ -25,7 +25,17 @@ CHARS_PER_TOKEN = 3.7
 # Anything below this and the response cannot carry its own remediation.
 MIN_TOKENS = 400
 
-DEFAULT_MAX_TOKENS = {"query": 6000, "summarize": 3000, "get": 1500, "describe": 1500}
+DEFAULT_MAX_TOKENS = {
+    "query": 6000,
+    "summarize": 3000,
+    "get": 1500,
+    "describe": 1500,
+    # Local, no-network reads carry their own budgets; these used to be bare
+    # literals in each verb.
+    "process_config": 8000,
+    "workflow_spec": 12000,
+    "check_config": 6000,
+}
 
 ROWS_PAGE = "page"
 ROWS_PREVIEW = "preview_not_page"
@@ -89,7 +99,6 @@ class Cost:
     probe_calls: int = 0
     tier_ceiling: str = "list"
     strategy: str = ""
-    note: Optional[str] = None
     cache_hits: int = 0
     cache_misses: int = 0
     snapshots_used: list = field(default_factory=list)
@@ -135,8 +144,6 @@ class Cost:
             "tier_ceiling": self.tier_ceiling,
             "strategy": self.strategy,
         }
-        if self.note:
-            out["note"] = self.note
         return out
 
 
@@ -376,3 +383,38 @@ def build(
                 break
 
     return finalize()
+
+
+def shrink_to_fit(container: dict, key: str, *, floor: int, max_tokens: int,
+                  degraded: list) -> None:
+    """Halve a list inside `container` until the container fits the budget.
+
+    Records what was done in `degraded` and leaves `<key>_truncated_to` beside the
+    list, so the caller's envelope says what it dropped. Three verbs implemented this
+    ladder by hand with different floors; this is the one implementation.
+    """
+    while estimate_tokens(container) > max_tokens and len(container.get(key) or []) > floor:
+        items = container[key]
+        keep = max(floor, len(items) // 2)
+        container[key] = items[:keep]
+        container["truncated_to"] = keep
+        degraded.append({"what": key, "to": str(keep)})
+
+
+NO_API_COST = {"api_calls": 0, "by_kind": {}, "note": "local computation only"}
+
+
+def wrap(*, query: dict, result: dict, cost: dict, max_tokens: int,
+         degraded: Optional[list] = None) -> dict:
+    """The response skeleton every non-query verb returns.
+
+    CLAUDE.md's response discipline -- contract, echoed query, cost, budget with
+    `used_est` -- was hand-spelled in seven verbs. `build()` covers the faceted query
+    shape; this covers everything else, so the contract is kept true in one place.
+    """
+    envelope = {
+        "ok": True, "api": {"contract": CONTRACT}, "query": query, "result": result,
+        "cost": cost, "budget": {"max_tokens": max_tokens, "degraded": list(degraded or [])},
+    }
+    envelope["budget"]["used_est"] = estimate_tokens(envelope)
+    return envelope

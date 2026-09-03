@@ -2,8 +2,9 @@
 assets, workflow sources, and the validator.
 """
 import json
+
 from .. import errors
-from ..envelope import CONTRACT, DEFAULT_MAX_TOKENS, estimate_tokens
+from ..envelope import DEFAULT_MAX_TOKENS, estimate_tokens, wrap
 from . import rows as R
 from .reads import Reader, near_misses, process_detail, spec_shape
 
@@ -30,38 +31,35 @@ def do_process_params(request: dict) -> dict:
          "default": defaults.get(key, None), "has_default": key in defaults}
         for key in (declared or [])
     ]
-    body = {
-        "ok": True, "api": {"contract": CONTRACT},
-        "query": {"verb": "process_params", "id": match["id"]},
-        "result": {
-            "process": {"id": match["id"], "name": match["name"],
-                        "executor": match["executor"],
-                        "uses_sample_sheet": match["uses_sample_sheet"],
-                        "documentation_url": match["documentation_url"],
-                        "file_requirements_message": match["file_requirements_message"]},
-            "n_parameters": len(parameters),
-            "required": [p["key"] for p in parameters if p["required"]],
-            "parameters": parameters,
-            "note": ("Keys not listed here are accepted by the API and ignored by the "
-                     "pipeline. plan(run_analysis) reports any you pass that are not "
-                     "declared."),
-            "next_calls": [{
-                "id": "nc_plan", "why": "plan a run once the params are chosen",
-                "call": {"tool": "plan", "op": "run_analysis",
-                         "args": {"process": match["id"], "name": "OUTPUT_NAME",
-                                  "dataset_id": "INPUT_DATASET_ID", "params": {}}}}],
-        },
-        "cost": reader.cost.to_dict(),
-    }
+    process = {key: match[key] for key in (
+        "id", "name", "executor", "uses_sample_sheet", "documentation_url",
+        "file_requirements_message")}
     max_tokens = int(request.get("max_tokens") or DEFAULT_MAX_TOKENS["query"])
-    result = body["result"]
-    while estimate_tokens(body) > max_tokens and len(result["parameters"]) > 5:
+    envelope = wrap(
+        query={"verb": "process_params", "id": match["id"]},
+        result={
+                    "process": process,
+                    "n_parameters": len(parameters),
+                    "required": [p["key"] for p in parameters if p["required"]],
+                    "parameters": parameters,
+                    "note": ("Keys not listed here are accepted by the API and ignored by the "
+                             "pipeline. plan(run_analysis) reports any you pass that are not "
+                             "declared."),
+                    "next_calls": [{
+                        "id": "nc_plan", "why": "plan a run once the params are chosen",
+                        "call": {"tool": "plan", "op": "run_analysis",
+                                 "args": {"process": match["id"], "name": "OUTPUT_NAME",
+                                          "dataset_id": "INPUT_DATASET_ID", "params": {}}}}],
+                },
+        cost=reader.cost.to_dict(),
+        max_tokens=max_tokens)
+    result = envelope["result"]
+    while estimate_tokens(envelope) > max_tokens and len(result["parameters"]) > 5:
         keep = max(5, len(result["parameters"]) // 2)
         result["parameters"] = result["parameters"][:keep]
         result["parameters_truncated_to"] = keep
-    body["budget"] = {"max_tokens": max_tokens, "used_est": estimate_tokens(body),
-                      "degraded": []}
-    return body
+    envelope["budget"]["used_est"] = estimate_tokens(envelope)
+    return envelope
 
 
 def do_process_config(request: dict) -> dict:
@@ -110,17 +108,11 @@ def do_process_config(request: dict) -> dict:
             f"config_source is {source!r}. That is only meaningful for a process with "
             "workflow code; ingest data types carry no configuration.")
 
-    envelope = {
-        "ok": True, "api": {"contract": CONTRACT},
-        "query": {"verb": "process_config", "id": row["id"],
-                  "slot": request.get("slot"), "raw": bool(request.get("raw"))},
-        "result": result,
-        "cost": reader.cost.to_dict(),
-    }
-    max_tokens = int(request.get("max_tokens") or 8000)
-    envelope["budget"] = {"max_tokens": max_tokens,
-                          "used_est": estimate_tokens(envelope), "degraded": []}
-    return envelope
+    return wrap(query={"verb": "process_config", "id": row["id"],
+                       "slot": request.get("slot"), "raw": bool(request.get("raw"))},
+                result=result, cost=reader.cost.to_dict(),
+                max_tokens=int(request.get("max_tokens")
+                               or DEFAULT_MAX_TOKENS["process_config"]))
 
 
 def _storage_config(reader: Reader, process_id: str, request: dict) -> dict:
@@ -212,8 +204,8 @@ def _json_shape(slot: str, parsed) -> dict:
 def _repo_config(row: dict) -> dict:
     settings = row.get("custom_settings") or {}
     repo = settings.get("repository")
-    branch = settings.get("branch") or "main"
-    folder = settings.get("folder") or ".cirro"
+    branch = settings.get("branch") or R.DEFAULT_BRANCH
+    folder = settings.get("folder") or R.DEFAULT_CONFIG_FOLDER
     out = {
         "repo": {"repository": repo, "branch": branch, "folder": folder,
                  "repository_type": settings.get("repository_type")},

@@ -106,6 +106,13 @@ def _target_folders(args: dict, current: list) -> list:
     return list(current)
 
 
+def _tag_models(values: list) -> list:
+    """Wire-format Tag objects; the import stays lazy because this module is an entry
+    point that must not load the SDK."""
+    from cirro_api_client.v1.models import Tag
+    return [Tag(value=value) for value in values]
+
+
 def _wire_tags(folders: list, tags: list) -> list:
     """The single list Cirro actually stores: folder entries plus plain tags."""
     return [R.folder_tag(f) for f in (folders or [])] + list(tags or [])

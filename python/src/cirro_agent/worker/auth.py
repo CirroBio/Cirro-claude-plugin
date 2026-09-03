@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from .. import errors
+from ..session import write_private
 from . import portal
 
 FLOW_FILE = "login-flow.json"
@@ -34,8 +35,7 @@ def _home() -> Path:
 
 
 def _write(path: Path, payload: dict) -> None:
-    from ..session import _write_private
-    _write_private(path, json.dumps(payload, default=str))
+    write_private(path, json.dumps(payload, default=str))
 
 
 def _read(path: Path) -> Optional[dict]:

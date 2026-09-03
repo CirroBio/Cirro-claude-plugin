@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import errors
-from .session import Session
+from .session import Session, write_private
 
 # An hour, not ten minutes. The clock only ever guarded two things: that the figures
 # the person read are still true, and that their intent has not moved on. Only the
@@ -166,9 +166,8 @@ def load(session: Session, plan_id: str) -> Plan:
 
 
 def _save(session: Session, plan: Plan) -> None:
-    from .session import _write_private
-    _write_private(_plan_path(session, plan.plan_id),
-                   json.dumps(plan.to_dict(), indent=2, default=str))
+    write_private(_plan_path(session, plan.plan_id),
+                  json.dumps(plan.to_dict(), indent=2, default=str))
 
 
 def claim(session: Session, plan_id: str, *, digest: str, approved_summary: str,

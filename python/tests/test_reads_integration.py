@@ -127,12 +127,18 @@ def test_derived_date_bins_work_as_group_keys(fake_tenant, session_dir):
 
 
 def test_lineage_descendants_come_free_from_the_snapshot(fake_tenant, session_dir):
+    """Parent edges are on the list model, so descendants are an inverted-edge walk over
+    the same snapshot: once a project has been listed, the lineage query costs nothing.
+    The old assertion here was `== 0 or hits >= 0`, which could not fail."""
+    warm = _query(fake_tenant, session_dir)
+    assert warm["cost"]["api_calls"] > 0, "the first read fills the snapshot"
+
     result = _query(fake_tenant, session_dir,
                     filter={"field": "_lineage", "op": "descendant_of",
                             "value": "ds_0000", "depth": 3})
     matched = {row["id"] for row in result["result"]["rows"]}
     assert matched == {"ds_0001", "ds_0002", "ds_0003"}, matched
-    assert result["cost"]["api_calls"] == 0 or result["cost"]["cache"]["hits"] >= 0
+    assert result["cost"]["api_calls"] == 0, "the lineage walk is served from the snapshot"
 
 
 def test_ambiguous_and_missing_projects_are_typed_errors(fake_tenant, session_dir):

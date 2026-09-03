@@ -179,10 +179,10 @@ def init(workdir: Path, base_url: str, auth: str = AUTH_DEVICE_CODE) -> Session:
 def save(session: Session) -> None:
     payload = {k: v for k, v in asdict(session).items() if k != "dir" and v is not None}
     path = session.path / SESSION_FILE
-    _write_private(path, json.dumps(payload, indent=2) + "\n")
+    write_private(path, json.dumps(payload, indent=2) + "\n")
 
 
-def _write_private(path: Path, text: str) -> None:
+def write_private(path: Path, text: str) -> None:
     """Write atomically, never leaving the content readable at the process umask."""
     tmp = path.with_suffix(path.suffix + ".tmp")
     handle = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -203,7 +203,7 @@ def is_git_tracked(session_dir: Path) -> bool:
     return out.returncode == 0
 
 
-def child_env(session: Session, extra: Optional[dict] = None) -> dict:
+def child_env(session: Session) -> dict:
     """The environment a worker subprocess is started with.
 
     CIRRO_HOME is set here and only here. It must be in place before the child's
@@ -213,6 +213,4 @@ def child_env(session: Session, extra: Optional[dict] = None) -> dict:
     env["CIRRO_HOME"] = str(session.path.resolve())
     env["CIRRO_BASE_URL"] = session.base_url
     env.pop("PYTHONSTARTUP", None)
-    if extra:
-        env.update(extra)
     return env

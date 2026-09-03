@@ -6,7 +6,6 @@ whose rendered text was approved, and nothing else can be substituted for it.
 import json
 import time
 
-from conftest import PARAMETER_SPEC  # noqa: F401
 
 from cirro_agent import plans
 from cirro_agent.worker import dispatch
@@ -230,7 +229,6 @@ def test_an_unknown_operation_lists_the_supported_ones(writable_tenant, session_
 def test_a_schema_plan_will_not_claim_nothing_was_removed(
         writable_tenant, session_dir, monkeypatch):
     """An unreadable baseline used to render as "keys removed []" with no warning."""
-    from cirro_agent.worker import mutations
 
     def unreadable(*_args, **_kwargs):
         raise RuntimeError("schema service unavailable")
@@ -246,7 +244,6 @@ def test_a_schema_plan_will_not_claim_nothing_was_removed(
     assert "keys removed  []" not in shown
     assert "unknown" in shown
     assert any("could not be read" in w for w in planned["warnings"]), planned["warnings"]
-    assert mutations.OPS["update_project_schema"]
 
 
 # --- the approval must still describe reality when it executes ---------------

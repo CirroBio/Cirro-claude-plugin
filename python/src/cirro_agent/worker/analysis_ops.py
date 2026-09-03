@@ -7,7 +7,7 @@ why the registration lives on this side.
 
 from .. import errors, summarize as S
 from . import mutations, reads, rows as R
-from .mutations import (Draft, Op, RISK_WRITE, _inv, _need, _project, _dataset,
+from .mutations import (_tag_models, Draft, Op, RISK_WRITE, _inv, _need, _project, _dataset,
                         _target_folders, _wire_tags)
 
 
@@ -50,24 +50,18 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
     compute = args.get("compute_environment")
     compute_label = "Cirro default (AWS Batch)"
     if compute:
-        environments = reader.client.compute_environments.list_environments_for_project(
-            project_id=project["id"]) or []
-        reader.cost.call("compute_environments.list")
-        match = next((e for e in environments
-                      if R.plain(getattr(e, "id", None)) == compute
-                      or R.plain(getattr(e, "name", None)) == compute), None)
+        environments = reader.compute_environments(project["id"])
+        match = next((e for e in environments if compute in (e["id"], e["name"])), None)
         if match is None:
             raise errors.NotFound(
                 f"No compute environment {compute!r} in this project.",
                 what="Use an available compute environment, or omit it for the default.",
                 field="compute_environment", given=compute,
-                candidates=[{"id": R.plain(getattr(e, "id", None)),
-                             "name": R.plain(getattr(e, "name", None))}
-                            for e in environments],
+                candidates=environments,
                 retry_with=[{"compute_environment": None}],
             )
-        compute = R.plain(getattr(match, "id", None))
-        compute_label = f"{R.plain(getattr(match, 'name', None))} ({compute})"
+        compute = match["id"]
+        compute_label = f"{match['name']} ({compute})"
 
     resolved = {
         "project_id": project["id"], "project_name": project["name"],
@@ -120,18 +114,15 @@ def apply_run_analysis(reader: reads.Reader, args: dict) -> dict:
         description=args.get("description") or "",
         notification_emails=args.get("notification_emails") or [],
     )
-    for field_name, key in (("compute_environment_id", "compute_environment_id"),
-                            ("resume_dataset_id", "resume_dataset_id"),
-                            ("source_sample_ids", "source_sample_ids")):
-        value = args.get(key)
-        if value:
-            setattr(request, field_name, value)
+    for optional in ("compute_environment_id", "resume_dataset_id",
+                     "source_sample_ids"):
+        if args.get(optional):
+            setattr(request, optional, args[optional])
     # Folders are tags, and RunAnalysisRequest carries tags -- so the output dataset
     # is filed at launch, in the same call, instead of needing an update afterwards.
     combined = _wire_tags(args.get("folders"), args.get("tags"))
     if combined:
-        from cirro_api_client.v1.models import Tag
-        request.tags = [Tag(value=value) for value in combined]
+        request.tags = _tag_models(combined)
     response = reader.client.execution.run_analysis(project_id=args["project_id"],
                                                     request=request)
     created = R.plain(getattr(response, "id", None))

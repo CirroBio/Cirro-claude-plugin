@@ -9,7 +9,6 @@ from cirro_agent import errors, plans, session as session_mod
 
 @pytest.fixture
 def sess(tmp_path, monkeypatch):
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     return session_mod.init(tmp_path, "app.cirro.bio")
 
 
@@ -77,7 +76,7 @@ def test_a_different_user_is_refused(sess):
     assert "alice" in caught.value.message and "bob" in caught.value.message
 
 
-def test_a_different_tenant_is_refused(sess, tmp_path):
+def test_a_different_tenant_is_refused(sess):
     plan = make(sess)
     other = session_mod.Session(base_url="other.cirro.bio", dir=str(sess.path))
     with pytest.raises(errors.AgentError) as caught:
@@ -113,7 +112,7 @@ def _record(**overrides):
     return base
 
 
-def test_the_digest_covers_everything_the_approval_depends_on(sess):
+def test_the_digest_covers_everything_the_approval_depends_on():
     base = plans.canonical_digest(_record())
     assert base == plans.canonical_digest(_record()), "must be stable"
     for field, value in [("args", {"a": 2}), ("op", "update_dataset"),
@@ -140,7 +139,6 @@ def test_a_malformed_plan_id_is_refused(sess, bad):
 
 def test_a_summary_edited_on_disk_is_caught(sess):
     """The text the human approved is inside the integrity check."""
-    import json
     plan = make(sess, summary="DELETE dataset D1. Not reversible.")
     path = sess.path / "plans" / f"{plan.plan_id}.json"
     stored = json.loads(path.read_text())
@@ -190,7 +188,6 @@ def test_risk_is_carried_into_the_rendered_text(sess):
 def test_a_plan_edited_on_disk_fails_its_own_digest(sess):
     """Comparing the caller's digest to the stored one would not catch this: an editor
     can change `args` and leave `digest` untouched."""
-    import json
     plan = make(sess)
     path = sess.path / "plans" / f"{plan.plan_id}.json"
     stored = json.loads(path.read_text())

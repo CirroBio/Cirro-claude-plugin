@@ -11,6 +11,8 @@ from ..session import Session
 
 
 def do_plan(request: dict) -> dict:
+    # Lazy on purpose: importing mutations loads every op family, and a read
+    # request should not pay for that.
     from . import mutations
     op = mutations.get_op(request["op"])
     reader = reads.Reader(request)

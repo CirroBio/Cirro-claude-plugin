@@ -112,16 +112,13 @@ class SnapshotCache:
         return snapshot
 
     def put(self, kind: str, items: list, *, meta: Optional[dict] = None,
-            ttl_s: Optional[int] = None, no_store: bool = False, **scope: Any) -> Snapshot:
+            ttl_s: Optional[int] = None, **scope: Any) -> Snapshot:
         snapshot = Snapshot(
             key=self._scope_label(kind, scope), kind=kind, items=items,
             created_at=time.time(),
             ttl_s=ttl_s if ttl_s is not None else TTL.get(kind, 300),
             meta=meta or {},
         )
-        if no_store:
-            # View-restricted content never touches disk.
-            return snapshot
         self.root.mkdir(parents=True, exist_ok=True)
         key = self.key(kind, **scope)
         path = self._path(key)

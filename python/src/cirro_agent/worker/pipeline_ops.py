@@ -20,8 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from .. import errors, formcheck, formgen
-from . import reads, rows as R
-from . import mutations
+from . import mutations, reads, rows as R
 from .mutations import (Draft, Op, RISK_DESTRUCTIVE, RISK_LOCAL, RISK_WRITE,
                         RISK_WRITE_LOCAL,
                         _inv, _need)
@@ -36,9 +35,6 @@ NAME_CHARSET = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .&\-@!#'()/]*$")
 
 # The server-side regex engine wants (?<name>...); Python's (?P<name>...) 400s.
 PYTHON_NAMED_GROUP = re.compile(r"\(\?P<")
-
-DEFAULT_CONFIG_FOLDER = ".cirro"
-DEFAULT_BRANCH = "main"
 
 
 # --------------------------------------------------------------------- helpers
@@ -231,8 +227,8 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
             )
         settings = {
             "repository": repo,
-            "branch": args.get("config_branch") or DEFAULT_BRANCH,
-            "folder": args.get("config_folder") or DEFAULT_CONFIG_FOLDER,
+            "branch": args.get("config_branch") or R.DEFAULT_BRANCH,
+            "folder": args.get("config_folder") or R.DEFAULT_CONFIG_FOLDER,
         }
 
     assets, report = _validated_assets(spec)
@@ -360,6 +356,8 @@ def apply_create_process(reader: reads.Reader, args: dict) -> dict:
 
 
 STAGING_DIR = "pipeline-config"
+# How many changed files an approval lists before summarizing the rest.
+ENTRY_PREVIEW = 20
 
 
 def _staging_dir(args: dict) -> Path:
@@ -567,7 +565,7 @@ def plan_sync_process_config(reader: reads.Reader, args: dict) -> Draft:
         f"Sync configuration for {detail['name']} ({args['process_id']}) from git.",
         "",
         f"  Repository    {settings['repository']}@{settings.get('branch') or 'main'}",
-        f"  Folder        {settings.get('folder') or DEFAULT_CONFIG_FOLDER}/",
+        f"  Folder        {settings.get('folder') or R.DEFAULT_CONFIG_FOLDER}/",
         f"  Last sync     {settings.get('last_sync') or 'never'}"
         f" ({settings.get('sync_status') or 'unknown'})",
         f"  Last commit   {settings.get('commit_hash') or 'none'}",
@@ -713,9 +711,9 @@ def apply_update_process(reader: reads.Reader, args: dict) -> dict:
         request.custom_settings = CustomPipelineSettings(
             repository=changes.get("config_repository", settings["repository"]),
             branch=changes.get("config_branch", settings.get("branch")
-                               or DEFAULT_BRANCH),
+                               or R.DEFAULT_BRANCH),
             folder=changes.get("config_folder", settings.get("folder")
-                               or DEFAULT_CONFIG_FOLDER))
+                               or R.DEFAULT_CONFIG_FOLDER))
 
     reader.client.processes.update_custom_process(process_id=args["process_id"],
                                                   process=request)
@@ -755,9 +753,11 @@ def _git(repo: Path, *arguments: str) -> subprocess.CompletedProcess:
 
 
 def _repo_root(path: Path) -> Optional[Path]:
-    done = subprocess.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-                          capture_output=True, text=True, timeout=30)
-    return Path(done.stdout.strip()) if done.returncode == 0 else None
+    try:
+        top = _git(path, "rev-parse", "--show-toplevel")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return Path(top.stdout.strip()) if top.returncode == 0 and top.stdout.strip() else None
 
 
 def plan_write_process_config(reader: reads.Reader, args: dict) -> Draft:
@@ -862,8 +862,8 @@ def plan_commit_process_config(reader: reads.Reader, args: dict) -> Draft:
         "",
         "  Changes:",
     ]
-    lines += [f"    {line}" for line in entries[:20]]
-    if len(entries) > 20:
+    lines += [f"    {line}" for line in entries[:ENTRY_PREVIEW]]
+    if len(entries) > ENTRY_PREVIEW:
         lines.append(f"    ... {len(entries) - 20} more")
     lines += ["", "This commits locally only. Nothing is pushed; the remote is "
                   "untouched until you push it yourself."]

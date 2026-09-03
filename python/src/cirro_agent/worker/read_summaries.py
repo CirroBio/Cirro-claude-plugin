@@ -2,12 +2,11 @@
 files, logs, tasks, samples, parameters, trace.
 """
 from typing import Optional
+
 from .. import errors, summarize as S
-from ..envelope import DEFAULT_MAX_TOKENS
+from ..envelope import DEFAULT_MAX_TOKENS, estimate_tokens, wrap
 from .reads import (MANIFEST_LIST_LIMIT, Reader, dataset_detail, dataset_manifest,
-                    dataset_tasks, is_terminal, spec_shape)
-from ..envelope import CONTRACT
-from ..envelope import estimate_tokens
+                    dataset_tasks, is_terminal, portal_dataset, spec_shape)
 
 
 def do_summarize(request: dict) -> dict:
@@ -25,147 +24,143 @@ def do_summarize(request: dict) -> dict:
     dataset_id = request.get("dataset_id") or scope.get("dataset_id")
     max_tokens = int(request.get("max_tokens") or DEFAULT_MAX_TOKENS["summarize"])
 
-    if of == "samples":
-        sample_rows, complete = reader.samples(project_id)
-        schema_keys = None
-        try:
-            form = reader.client.metadata.get_project_schema(project_id=project_id)
-            reader.cost.call("metadata.schema")
-            spec_json = getattr(form, "form_spec_json", None) or {}
-            props = ((spec_json.get("properties")
-                      if isinstance(spec_json, dict) else None) or {})
-            schema_keys = list(props)
-        except Exception:
-            pass
-        body = S.samples(sample_rows, schema_keys=schema_keys)
-        reader.cost.strategy = "snapshot"
-        group_keys = [f"metadata.{key}"
-                      for key in body.get("candidate_group_keys", [])[:1]]
-        next_calls = [{
-            "id": "nc_group",
-            "why": "group by a metadata key that is actually worth grouping on",
-            "call": {"verb": "query", "entity": "sample",
-                     "scope": {"project_ids": project_ids},
-                     "group_by": group_keys or ["created_at:month"],
-                     "metrics": ["count"]},
-        }]
-        return _summary_envelope(reader, request, of, body, complete,
-                                 {"project_ids": project_ids}, max_tokens,
-                                 next_calls=next_calls)
-
-    if not dataset_id:
+    if of != "samples" and not dataset_id:
         raise errors.ScopeRequired(
             f"summarize {of} needs a dataset_id.",
             what="Name the dataset to summarize.", field="dataset_id",
             retry_with=[{"verb": "query", "entity": "dataset",
                          "scope": {"project_ids": project_ids}}],
         )
+    scope_echo = {"project_ids": project_ids}
+    if dataset_id:
+        scope_echo["dataset_id"] = dataset_id
+    build = _BUILDERS[of]
+    body, complete, next_calls = build(reader, request, project_ids, project_id, dataset_id)
+    return _summary_envelope(reader, request, of, body, complete, scope_echo,
+                             max_tokens, next_calls=next_calls)
 
-    if of == "files":
-        limit = int(request.get("file_limit") or MANIFEST_LIST_LIMIT)
-        entries, total, artifacts = dataset_manifest(
-            reader, project_id, dataset_id, file_limit=limit,
-            is_terminal=is_terminal(reader, project_id, dataset_id))
-        all_entries = entries
-        glob = request.get("glob")
-        if glob:
-            import fnmatch
-            entries = [e for e in entries
-                       if fnmatch.fnmatch(e["path"].lower(), glob.lower())]
-        body = S.files(entries, total_files=total, artifact_types=artifacts)
-        if glob:
-            body["filtered_by_glob"] = glob
-            body["note"] = (f"{len(entries)} of {total} files match {glob!r}; the figures "
-                            "above describe the matching subset")
-        reader.cost.strategy = "manifest_probe"
-        # Honest completeness: the manifest is capped at file_limit.
-        complete = total is None or len(all_entries) >= total
-        return _summary_envelope(reader, request, of, body, complete,
-                                 {"project_ids": project_ids, "dataset_id": dataset_id},
-                                 max_tokens, next_calls=[{
-                                     "id": "nc_read",
-                                     "why": "read one file's contents without downloading",
-                                     "call": {"verb": "summarize", "of": "files",
-                                              "dataset_id": dataset_id,
-                                              "scope": {"project_ids": project_ids},
-                                              "glob": (body.get("suggested_globs") or
-                                                       [{"glob": "*"}])[0]["glob"]}}])
 
-    if of == "logs":
-        text = reader.client.execution.get_execution_logs(project_id=project_id,
-                                                          dataset_id=dataset_id) or ""
-        reader.cost.call("execution.logs")
-        body = S.logs(text, head=int(request.get("head") or 30),
-                      tail=int(request.get("tail") or 60))
-        if request.get("raw"):
-            body["raw"] = _raw_slice(text, request)
-        reader.cost.strategy = "execution_live"
-        next_calls = [{
-            "id": "nc_tasks",
-            "why": "find the root-cause task rather than reading more log",
-            "call": {"verb": "summarize", "of": "tasks", "dataset_id": dataset_id,
-                     "scope": {"project_ids": project_ids}},
-        }]
-        return _summary_envelope(reader, request, of, body, True,
-                                 {"project_ids": project_ids, "dataset_id": dataset_id},
-                                 max_tokens, next_calls=next_calls)
+def _samples_body(reader, request, project_ids, project_id, dataset_id) -> tuple:
+    sample_rows, complete = reader.samples(project_id)
+    schema_keys = None
+    try:
+        form = reader.client.metadata.get_project_schema(project_id=project_id)
+        reader.cost.call("metadata.schema")
+        spec_json = getattr(form, "form_spec_json", None) or {}
+        props = ((spec_json.get("properties")
+                  if isinstance(spec_json, dict) else None) or {})
+        schema_keys = list(props)
+    except Exception:
+        pass
+    body = S.samples(sample_rows, schema_keys=schema_keys)
+    reader.cost.strategy = "snapshot"
+    group_keys = [f"metadata.{key}" for key in body.get("candidate_group_keys", [])[:1]]
+    return body, complete, [{
+        "id": "nc_group",
+        "why": "group by a metadata key that is actually worth grouping on",
+        "call": {"verb": "query", "entity": "sample",
+                 "scope": {"project_ids": project_ids},
+                 "group_by": group_keys or ["created_at:month"],
+                 "metrics": ["count"]},
+    }]
 
-    if of == "tasks":
-        task_rows = dataset_tasks(reader, project_id, dataset_id)
-        primary = _primary_failed_index(reader, project_id, dataset_id, task_rows)
-        body = S.tasks(task_rows, primary_failed_index=primary)
-        reader.cost.strategy = "execution_live"
-        next_calls = []
-        if body.get("failed"):
-            root = body["failed"][0]
-            next_calls.append({
-                "id": "nc_task_logs",
-                "why": f"read the log of the root-cause task ({root.get('name')})",
-                "call": {"verb": "summarize", "of": "logs", "dataset_id": dataset_id,
-                         "scope": {"project_ids": project_ids},
-                         "task_id": root.get("task_id")}})
+
+def _files_body(reader, request, project_ids, project_id, dataset_id) -> tuple:
+    limit = int(request.get("file_limit") or MANIFEST_LIST_LIMIT)
+    entries, total, artifacts = dataset_manifest(
+        reader, project_id, dataset_id, file_limit=limit,
+        is_terminal=is_terminal(reader, project_id, dataset_id))
+    all_entries = entries
+    glob = request.get("glob")
+    if glob:
+        import fnmatch
+        entries = [e for e in entries if fnmatch.fnmatch(e["path"].lower(), glob.lower())]
+    body = S.files(entries, total_files=total, artifact_types=artifacts)
+    if glob:
+        body["filtered_by_glob"] = glob
+        body["note"] = (f"{len(entries)} of {total} files match {glob!r}; the figures "
+                        "above describe the matching subset")
+    reader.cost.strategy = "manifest_probe"
+    # Honest completeness: the manifest is capped at file_limit.
+    complete = total is None or len(all_entries) >= total
+    return body, complete, [{
+        "id": "nc_read",
+        "why": "read one file's contents without downloading",
+        "call": {"verb": "summarize", "of": "files", "dataset_id": dataset_id,
+                 "scope": {"project_ids": project_ids},
+                 "glob": (body.get("suggested_globs") or [{"glob": "*"}])[0]["glob"]}}]
+
+
+def _logs_body(reader, request, project_ids, project_id, dataset_id) -> tuple:
+    text = reader.client.execution.get_execution_logs(project_id=project_id,
+                                                      dataset_id=dataset_id) or ""
+    reader.cost.call("execution.logs")
+    body = S.logs(text, head=int(request.get("head") or 30),
+                  tail=int(request.get("tail") or 60))
+    if request.get("raw"):
+        body["raw"] = _raw_slice(text, request)
+    reader.cost.strategy = "execution_live"
+    return body, True, [{
+        "id": "nc_tasks",
+        "why": "find the root-cause task rather than reading more log",
+        "call": {"verb": "summarize", "of": "tasks", "dataset_id": dataset_id,
+                 "scope": {"project_ids": project_ids}},
+    }]
+
+
+def _tasks_body(reader, request, project_ids, project_id, dataset_id) -> tuple:
+    task_rows = dataset_tasks(reader, project_id, dataset_id)
+    primary = _primary_failed_index(reader, project_id, dataset_id, task_rows)
+    body = S.tasks(task_rows, primary_failed_index=primary)
+    reader.cost.strategy = "execution_live"
+    next_calls = []
+    if body.get("failed"):
+        root = body["failed"][0]
         next_calls.append({
-            "id": "nc_trace", "why": "check whether resources were the cause",
-            "call": {"verb": "summarize", "of": "trace", "dataset_id": dataset_id,
-                     "scope": {"project_ids": project_ids}}})
-        return _summary_envelope(reader, request, of, body, True,
-                                 {"project_ids": project_ids, "dataset_id": dataset_id},
-                                 max_tokens, next_calls=next_calls)
+            "id": "nc_task_logs",
+            "why": f"read the log of the root-cause task ({root.get('name')})",
+            "call": {"verb": "summarize", "of": "logs", "dataset_id": dataset_id,
+                     "scope": {"project_ids": project_ids},
+                     "task_id": root.get("task_id")}})
+    next_calls.append({
+        "id": "nc_trace", "why": "check whether resources were the cause",
+        "call": {"verb": "summarize", "of": "trace", "dataset_id": dataset_id,
+                 "scope": {"project_ids": project_ids}}})
+    return body, True, next_calls
 
-    if of == "params":
-        row = dataset_detail(reader, project_id, dataset_id)
-        defaults, declared, required = spec_shape(reader, row.get("process_id"))
-        body = S.params(row.get("params") or {}, defaults=defaults, declared=declared,
-                        required=required)
-        body["process"] = row.get("process")
-        reader.cost.strategy = "detail+parameter_spec"
-        next_calls = [{
-            "id": "nc_spec",
-            "why": "read the full parameter spec before changing params",
-            "call": {"verb": "get", "entity": "process", "id": row.get("process_id"),
-                     "include": ["custom_settings"]},
-        }]
-        return _summary_envelope(reader, request, of, body, True,
-                                 {"project_ids": project_ids, "dataset_id": dataset_id},
-                                 max_tokens, next_calls=next_calls)
 
-    # trace
+def _params_body(reader, request, project_ids, project_id, dataset_id) -> tuple:
+    row = dataset_detail(reader, project_id, dataset_id)
+    defaults, declared, required = spec_shape(reader, row.get("process_id"))
+    body = S.params(row.get("params") or {}, defaults=defaults, declared=declared,
+                    required=required)
+    body["process"] = row.get("process")
+    reader.cost.strategy = "detail+parameter_spec"
+    return body, True, [{
+        "id": "nc_spec",
+        "why": "read the full parameter spec before changing params",
+        "call": {"verb": "get", "entity": "process", "id": row.get("process_id"),
+                 "include": ["custom_settings"]},
+    }]
+
+
+def _trace_summary(reader, request, project_ids, project_id, dataset_id) -> tuple:
     body = _trace_body(reader, project_id, dataset_id)
     reader.cost.strategy = "artifact_read"
-    return _summary_envelope(reader, request, of, body, True,
-                             {"project_ids": project_ids, "dataset_id": dataset_id},
-                             max_tokens, next_calls=[])
+    return body, True, []
+
+
+# One builder per summary kind, all with the same signature, so do_summarize is the
+# validation and the envelope and nothing else.
+_BUILDERS = {"samples": _samples_body, "files": _files_body, "logs": _logs_body,
+             "tasks": _tasks_body, "params": _params_body, "trace": _trace_summary}
 
 
 def _primary_failed_index(reader: Reader, project_id: str, dataset_id: str,
                           task_rows: list) -> Optional[int]:
     """Ask the SDK which task is the root cause; fall back to the earliest failure."""
     try:
-        from cirro.sdk.dataset import DataPortalDataset
-        detail = reader.client.datasets.get(project_id=project_id, dataset_id=dataset_id)
-        # Booked like every other detail fetch, or the cost block under-reports.
-        reader.cost.call("datasets.get", detail=True)
-        wrapped = DataPortalDataset(detail, reader.client)
+        wrapped = portal_dataset(reader, project_id, dataset_id)
         primary = wrapped.primary_failed_task
         if primary is not None:
             return getattr(primary, "task_id", None)
@@ -178,10 +173,7 @@ def _primary_failed_index(reader: Reader, project_id: str, dataset_id: str,
 
 def _trace_body(reader: Reader, project_id: str, dataset_id: str) -> dict:
     try:
-        from cirro.sdk.dataset import DataPortalDataset
-        detail = reader.client.datasets.get(project_id=project_id, dataset_id=dataset_id)
-        reader.cost.call("datasets.get", detail=True)
-        wrapped = DataPortalDataset(detail, reader.client)
+        wrapped = portal_dataset(reader, project_id, dataset_id)
         frame = wrapped.get_trace()
         reader.cost.call("artifact.trace")
     except errors.AgentError:
@@ -278,16 +270,12 @@ def _raw_slice(text: str, request: dict) -> dict:
 def _summary_envelope(reader: Reader, request: dict, of: str, body: dict,
                       complete: bool, scope_echo: dict, max_tokens: int,
                       next_calls: list) -> dict:
-    envelope = {
-        "ok": True,
-        "api": {"contract": CONTRACT},
-        "query": {"verb": "summarize", "of": of, "scope": scope_echo,
-                  "dataset_id": request.get("dataset_id")},
-        "result": {"summary_of": of, "scan_complete": complete, of: body,
-                   "next_calls": next_calls},
-        "cost": reader.cost.to_dict(),
-        "budget": {"max_tokens": max_tokens, "degraded": []},
-    }
+    envelope = wrap(
+        query={"verb": "summarize", "of": of, "scope": scope_echo,
+               "dataset_id": request.get("dataset_id")},
+        result={"summary_of": of, "scan_complete": complete, of: body,
+                "next_calls": next_calls},
+        cost=reader.cost.to_dict(), max_tokens=max_tokens)
     # Summaries are already collapsed; if one still overruns, drop the most verbose
     # sections in a fixed order rather than cutting a structure open.
     shrinkable = {

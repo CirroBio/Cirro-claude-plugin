@@ -7,10 +7,18 @@ why the registration lives on this side.
 import shutil
 from pathlib import Path
 from typing import Optional
+
 from .. import errors, summarize as S
 from . import mutations, reads, rows as R
-from .mutations import (Draft, Op, RISK_WRITE, RISK_DESTRUCTIVE, RISK_LOCAL, _inv, _need,
-                        _project, _dataset, _target_folders, _wire_tags)
+from .mutations import (Draft, Op, RISK_DESTRUCTIVE, RISK_LOCAL, RISK_WRITE, _dataset, _inv,
+                        _need, _project, _tag_models, _target_folders, _wire_tags)
+
+
+# How much of a samplesheet diff the approval quotes before pointing at the file.
+DIFF_PREVIEW_CHARS = 60
+# A download that would fill the disk to the last 10% is refused; that margin is what
+# the operating system and the transfer itself need.
+FREE_SPACE_HEADROOM = 0.9
 
 
 def _dataset_edit(row: dict, args: dict) -> Optional[dict]:
@@ -137,8 +145,8 @@ def _edit_lines(edit: dict, *, indent: str) -> list:
         lines += [f"{indent}{key}", f"{indent}  from  {edit['was'][key]!r}",
                   f"{indent}  to    {edit[key]!r}"]
     if edit["folders"] != edit["was"]["folders"]:
-        was = ", ".join(edit["was"]["folders"]) or "(not in a folder)"
-        now = ", ".join(edit["folders"]) or "(not in a folder)"
+        was = ", ".join(edit["was"]["folders"]) or R.UNFILED
+        now = ", ".join(edit["folders"]) or R.UNFILED
         lines += [f"{indent}folder", f"{indent}  from  {was}", f"{indent}  to    {now}"]
     if sorted(edit["tags"]) != sorted(edit["was"]["tags"]):
         lines += [f"{indent}tags", f"{indent}  from  {edit['was']['tags']}",
@@ -154,7 +162,7 @@ def apply_update_dataset(reader: reads.Reader, args: dict) -> dict:
     already been changed, and the audit trail would say so -- so failures are
     collected and every dataset's outcome is named.
     """
-    from cirro_api_client.v1.models import UpdateDatasetRequest, Tag
+    from cirro_api_client.v1.models import UpdateDatasetRequest
 
     updated, failed = [], []
     for edit in args["edits"]:
@@ -165,7 +173,7 @@ def apply_update_dataset(reader: reads.Reader, args: dict) -> dict:
             name=edit["name"],
             description=edit.get("description") or "",
             process_id=edit["process_id"],
-            tags=[Tag(value=value) for value in combined],
+            tags=_tag_models(combined),
         )
         try:
             detail = reader.client.datasets.update(
@@ -264,14 +272,14 @@ def plan_update_samplesheet(reader: reads.Reader, args: dict) -> Draft:
         before = wrapped.get_artifact(ArtifactType.SAMPLE_SHEET).read()
         reader.cost.call("artifact.samplesheet")
     except Exception:
-        before = ""
+        pass
 
     import difflib
     diff = list(difflib.unified_diff(
         before.splitlines(), contents.splitlines(),
         fromfile="current samplesheet", tofile="proposed samplesheet", lineterm="", n=2))
-    shown = diff[:60]
-    if len(diff) > 60:
+    shown = diff[:DIFF_PREVIEW_CHARS]
+    if len(diff) > DIFF_PREVIEW_CHARS:
         shown.append(f"... {len(diff) - 60} more diff lines")
 
     lines = [f"Replace the samplesheet of {row['name']} ({row['id']}) in "
@@ -399,19 +407,16 @@ def apply_upload_dataset(reader: reads.Reader, args: dict) -> dict:
 def plan_upload_reference(reader: reads.Reader, args: dict) -> Draft:
     _need(args, "upload_reference", "name", "reference_type", "files")
     project = _project(reader, args)
-    types = reader.client.references.get_types() or []
-    reader.cost.call("references.get_types")
+    types = reader.reference_types()
     wanted = args["reference_type"]
-    match = next((t for t in types if R.plain(getattr(t, "name", None)) == wanted), None)
+    match = next((t for t in types if t["name"] == wanted), None)
     if match is None:
         raise errors.NotFound(
             f"No reference type {wanted!r} in this deployment.",
             what="Reference types are deployment-specific; pick one that exists.",
             field="reference_type", given=wanted,
-            candidates=[{"name": R.plain(getattr(t, "name", None)),
-                         "description": R.plain(getattr(t, "description", None))}
-                        for t in types],
-            retry_with=[{"verb": "query", "entity": "reference"}],
+            candidates=[{"name": t["name"], "description": t["description"]} for t in types],
+            retry_with=[{"verb": "list", "of": "reference_types"}],
         )
     paths = [Path(f).expanduser().resolve() for f in args["files"]]
     missing = [str(p) for p in paths if not p.is_file()]
@@ -503,7 +508,7 @@ def plan_download_files(reader: reads.Reader, args: dict) -> Draft:
             retry_with=[{"destination": str(Path.home() / "Downloads")}],
         )
     warnings = []
-    if total_bytes > free * 0.9:
+    if total_bytes > free * FREE_SPACE_HEADROOM:
         warnings.append(
             f"This needs {S.human_bytes(total_bytes)} but only {S.human_bytes(free)} is "
             "free at the destination.")

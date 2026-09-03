@@ -24,7 +24,6 @@ def test_init_refuses_the_home_directory(monkeypatch, tmp_path):
 
 
 def test_discovery_walks_up_from_a_subdirectory(tmp_path, monkeypatch):
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     session_mod.init(tmp_path, "app.cirro.bio")
     deep = tmp_path / "a" / "b" / "c"
     deep.mkdir(parents=True)
@@ -42,7 +41,6 @@ def test_discovery_stops_at_the_project_ceiling(tmp_path, monkeypatch):
 
 
 def test_missing_session_is_a_typed_error_with_a_human_action(tmp_path, monkeypatch):
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     with pytest.raises(errors.AgentError) as caught:
         session_mod.find_session_dir(tmp_path)
     assert caught.value.code == "NO_SESSION_FOLDER"
@@ -50,7 +48,6 @@ def test_missing_session_is_a_typed_error_with_a_human_action(tmp_path, monkeypa
 
 
 def test_ambient_base_url_conflict_is_refused(tmp_path, monkeypatch):
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     session_mod.init(tmp_path, "app.cirro.bio")
     monkeypatch.setenv("CIRRO_BASE_URL", "other.cirro.bio")
     with pytest.raises(errors.AgentError) as caught:
@@ -59,7 +56,6 @@ def test_ambient_base_url_conflict_is_refused(tmp_path, monkeypatch):
 
 
 def test_matching_ambient_base_url_is_accepted(tmp_path, monkeypatch):
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     session_mod.init(tmp_path, "app.cirro.bio")
     monkeypatch.setenv("CIRRO_BASE_URL", "https://app.cirro.bio")
     assert session_mod.load(tmp_path).base_url == "app.cirro.bio"

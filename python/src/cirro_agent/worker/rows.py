@@ -10,8 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .. import errors
-from ..query import STATUS_CLASSES as _STATUS_CLASSES
-from ..query import parse_dt
+from ..query import STATUS_CLASSES as _STATUS_CLASSES, parse_dt
 from ..summarize import human_bytes, split_ext, task_process
 
 # Single source of truth: `is_terminal` on a row and the `@terminal` filter class must
@@ -22,6 +21,13 @@ TERMINAL_STATUSES = frozenset(_STATUS_CLASSES["@terminal"])
 # implementation detail: everything above this module works in terms of `folders`, and
 # `tags` never contains a folder entry.
 FOLDER_TAG_PREFIX = "folder://"
+
+# Where Cirro reads a repository-backed configuration from when the process says nothing.
+DEFAULT_CONFIG_FOLDER = ".cirro"
+DEFAULT_BRANCH = "main"
+
+# How a dataset with no folder is described wherever folders are listed.
+UNFILED = "(not in a folder)"
 
 
 def split_folder_tags(values: list) -> tuple:
@@ -182,7 +188,7 @@ def process_detail(detail, base: Optional[dict] = None) -> dict:
     code = getattr(detail, "pipeline_code", None)
 
     row["config_source"] = source
-    if settings is not None and not _is_unset(settings):
+    if settings is not None and plain(settings) is not None:
         row["custom_settings"] = {
             "repository": plain(getattr(settings, "repository", None)),
             "branch": plain(getattr(settings, "branch", None)),
@@ -196,7 +202,7 @@ def process_detail(detail, base: Optional[dict] = None) -> dict:
     else:
         row["custom_settings"] = None
 
-    if code is not None and not _is_unset(code):
+    if code is not None and plain(code) is not None:
         row["pipeline_code"] = {
             "repository_path": plain(getattr(code, "repository_path", None)),
             "version": plain(getattr(code, "version", None)),
@@ -214,11 +220,6 @@ def process_detail(detail, base: Optional[dict] = None) -> dict:
     return row
 
 
-def _is_unset(value) -> bool:
-    from cirro_api_client.v1.types import Unset
-    return isinstance(value, Unset)
-
-
 def _config_location(row: dict) -> str:
     """Say in one line where a process's config actually comes from."""
     source = row.get("config_source")
@@ -227,8 +228,8 @@ def _config_location(row: dict) -> str:
     if source == "STORAGE":
         return "Cirro storage (uploaded config revisions)"
     if source in ("WITH_PROCESS", "EXTERNAL") and repo:
-        folder = settings.get("folder") or ".cirro"
-        branch = settings.get("branch") or "main"
+        folder = settings.get("folder") or DEFAULT_CONFIG_FOLDER
+        branch = settings.get("branch") or DEFAULT_BRANCH
         same = (row.get("pipeline_code") or {}).get("repository_path") == repo
         which = "same repo as the code" if same else "separate repo"
         return f"{repo}@{branch}:{folder} ({which})"
@@ -306,3 +307,38 @@ def task(obj, index: int) -> dict:
         except errors.AgentError:
             row["duration_s"] = None
     return row
+
+
+def share(obj) -> dict:
+    return {"id": plain(getattr(obj, "id", None)), "name": plain(getattr(obj, "name", None)),
+            "share_type": plain(getattr(obj, "share_type", None)),
+            "description": plain(getattr(obj, "description", None))}
+
+
+def workspace(obj) -> dict:
+    return {"id": plain(getattr(obj, "id", None)), "name": plain(getattr(obj, "name", None)),
+            "status": plain(getattr(obj, "status", None)),
+            "environment_id": plain(getattr(obj, "environment_id", None)),
+            "started_at": plain(getattr(obj, "started_at", None))}
+
+
+def compute_environment(obj) -> dict:
+    return {"id": plain(getattr(obj, "id", None)), "name": plain(getattr(obj, "name", None))}
+
+
+def reference_type(obj) -> dict:
+    return {"name": plain(getattr(obj, "name", None)),
+            "description": plain(getattr(obj, "description", None)),
+            "directory": plain(getattr(obj, "directory", None))}
+
+
+def user(obj) -> dict:
+    return {"username": plain(getattr(obj, "username", None)),
+            "name": plain(getattr(obj, "name", None)),
+            "email": plain(getattr(obj, "email", None)),
+            "organization": plain(getattr(obj, "organization", None))}
+
+
+def project_user(obj) -> dict:
+    return {"username": plain(getattr(obj, "username", None)),
+            "role": plain(getattr(obj, "role", None))}

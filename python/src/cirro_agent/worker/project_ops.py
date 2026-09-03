@@ -7,7 +7,8 @@ why the registration lives on this side.
 
 from .. import errors
 from . import mutations, reads, rows as R
-from .mutations import (Draft, Op, RISK_WRITE, RISK_DESTRUCTIVE, _inv, _need, _project)
+from .mutations import (Draft, Op, RISK_DESTRUCTIVE, RISK_WRITE, _inv, _need, _project,
+                        _tag_models)
 
 
 def plan_create_project(reader: reads.Reader, args: dict) -> Draft:
@@ -67,7 +68,7 @@ def plan_create_project(reader: reads.Reader, args: dict) -> Draft:
 
 
 def apply_create_project(reader: reads.Reader, args: dict) -> dict:
-    from cirro_api_client.v1.models import (ProjectInput, ProjectSettings, Contact, Tag)
+    from cirro_api_client.v1.models import ProjectInput, ProjectSettings, Contact
     request = ProjectInput(
         name=args["name"], description=args.get("description") or "",
         billing_account_id=args["billing_account_id"],
@@ -80,7 +81,7 @@ def apply_create_project(reader: reads.Reader, args: dict) -> dict:
     if args.get("classification_ids"):
         request.classification_ids = args["classification_ids"]
     if args.get("tags"):
-        request.tags = [Tag(value=t) for t in args["tags"]]
+        request.tags = _tag_models(args["tags"])
     response = reader.client.projects.create(request=request)
     return {"created_project_id": R.plain(getattr(response, "id", None))}
 
@@ -95,9 +96,8 @@ def plan_update_project_tags(reader: reads.Reader, args: dict) -> Draft:
 
 
 def apply_update_project_tags(reader: reads.Reader, args: dict) -> dict:
-    from cirro_api_client.v1.models import Tag
     reader.client.projects.update_tags(project_id=args["project_id"],
-                                       tags=[Tag(value=t) for t in args["tags"]])
+                                       tags=_tag_models(args["tags"]))
     return {"updated_tags_for": args["project_id"], "tags": args["tags"]}
 
 
@@ -145,11 +145,9 @@ def plan_set_user_role(reader: reads.Reader, args: dict) -> Draft:
             what="Use a valid role.", field="role", given=args["role"],
             retry_with=[{"op": "set_user_role", "args": {"role": r}} for r in valid],
         )
-    current = reader.client.projects.get_users(project_id=project["id"]) or []
-    reader.cost.call("projects.get_users")
-    existing = next((u for u in current
-                     if R.plain(getattr(u, "username", None)) == args["username"]), None)
-    was = R.plain(getattr(existing, "role", None)) if existing else "not a member"
+    current = reader.project_users(project["id"])
+    existing = next((u for u in current if u["username"] == args["username"]), None)
+    was = existing["role"] if existing else "not a member"
     lines = [
         f"Change project access for {args['username']} on {project['name']} "
         f"({project['id']}).",

@@ -1,4 +1,5 @@
 """The PreToolUse gate. Table-driven over a bypass corpus."""
+import ast
 import json
 import subprocess
 import sys
@@ -99,7 +100,6 @@ def test_prose_mentioning_cirro_is_allowed():
 
 @pytest.fixture
 def workdir(tmp_path, monkeypatch):
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     from cirro_agent import session as session_mod
     work = tmp_path / "proj"
     work.mkdir()
@@ -207,8 +207,6 @@ def test_the_gate_needs_no_virtualenv():
     legitimately quotes commands like `python -c 'import cirro'` in its patterns and
     comments, and a text search cannot tell those from a real import.
     """
-    import ast
-    import sys
     tree = ast.parse(GATE.read_text())
     imported = set()
     for node in ast.walk(tree):
@@ -227,7 +225,6 @@ def test_the_gate_needs_no_virtualenv():
 
 
 def test_the_gate_catches_a_plan_edited_on_disk(workdir):
-    import json
     plan = make_plan(workdir)
     path = workdir.path / "plans" / f"{plan.plan_id}.json"
     stored = json.loads(path.read_text())
@@ -253,17 +250,14 @@ def test_the_gate_uses_the_one_digest_implementation(workdir):
 def test_the_approval_text_shows_the_real_operation_and_arguments(workdir):
     """A forged plan cannot be hidden behind friendly prose: the prompt is rendered
     from op and args, so approving it means seeing what actually runs."""
-    import json as _json
-    import subprocess as _sp
-    import sys as _sys
     plan = make_plan(workdir, op="delete_dataset",
                      args={"project_id": "proj_a", "dataset_id": "D-VICTIM"},
                      summary="Routine tidy-up.")
-    done = _sp.run([_sys.executable, str(GATE)],
-                   input=_json.dumps(apply_event(workdir, plan_id=plan.plan_id,
-                                                 digest=plan.digest)),
-                   capture_output=True, text=True, timeout=30)
-    reason = _json.loads(done.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+    done = subprocess.run([sys.executable, str(GATE)],
+                          input=json.dumps(apply_event(workdir, plan_id=plan.plan_id,
+                                                       digest=plan.digest)),
+                          capture_output=True, text=True, timeout=30)
+    reason = json.loads(done.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
     assert "delete_dataset" in reason
     assert "D-VICTIM" in reason, "the real target must be visible, not just the prose"
 
@@ -271,8 +265,6 @@ def test_the_approval_text_shows_the_real_operation_and_arguments(workdir):
 def test_the_plans_module_the_gate_imports_is_stdlib_only():
     """Importing it under a system Python with no cirro installed must load nothing but
     the plugin's own pure modules -- that is what lets the gate run with no venv."""
-    import subprocess
-    import sys
     code = ("import sys; sys.path.insert(0, 'python/src'); import cirro_agent.plans; "
             "bad = [m for m in sys.modules if m.startswith('cirro') and "
             "not m.startswith('cirro_agent')]; assert not bad, bad; "

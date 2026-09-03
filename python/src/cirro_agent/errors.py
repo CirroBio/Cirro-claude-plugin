@@ -89,20 +89,17 @@ Forbidden = _err("FORBIDDEN", USER_ACTION)
 # Resolution. The agent can fix all of these from the payload we hand back.
 AmbiguousName = _err("AMBIGUOUS_NAME", AGENT_ACTION)
 NotFound = _err("NOT_FOUND", AGENT_ACTION)
-NotFoundMaybeStale = _err("NOT_FOUND_MAYBE_STALE", AGENT_ACTION)
 ScopeRequired = _err("SCOPE_REQUIRED", AGENT_ACTION)
 NameRequiredId = _err("NAME_REQUIRED_ID", AGENT_ACTION)
 InvalidQuery = _err("INVALID_QUERY", AGENT_ACTION)
 
 # Cost and completeness.
 CostGate = _err("COST_GATE", AGENT_ACTION)
-ScanTruncated = _err("SCAN_TRUNCATED", AGENT_ACTION)
 
 # Shape mismatches between what was asked and what this entity supports.
 WrongExecutor = _err("WRONG_EXECUTOR", AGENT_ACTION)
 WrongStatus = _err("WRONG_STATUS", AGENT_ACTION)
 NotSupported = _err("NOT_SUPPORTED", FATAL)
-MissingDependency = _err("MISSING_DEPENDENCY", USER_ACTION)
 
 # Plan/apply gate.
 PlanInvalid = _err("PLAN_INVALID", AGENT_ACTION)
@@ -112,5 +109,4 @@ PlanInvalid = _err("PLAN_INVALID", AGENT_ACTION)
 PlanStale = _err("PLAN_STALE", AGENT_ACTION)
 
 # Upstream.
-RateLimited = _err("RATE_LIMITED", RETRYABLE)
 UpstreamError = _err("UPSTREAM_ERROR", RETRYABLE)

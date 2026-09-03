@@ -21,9 +21,12 @@ import os
 import re
 import shlex
 import sys
+from typing import NoReturn
 import time
 from pathlib import Path
 
+# How much of one argument's value the approval prompt shows before eliding.
+ARG_PREVIEW_CHARS = 160
 MAX_PLAN_AGE_GRACE = 5  # seconds of clock slack when checking expiry
 
 # The digest contract is imported from the plugin's own plans module rather than
@@ -51,6 +54,10 @@ SHELLS = re.compile(r"^(?:sh|bash|zsh|dash|ksh|fish)$", re.I)
 # Wrappers that take their own argument before the real program. Skipping only the
 # wrapper name left `program` pointing at the argument, so `timeout 5 python ...`
 # resolved to "5" and matched nothing.
+# The value encodes what to skip after the wrapper before the real program name:
+# 0 = nothing, 1 = one option flag, 2 = one option flag and its value. The scan
+# runs once per wrapper, so `timeout -k 5 10 python` skips `-k 5` and `10` is
+# then read as the argument the wrapper always takes.
 WRAPPERS_WITH_ARG = {"timeout": 1, "nice": 2, "env": 0, "sudo": 0, "stdbuf": 1,
                      "ionice": 2, "setsid": 0, "nohup": 0, "time": 0}
 
@@ -78,7 +85,7 @@ SPLITTERS = re.compile(r"(?:\|\||&&|[;|&\n])")
 SUBSTITUTIONS = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 
 
-def respond(decision: str, reason: str, extra: dict | None = None) -> None:
+def respond(decision: str, reason: str, extra: dict | None = None) -> NoReturn:
     payload = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -96,13 +103,13 @@ def respond(decision: str, reason: str, extra: dict | None = None) -> None:
     sys.exit(0)
 
 
-def block(reason: str) -> None:
+def block(reason: str) -> NoReturn:
     """Exit 2: evaluated before permission rules and not overridable by an allow."""
     sys.stderr.write(reason)
     sys.exit(2)
 
 
-def passthrough() -> None:
+def passthrough() -> NoReturn:
     sys.exit(0)
 
 
@@ -297,8 +304,8 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
         for key in sorted(args):
             value = args[key]
             rendered = json.dumps(value, default=str)
-            if len(rendered) > 160:
-                rendered = rendered[:160] + f"... ({len(rendered)} chars)"
+            if len(rendered) > ARG_PREVIEW_CHARS:
+                rendered = rendered[:ARG_PREVIEW_CHARS] + f"... ({len(rendered)} chars)"
             lines.append(f"  {key} = {rendered}")
         lines.append("")
     summary = (plan.get("summary") or "").rstrip()

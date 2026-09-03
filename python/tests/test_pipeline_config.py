@@ -6,9 +6,12 @@ configuration looks like, not what seemed reasonable.
 """
 import json
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from cirro_agent import errors, formcheck, formgen
+from cirro_agent.worker import pipeline_ops
 
 SPEC = {
     "workflow": {"name": "epi2me-labs/wf-demo", "repository":
@@ -252,8 +255,6 @@ def _write_spec(tmp_path, spec=None):
 
 
 def test_with_process_requires_the_config_repo_to_be_the_code_repo(tmp_path):
-    from cirro_agent.worker import pipeline_ops
-    from unittest.mock import MagicMock
     reader = MagicMock()
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
@@ -267,8 +268,6 @@ def test_with_process_requires_the_config_repo_to_be_the_code_repo(tmp_path):
 
 
 def test_external_requires_a_config_repository(tmp_path):
-    from cirro_agent.worker import pipeline_ops
-    from unittest.mock import MagicMock
     reader = MagicMock()
     reader.processes.return_value = []
     with pytest.raises(errors.AgentError) as caught:
@@ -278,8 +277,6 @@ def test_external_requires_a_config_repository(tmp_path):
 
 
 def test_with_process_defaults_to_the_workflow_repo_and_dot_cirro(tmp_path):
-    from cirro_agent.worker import pipeline_ops
-    from unittest.mock import MagicMock
     reader = MagicMock()
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
@@ -292,8 +289,6 @@ def test_with_process_defaults_to_the_workflow_repo_and_dot_cirro(tmp_path):
 
 
 def test_an_unacceptable_process_name_is_refused(tmp_path):
-    from cirro_agent.worker import pipeline_ops
-    from unittest.mock import MagicMock
     reader = MagicMock()
     reader.processes.return_value = []
     with pytest.raises(errors.AgentError) as caught:
@@ -305,8 +300,6 @@ def test_an_unacceptable_process_name_is_refused(tmp_path):
 
 
 def test_registering_over_an_existing_id_is_refused(tmp_path):
-    from cirro_agent.worker import pipeline_ops
-    from unittest.mock import MagicMock
     reader = MagicMock()
     reader.processes.return_value = [{"id": "process-wf-demo-1", "owner": "someone"}]
     with pytest.raises(errors.AgentError) as caught:
@@ -316,7 +309,6 @@ def test_registering_over_an_existing_id_is_refused(tmp_path):
 
 
 def test_a_spec_without_frontmatter_is_refused(tmp_path):
-    from cirro_agent.worker import pipeline_ops
     path = tmp_path / "design-spec.md"
     path.write_text("# just prose\n")
     with pytest.raises(errors.AgentError) as caught:
@@ -325,13 +317,11 @@ def test_a_spec_without_frontmatter_is_refused(tmp_path):
 
 
 def test_python_named_groups_in_file_mapping_rules_are_refused(tmp_path):
-    from cirro_agent.worker import pipeline_ops
     spec = json.loads(json.dumps(SPEC))
     spec["cirro"]["file_mapping_rules"] = [{
         "description": "Reads",
         "file_name_patterns": [{"example_name": "r.fastq.gz", "description": "FASTQ",
                                 "sample_matching_pattern": r"(?P<sampleName>.*)\.fastq"}]}]
-    from unittest.mock import MagicMock
     reader = MagicMock()
     reader.processes.return_value = []
     with pytest.raises(errors.AgentError) as caught:
@@ -343,8 +333,6 @@ def test_python_named_groups_in_file_mapping_rules_are_refused(tmp_path):
 
 
 def test_a_process_owned_by_someone_else_is_refused():
-    from cirro_agent.worker import pipeline_ops
-    from unittest.mock import MagicMock
     reader = MagicMock()
     reader.username = "me@example.org"
     reader.processes.return_value = [{"id": "p1", "owner": "them@example.org",
@@ -356,8 +344,6 @@ def test_a_process_owned_by_someone_else_is_refused():
 
 
 def test_a_cirro_curated_process_is_refused():
-    from cirro_agent.worker import pipeline_ops
-    from unittest.mock import MagicMock
     reader = MagicMock()
     reader.username = "me@example.org"
     reader.processes.return_value = [{"id": "p1", "owner": None, "name": "Curated"}]
@@ -390,24 +376,20 @@ def test_any_op_module_can_be_imported_first(first):
 def test_commit_never_pushes():
     """The plugin writes and commits; putting it on a remote stays the user's to do."""
     import inspect
-    from cirro_agent.worker import pipeline_ops
     source = inspect.getsource(pipeline_ops.apply_commit_process_config)
     assert '"push"' not in source and "'push'" not in source
-    assert pipeline_ops.PIPELINE_OPS is not None
 
 
 # --- the user keeps a copy of what was uploaded ------------------------------
 
 def test_uploaded_configuration_is_staged_beside_the_design_spec(tmp_path):
     """Uploading into Cirro storage must still leave something to read locally."""
-    from cirro_agent.worker import pipeline_ops
     spec = _write_spec(tmp_path)
     assert pipeline_ops._staging_dir({"design_spec": spec}) == \
         tmp_path / pipeline_ops.STAGING_DIR
 
 
 def test_the_staging_folder_can_be_pointed_elsewhere(tmp_path):
-    from cirro_agent.worker import pipeline_ops
     elsewhere = tmp_path / "somewhere" / "else"
     assert pipeline_ops._staging_dir(
         {"design_spec": _write_spec(tmp_path), "stage_dir": str(elsewhere)}) == elsewhere
@@ -416,15 +398,12 @@ def test_the_staging_folder_can_be_pointed_elsewhere(tmp_path):
 def test_a_relative_stage_dir_lands_beside_the_spec_not_in_the_plugin(tmp_path):
     """The worker's cwd is the plugin installation, so a bare relative path would
     otherwise write the user's configuration inside the plugin."""
-    from cirro_agent.worker import pipeline_ops
     staged = pipeline_ops._staging_dir(
         {"design_spec": _write_spec(tmp_path), "stage_dir": "config"})
     assert staged == tmp_path / "config"
 
 
 def test_the_plan_says_where_the_copy_will_land(tmp_path, monkeypatch):
-    from cirro_agent.worker import pipeline_ops
-    from unittest.mock import MagicMock
     reader = MagicMock()
     reader.base_url = "app.cirro.test"
     reader.username = "me@example.org"
@@ -440,8 +419,6 @@ def test_the_plan_says_where_the_copy_will_land(tmp_path, monkeypatch):
 
 def test_the_copy_is_written_only_after_cirro_accepts_it(tmp_path, monkeypatch):
     """A staged copy is a record of what is live, not of what was attempted."""
-    from cirro_agent.worker import pipeline_ops
-    from unittest.mock import MagicMock
     stage = tmp_path / pipeline_ops.STAGING_DIR
     assets = {"process-form.json": '{"form": {}, "ui": {}}'}
 
@@ -477,8 +454,6 @@ def test_a_staging_failure_does_not_report_a_live_revision_as_failed(tmp_path,
     Raising here made dispatch mark the plan failed and consume it, so the agent's
     recovery was to re-plan and push a duplicate revision.
     """
-    from cirro_agent.worker import pipeline_ops
-    from unittest.mock import MagicMock
     blocked = tmp_path / "unwritable"
     blocked.write_text("this is a file, so mkdir underneath it cannot work")
 
@@ -504,16 +479,13 @@ def test_an_upload_that_also_writes_local_disk_says_so_in_the_approval():
     Presenting an operation that creates directories and overwrites files as a
     plain remote write understates what the user is agreeing to.
     """
-    from cirro_agent.worker import mutations, pipeline_ops
+    from cirro_agent.worker import mutations
     assert mutations.OPS["upload_process_config"].risk == mutations.RISK_WRITE_LOCAL
     assert mutations.OPS["update_process"].risk == mutations.RISK_WRITE
-    assert pipeline_ops.STAGING_DIR
 
 
 def test_the_plan_names_the_local_files_it_would_replace(tmp_path, monkeypatch):
     """write_process_config already holds this standard; both paths now match."""
-    from cirro_agent.worker import pipeline_ops
-    from unittest.mock import MagicMock
     spec = _write_spec(tmp_path)
     stale = tmp_path / pipeline_ops.STAGING_DIR
     stale.mkdir()

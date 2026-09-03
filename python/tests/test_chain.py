@@ -5,6 +5,8 @@ arguments a later step cannot know yet are references to an earlier step's recor
 output, never wildcards, and nothing the caller supplies at execution time reaches an
 approved argument.
 """
+from unittest.mock import MagicMock
+
 import pytest
 
 from cirro_agent import errors
@@ -75,7 +77,6 @@ def test_a_reference_must_name_a_field_the_earlier_step_produces():
 def test_every_declared_output_is_a_field_the_operation_really_returns():
     """A declaration nothing checks is a promise a chain would break at step 3."""
     from test_request_models import APPLY_CASES
-    from unittest.mock import MagicMock
     for name, op in sorted(mutations.OPS.items()):
         if not op.outputs or name not in APPLY_CASES:
             continue
@@ -224,7 +225,6 @@ def _labelled_steps():
 def _reader_for(session):
     """A stand-in Reader: the real one derives `session` from the request; a MagicMock
     would hand back another MagicMock, so it is set explicitly."""
-    from unittest.mock import MagicMock
     reader = MagicMock()
     reader.base_url = session.base_url
     reader.session_dir = str(session.path)

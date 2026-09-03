@@ -11,21 +11,9 @@ from .mutations import (Draft, Op, RISK_WRITE, RISK_DESTRUCTIVE, _inv, _need, _p
 
 
 def _share(reader: reads.Reader, project_id: str, share_id: str) -> dict:
-    found = reader.client.shares.list(project_id=project_id) or []
-    reader.cost.call("shares.list")
-    match = next((s for s in found if R.plain(getattr(s, "id", None)) == share_id), None)
-    if match is None:
-        raise errors.NotFound(
-            f"No share {share_id!r} in this project.",
-            what="Check the share ID.", field="share_id", given=share_id,
-            candidates=[{"id": R.plain(getattr(s, "id", None)),
-                         "name": R.plain(getattr(s, "name", None)),
-                         "share_type": R.plain(getattr(s, "share_type", None))}
-                        for s in found],
-            retry_with=[{"verb": "query", "entity": "share"}],
-        )
-    return {"id": R.plain(match.id), "name": R.plain(match.name),
-            "share_type": R.plain(getattr(match, "share_type", None))}
+    return reads.pick(reader.shares(project_id), share_id, kind="share", field="share_id",
+                      brief=lambda s: {"id": s["id"], "name": s["name"],
+                                       "share_type": s["share_type"]})
 
 
 def plan_create_share(reader: reads.Reader, args: dict) -> Draft:
@@ -128,21 +116,10 @@ def apply_share_subscription(reader: reads.Reader, args: dict) -> dict:
 
 
 def _workspace(reader: reads.Reader, project_id: str, workspace_id: str) -> dict:
-    found = reader.client.workspaces.list(project_id=project_id) or []
-    reader.cost.call("workspaces.list")
-    match = next((w for w in found
-                  if R.plain(getattr(w, "id", None)) == workspace_id), None)
-    if match is None:
-        raise errors.NotFound(
-            f"No workspace {workspace_id!r} in this project.",
-            what="Check the workspace ID.", field="workspace_id", given=workspace_id,
-            candidates=[{"id": R.plain(getattr(w, "id", None)),
-                         "name": R.plain(getattr(w, "name", None)),
-                         "status": R.plain(getattr(w, "status", None))} for w in found],
-            retry_with=[{"verb": "query", "entity": "workspace"}],
-        )
-    return {"id": R.plain(match.id), "name": R.plain(match.name),
-            "status": R.plain(getattr(match, "status", None))}
+    return reads.pick(reader.workspaces(project_id), workspace_id, kind="workspace",
+                      field="workspace_id",
+                      brief=lambda w: {"id": w["id"], "name": w["name"],
+                                       "status": w["status"]})
 
 
 def plan_create_workspace(reader: reads.Reader, args: dict) -> Draft:

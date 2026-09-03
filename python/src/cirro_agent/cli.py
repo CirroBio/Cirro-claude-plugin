@@ -272,10 +272,9 @@ def main(argv=None) -> int:
             request["raw"] = True
         return _run(request, args)
 
-    summaries = {"files": "files", "samples": "samples", "logs": "logs",
-                 "tasks": "tasks", "trace": "trace", "params": "params"}
+    summaries = ("files", "samples", "logs", "tasks", "trace", "params")
     if command in summaries:
-        request = {"verb": "summarize", "of": summaries[command], "scope": _scope(args)}
+        request = {"verb": "summarize", "of": command, "scope": _scope(args)}
         if getattr(args, "dataset_id", None):
             request["dataset_id"] = args.dataset_id
         for extra in ("glob", "file_limit", "raw"):

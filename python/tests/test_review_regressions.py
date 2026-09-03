@@ -147,7 +147,6 @@ def test_workspace_action_cannot_be_an_arbitrary_attribute():
 def test_a_session_folder_is_not_silently_rebound_to_another_tenant(tmp_path,
                                                                     monkeypatch):
     from cirro_agent import errors, session as session_mod
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     session_mod.init(tmp_path, "app.cirro.bio")
     with pytest.raises(errors.AgentError) as caught:
         session_mod.init(tmp_path, "evil.example.org")
@@ -158,7 +157,6 @@ def test_a_session_folder_is_not_silently_rebound_to_another_tenant(tmp_path,
 
 def test_private_session_files_are_never_world_readable(tmp_path, monkeypatch):
     from cirro_agent import plans, session as session_mod
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     sess = session_mod.init(tmp_path, "app.cirro.bio")
     plan = plans.create(sess, op="delete_dataset", args={"dataset_id": "d"},
                         summary="s", username="u")
@@ -239,7 +237,6 @@ def test_run_analysis_tags_reach_the_request():
 
 def test_a_truncated_plan_file_reports_a_plan_error(tmp_path, monkeypatch):
     from cirro_agent import errors, plans, session as session_mod
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     sess = session_mod.init(tmp_path, "app.cirro.bio")
     plan = plans.create(sess, op="delete_dataset", args={"dataset_id": "d"},
                         summary="s", username="u")
