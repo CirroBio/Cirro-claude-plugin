@@ -147,10 +147,10 @@ def test_the_gate_and_plans_agree_on_the_digest_contract():
 def test_workspace_action_cannot_be_an_arbitrary_attribute():
     from unittest.mock import MagicMock
     from cirro_agent import errors
-    from cirro_agent.worker import mutations
+    from cirro_agent.worker import share_ops
     reader = MagicMock()
     with pytest.raises(errors.AgentError) as caught:
-        mutations.apply_workspace_action(
+        share_ops.apply_workspace_action(
             reader, {"project_id": "p", "workspace_id": "w", "action": "archive"})
     assert caught.value.code == "PLAN_INVALID"
     reader.client.workspaces.archive.assert_not_called()
@@ -239,9 +239,9 @@ def test_every_sdk_enum_unwraps_not_just_whitelisted_ones():
 def test_run_analysis_tags_reach_the_request():
     """The planner recorded tags and the executor dropped them."""
     from unittest.mock import MagicMock
-    from cirro_agent.worker import mutations
     reader = MagicMock()
-    mutations.apply_run_analysis(reader, {
+    from cirro_agent.worker import analysis_ops
+    analysis_ops.apply_run_analysis(reader, {
         "project_id": "p", "process_id": "proc", "name": "n",
         "source_dataset_ids": ["ds"], "params": {}, "description": "",
         "notification_emails": [], "tags": ["keep-me"]})

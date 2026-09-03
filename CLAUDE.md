@@ -110,10 +110,15 @@ each a genuine defect. If a change to `formcheck.py` starts flagging production
 configuration, the validator is wrong, not the configuration. `folder` is documented by
 Cirro but used by none of the 213, so it warns rather than errors.
 
-**`pipeline_ops` registers itself into `mutations.OPS`.** The import sits at the bottom
-of `mutations.py` and the registration at the bottom of `pipeline_ops.py`, so the two
-import in either order; putting the registration on the `mutations` side reintroduces a
-circular-import failure for anyone importing `pipeline_ops` first.
+**Every op family registers itself into `mutations.OPS`.** `mutations.py` holds the
+shared core -- `Draft`, `Op`, the risk classes, the resolvers, `OPS` and `get_op` -- and
+nothing else. The operations live in `analysis_ops`, `dataset_ops`, `project_ops`,
+`share_ops`, `chain_ops` and `pipeline_ops`, each ending in `mutations.OPS.update(...)`.
+The imports sit at the bottom of `mutations.py`, after `OPS` and `get_op` are defined,
+and the registration sits on the module side, so any of them can be imported first.
+Putting the registration on the `mutations` side reintroduces a circular-import failure
+for whoever imports an op module before `mutations`. A new op goes in the family it
+belongs to, not in `mutations.py`.
 
 **Never call `DataPortal()` bare.** With no cached token it enters a device-code login
 and blocks until the code expires. Build auth explicitly via `worker/portal.py`.

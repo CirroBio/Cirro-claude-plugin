@@ -1,0 +1,552 @@
+"""Creating, editing, deleting and downloading datasets.
+
+Registers its operations into `mutations.OPS` on import; see mutations.py for
+why the registration lives on this side.
+"""
+
+import shutil
+from pathlib import Path
+from typing import Optional
+
+from .. import errors, summarize as S
+from . import mutations, reads, rows as R
+from .mutations import (Draft, Op, RISK_WRITE, RISK_DESTRUCTIVE, RISK_LOCAL, _inv, _need,
+                        _project, _dataset, _derived_from, _process, _target_folders,
+                        _wire_tags)
+
+
+def _dataset_edit(row: dict, args: dict) -> Optional[dict]:
+    """What one dataset's record should become, or None if nothing would change.
+
+    UpdateDatasetRequest requires name, description, process_id AND tags -- it is a
+    whole-record replacement. Omitting a field blanks it, so every one is resolved
+    here from the current record and only the requested changes are applied.
+    """
+    current_folders = list(row.get("folders") or [])
+    current_tags = list(row.get("tags") or [])
+    target_folders = _target_folders(args, current_folders)
+    target_tags = list(args["tags"]) if args.get("tags") is not None else current_tags
+
+    changes = {key: args[key] for key in ("name", "description")
+               if args.get(key) is not None and args[key] != row.get(key)}
+    if (not changes and target_folders == current_folders
+            and sorted(target_tags) == sorted(current_tags)):
+        return None
+    return {
+        "dataset_id": row["id"], "dataset_name": row.get("name"),
+        "name": changes.get("name", row.get("name")),
+        "description": changes.get("description", row.get("description") or ""),
+        "process_id": row.get("process_id"),
+        "folders": target_folders, "tags": target_tags,
+        "was": {"name": row.get("name"), "description": row.get("description"),
+                "folders": current_folders, "tags": current_tags},
+        "changed": sorted(changes),
+    }
+
+
+def plan_update_dataset(reader: reads.Reader, args: dict) -> Draft:
+    """Rename, re-describe, retag, or move one or more datasets between folders.
+
+    Folder membership and tags share one underlying list, and the API replaces that
+    list wholesale. Writing tags alone would therefore silently move a dataset out of
+    its folder, so the folder is always resolved explicitly here and carried through.
+
+    Several datasets can be edited under one approval. Each one's current record is
+    read separately, so "move these into QC" preserves each dataset's own tags rather
+    than flattening them to a shared list.
+    """
+    given = args.get("dataset_ids") or ([args["dataset_id"]]
+                                        if args.get("dataset_id") else [])
+    if not given:
+        raise errors.InvalidQuery(
+            "update_dataset needs dataset_id or dataset_ids.",
+            what="Name the dataset(s) to edit.", field="dataset_ids",
+            retry_with=[{"verb": "query", "entity": "dataset"}],
+        )
+    project = _project(reader, args)
+
+    if len(given) > 1 and (args.get("name") is not None
+                           or args.get("description") is not None):
+        raise errors.InvalidQuery(
+            f"name and description cannot be set on {len(given)} datasets at once.",
+            what="They would all end up with the same name.",
+            field="name" if args.get("name") is not None else "description",
+            retry_with=[{"op": "update_dataset",
+                         "args": {"dataset_ids": given, "folder": "Some Folder"}}],
+        )
+
+    rows = [_dataset(reader, project["id"], one) for one in given]
+    edits = [(row, _dataset_edit(row, args)) for row in rows]
+    actionable = [edit for _row, edit in edits if edit is not None]
+    unchanged = [row["name"] for row, edit in edits if edit is None]
+
+    if not actionable:
+        raise errors.InvalidQuery(
+            "Nothing would change.",
+            what="Supply a new name, description, folder, or tags.",
+            given=args,
+            retry_with=[
+                {"op": "update_dataset", "args": {"dataset_ids": given,
+                                                  "folder": "Some Folder"}},
+                {"op": "update_dataset", "args": {"dataset_ids": given,
+                                                  "tags": ["example"]}},
+            ],
+        )
+
+    if len(actionable) == 1:
+        edit = actionable[0]
+        lines = [f"Update dataset {edit['dataset_name']} ({edit['dataset_id']}) in "
+                 f"{project['name']}.", ""]
+        lines += _edit_lines(edit, indent="  ")
+    else:
+        lines = [f"Update {len(actionable)} datasets in {project['name']} "
+                 f"({project['id']}).", ""]
+        for edit in actionable:
+            lines.append(f"  {edit['dataset_name']} ({edit['dataset_id']})")
+            lines += _edit_lines(edit, indent="    ")
+            lines.append("")
+
+    warnings = []
+    if unchanged:
+        warnings.append(f"{len(unchanged)} of {len(given)} already match and will be "
+                        f"left alone: {', '.join(unchanged)}.")
+    preserved = sorted({f for edit in actionable
+                        if edit["folders"] == edit["was"]["folders"]
+                        for f in edit["was"]["folders"]})
+    if args.get("tags") is not None and preserved:
+        warnings.append(f"Folder membership ({', '.join(preserved)}) is preserved by "
+                        "this change.")
+    if args.get("remove_from_folder"):
+        emptied = sorted({f for edit in actionable for f in edit["was"]["folders"]})
+        if emptied:
+            warnings.append(f"This takes {len(actionable)} dataset(s) out of "
+                            f"{', '.join(emptied)}; they will no longer appear under "
+                            "any folder.")
+    if args.get("tags") is not None and len(actionable) > 1:
+        warnings.append(f"The tag list is replaced on all {len(actionable)} datasets, "
+                        "so any tags unique to one of them are dropped.")
+
+    return Draft(
+        args={"project_id": project["id"], "edits": actionable},
+        summary="\n".join(lines).rstrip(), warnings=warnings,
+        invalidates=[_inv("datasets", project["id"])],
+    )
+
+
+def _edit_lines(edit: dict, *, indent: str) -> list:
+    lines = []
+    for key in edit["changed"]:
+        lines += [f"{indent}{key}", f"{indent}  from  {edit['was'][key]!r}",
+                  f"{indent}  to    {edit[key]!r}"]
+    if edit["folders"] != edit["was"]["folders"]:
+        was = ", ".join(edit["was"]["folders"]) or "(not in a folder)"
+        now = ", ".join(edit["folders"]) or "(not in a folder)"
+        lines += [f"{indent}folder", f"{indent}  from  {was}", f"{indent}  to    {now}"]
+    if sorted(edit["tags"]) != sorted(edit["was"]["tags"]):
+        lines += [f"{indent}tags", f"{indent}  from  {edit['was']['tags']}",
+                  f"{indent}  to    {edit['tags']}"]
+    return lines
+
+
+def apply_update_dataset(reader: reads.Reader, args: dict) -> dict:
+    """Apply each dataset's resolved record, reporting per dataset.
+
+    One API call per dataset, so a batch can fail partway. Raising on the first
+    failure would report the whole operation as failed while some datasets had
+    already been changed, and the audit trail would say so -- so failures are
+    collected and every dataset's outcome is named.
+    """
+    from cirro_api_client.v1.models import UpdateDatasetRequest, Tag
+
+    updated, failed = [], []
+    for edit in args["edits"]:
+        # One list on the wire: folder membership plus plain tags. The planner already
+        # decided the full contents, so nothing is dropped here.
+        combined = _wire_tags(edit.get("folders"), edit.get("tags"))
+        request = UpdateDatasetRequest(
+            name=edit["name"],
+            description=edit.get("description") or "",
+            process_id=edit["process_id"],
+            tags=[Tag(value=value) for value in combined],
+        )
+        try:
+            detail = reader.client.datasets.update(
+                project_id=args["project_id"], dataset_id=edit["dataset_id"],
+                request=request)
+        except Exception as exc:
+            failed.append({"dataset_id": edit["dataset_id"],
+                           "name": edit["dataset_name"],
+                           "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        updated.append({"dataset_id": edit["dataset_id"],
+                        "name": R.plain(getattr(detail, "name", None)),
+                        "folders": edit.get("folders") or [],
+                        "tags": edit.get("tags") or []})
+
+    if failed and not updated:
+        raise errors.UpstreamError(
+            f"None of the {len(failed)} dataset(s) could be updated.",
+            what=failed[0]["error"],
+            retry_with=[{"op": "update_dataset", "note": "re-plan and try again"}],
+            user_action="Check the Cirro web UI for service status if this persists.",
+            failed=failed,
+        )
+    result = {"updated": updated, "n_updated": len(updated)}
+    if failed:
+        result["failed"] = failed
+        result["note"] = (f"{len(updated)} of {len(updated) + len(failed)} datasets "
+                          "were updated; the rest are unchanged and listed in `failed`.")
+    return result
+
+
+def plan_delete_dataset(reader: reads.Reader, args: dict) -> Draft:
+    _need(args, "delete_dataset", "dataset_id")
+    project = _project(reader, args)
+    row = _dataset(reader, project["id"], args["dataset_id"])
+    count = reads.file_count(reader, project["id"], row["id"])
+    detail = reads._detail(reader, project["id"], row["id"], row)
+    derived = _derived_from(reader, project["id"], row["id"])
+
+    warnings = []
+    if derived:
+        warnings.append(
+            f"{len(derived)} dataset(s) in this project list {row['id']} as a source: "
+            + ", ".join(f"{d['name']} ({d['id']})" for d in derived[:5])
+            + (" ..." if len(derived) > 5 else "")
+            + ". Their lineage will point at a dataset that no longer exists.")
+    if row.get("share"):
+        warnings.append("This dataset arrives through a subscribed share; it may not be "
+                        "yours to delete.")
+
+    lines = [
+        f"DELETE dataset {row['name']} ({row['id']}) from {project['name']} "
+        f"({project['id']}).",
+        "",
+        f"  Status       {row['status']}",
+        f"  Created      {row['created_at']} by {row['created_by']}",
+        f"  Contents     {count} files, {detail.get('total_size_human')}",
+        f"  Produced by  {(row.get('process') or {}).get('name')}",
+        "",
+        "This is not reversible from here.",
+    ]
+    return Draft(args={"project_id": project["id"], "dataset_id": row["id"],
+                       "dataset_name": row["name"]},
+                 summary="\n".join(lines), warnings=warnings,
+                 invalidates=[_inv("datasets", project["id"])])
+
+
+def apply_delete_dataset(reader: reads.Reader, args: dict) -> dict:
+    reader.client.datasets.delete(project_id=args["project_id"],
+                                  dataset_id=args["dataset_id"])
+    return {"deleted": args["dataset_id"], "name": args.get("dataset_name")}
+
+
+def plan_update_samplesheet(reader: reads.Reader, args: dict) -> Draft:
+    _need(args, "update_samplesheet", "dataset_id")
+    project = _project(reader, args)
+    row = _dataset(reader, project["id"], args["dataset_id"])
+    contents = args.get("contents")
+    if contents is None and args.get("file_path"):
+        contents = Path(args["file_path"]).read_text()
+    if contents is None:
+        raise errors.InvalidQuery(
+            "update_samplesheet needs contents or file_path.",
+            what="Provide the new samplesheet text.", field="contents",
+            retry_with=[{"op": "update_samplesheet",
+                         "args": {"dataset_id": row["id"], "contents": "sample,fastq_1\n"}}],
+        )
+
+    before = ""
+    try:
+        from cirro.sdk.dataset import DataPortalDataset
+        from cirro_api_client.v1.models import ArtifactType
+        detail = reader.client.datasets.get(project_id=project["id"], dataset_id=row["id"])
+        reader.cost.call("datasets.get", detail=True)
+        wrapped = DataPortalDataset(detail, reader.client)
+        before = wrapped.get_artifact(ArtifactType.SAMPLE_SHEET).read()
+        reader.cost.call("artifact.samplesheet")
+    except Exception:
+        before = ""
+
+    import difflib
+    diff = list(difflib.unified_diff(
+        before.splitlines(), contents.splitlines(),
+        fromfile="current samplesheet", tofile="proposed samplesheet", lineterm="", n=2))
+    shown = diff[:60]
+    if len(diff) > 60:
+        shown.append(f"... {len(diff) - 60} more diff lines")
+
+    lines = [f"Replace the samplesheet of {row['name']} ({row['id']}) in "
+             f"{project['name']}.", ""]
+    lines += ["  " + line for line in (shown or ["(no existing samplesheet to compare)"])]
+    warnings = []
+    if not before:
+        warnings.append("No current samplesheet could be read, so this diff is against "
+                        "an empty file.")
+    return Draft(args={"project_id": project["id"], "dataset_id": row["id"],
+                       "contents": contents},
+                 summary="\n".join(lines), warnings=warnings,
+                 invalidates=[_inv("datasets", project["id"])])
+
+
+def apply_update_samplesheet(reader: reads.Reader, args: dict) -> dict:
+    reader.client.datasets.update_samplesheet(project_id=args["project_id"],
+                                              dataset_id=args["dataset_id"],
+                                              samplesheet=args["contents"])
+    return {"updated_samplesheet_for": args["dataset_id"],
+            "bytes": len(args["contents"])}
+
+
+def _scan_folder(folder: Path, include_hidden: bool = False) -> tuple:
+    from cirro.file_utils import is_hidden_file
+    found, total = [], 0
+    for path in sorted(folder.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(folder).as_posix()
+        if not include_hidden and is_hidden_file(Path(relative)):
+            continue
+        found.append(relative)
+        total += path.stat().st_size
+    return found, total
+
+
+def plan_upload_dataset(reader: reads.Reader, args: dict) -> Draft:
+    # `source_dir` is the local directory; `folder` is the Cirro folder the dataset
+    # lands in. Both were once called `folder`, which made one of the two a footgun.
+    _need(args, "upload_dataset", "name", "process", "source_dir")
+    project = _project(reader, args)
+    process = _process(reader, args["process"], ingest=True)
+    source_dir = Path(args["source_dir"]).expanduser().resolve()
+    if not source_dir.is_dir():
+        raise errors.InvalidQuery(
+            f"{source_dir} is not a directory.",
+            what="Point source_dir at a local directory of files to upload.",
+            field="source_dir", given=str(source_dir),
+            retry_with=[{"op": "upload_dataset",
+                         "args": {"source_dir": str(Path.cwd())}}],
+        )
+    files, total_bytes = _scan_folder(source_dir, bool(args.get("include_hidden")))
+    if not files:
+        raise errors.InvalidQuery(
+            f"No files found under {source_dir}.",
+            what="Check the directory, or pass include_hidden.",
+            field="source_dir", given=str(source_dir),
+            retry_with=[{"op": "upload_dataset",
+                         "args": {"source_dir": str(source_dir),
+                                  "include_hidden": True}}],
+        )
+
+    warnings = []
+    try:
+        reader.client.processes.check_dataset_files(
+            files=files, process_id=process["id"], directory=str(source_dir))
+        reader.cost.call("processes.check_dataset_files")
+    except Exception as exc:
+        # The SDK runs this check before uploading anyway, so surfacing it now costs
+        # nothing and turns a failed upload into a pre-approval warning.
+        warnings.append(f"File-name validation for {process['name']!r} reports: {exc}")
+
+    folders = _target_folders(args, [])
+    patterns = S.name_patterns(files, limit=5)
+    lines = [
+        f"Upload {len(files)} files ({S.human_bytes(total_bytes)}) into "
+        f"{project['name']} ({project['id']}) as a new dataset.",
+        "",
+        f"  Dataset name  {args['name']}",
+        f"  Data type     {process['name']} ({process['id']})",
+        f"  From          {source_dir}",
+        f"  Into folder   {', '.join(folders) or '(none)'}",
+        "",
+        "  Files:",
+    ]
+    lines += [f"    {p['template']}  x{p['n']}" for p in patterns]
+    return Draft(
+        args={"project_id": project["id"], "process_id": process["id"],
+              "name": args["name"], "description": args.get("description", ""),
+              "source_dir": str(source_dir), "files": files,
+              "folders": folders, "tags": args.get("tags") or [],
+              "n_files": len(files), "total_bytes": total_bytes},
+        summary="\n".join(lines), warnings=warnings,
+        invalidates=[_inv("datasets", project["id"])],
+    )
+
+
+def apply_upload_dataset(reader: reads.Reader, args: dict) -> dict:
+    from cirro.sdk.project import DataPortalProject
+    detail = reader.client.projects.get(project_id=args["project_id"])
+    wrapped = DataPortalProject(detail, reader.client)
+    # Folder membership rides in the tag list, so the dataset is filed on creation
+    # rather than by a second gated operation afterwards.
+    combined = _wire_tags(args.get("folders"), args.get("tags"))
+    # The SDK returns the created dataset, after its own short retry for propagation.
+    # Capturing the id is what lets a later step reference this upload by value
+    # instead of looking it up again by name, which is racy when two uploads in a
+    # project share a name.
+    created = wrapped.upload_dataset(
+        name=args["name"], description=args.get("description") or "",
+        process=args["process_id"], upload_folder=args["source_dir"],
+        files=args.get("files") or None, tags=combined or None)
+    return {"uploaded_to_project": args["project_id"], "name": args["name"],
+            "dataset_id": R.plain(getattr(created, "id", None)),
+            "n_files": args.get("n_files"),
+            "bytes": args.get("total_bytes"),
+            "folders": args.get("folders") or [], "tags": args.get("tags") or [],
+            "follow_with": {"verb": "get", "entity": "dataset",
+                            "id": R.plain(getattr(created, "id", None)),
+                            "scope": {"project_ids": [args["project_id"]]},
+                            "freshness": "fresh"}}
+
+
+def plan_upload_reference(reader: reads.Reader, args: dict) -> Draft:
+    _need(args, "upload_reference", "name", "reference_type", "files")
+    project = _project(reader, args)
+    types = reader.client.references.get_types() or []
+    reader.cost.call("references.get_types")
+    wanted = args["reference_type"]
+    match = next((t for t in types if R.plain(getattr(t, "name", None)) == wanted), None)
+    if match is None:
+        raise errors.NotFound(
+            f"No reference type {wanted!r} in this deployment.",
+            what="Reference types are deployment-specific; pick one that exists.",
+            field="reference_type", given=wanted,
+            candidates=[{"name": R.plain(getattr(t, "name", None)),
+                         "description": R.plain(getattr(t, "description", None))}
+                        for t in types],
+            retry_with=[{"verb": "query", "entity": "reference"}],
+        )
+    paths = [Path(f).expanduser().resolve() for f in args["files"]]
+    missing = [str(p) for p in paths if not p.is_file()]
+    if missing:
+        raise errors.InvalidQuery(
+            f"Files not found: {missing}.",
+            what="Every reference file must exist locally.", field="files",
+            given=args["files"], retry_with=[{"op": "upload_reference"}],
+        )
+    total = sum(p.stat().st_size for p in paths)
+    lines = [
+        f"Upload a reference into {project['name']} ({project['id']}).",
+        "",
+        f"  Reference name  {args['name']}",
+        f"  Reference type  {wanted}",
+        f"  Files           {len(paths)}, {S.human_bytes(total)}",
+    ]
+    lines += [f"                    {p}" for p in paths]
+    return Draft(args={"project_id": project["id"], "name": args["name"],
+                       "reference_type": wanted, "files": [str(p) for p in paths]},
+                 summary="\n".join(lines),
+                 invalidates=[_inv("references", project["id"])])
+
+
+def apply_upload_reference(reader: reads.Reader, args: dict) -> dict:
+    ref_type = reader.client.references.get_type(
+        reference_type_name=args["reference_type"])
+    reader.client.references.upload_reference(
+        name=args["name"], reference_files=[Path(f) for f in args["files"]],
+        project_id=args["project_id"], ref_type=ref_type)
+    return {"uploaded_reference": args["name"], "project_id": args["project_id"]}
+
+
+def plan_import_public(reader: reads.Reader, args: dict) -> Draft:
+    _need(args, "import_public", "name", "public_ids")
+    project = _project(reader, args)
+    ids = args["public_ids"]
+    lines = [
+        f"Import public data into {project['name']} ({project['id']}).",
+        "",
+        f"  Dataset name  {args['name']}",
+        f"  Accessions    {len(ids)}: {', '.join(map(str, ids[:10]))}"
+        + (" ..." if len(ids) > 10 else ""),
+        "",
+        "Cirro will download these from the public repository. Volume is not known "
+        "until the transfer starts.",
+    ]
+    return Draft(args={"project_id": project["id"], "name": args["name"],
+                       "public_ids": ids, "description": args.get("description", ""),
+                       "download_method": args.get("download_method")},
+                 summary="\n".join(lines),
+                 invalidates=[_inv("datasets", project["id"])])
+
+
+def apply_import_public(reader: reads.Reader, args: dict) -> dict:
+    from cirro_api_client.v1.models import ImportDataRequest
+    request = ImportDataRequest(name=args["name"], public_ids=args["public_ids"],
+                                description=args.get("description") or "")
+    if args.get("download_method"):
+        request.download_method = args["download_method"]
+    response = reader.client.datasets.import_public(
+        project_id=args["project_id"], import_request=request)
+    return {"created_dataset_id": R.plain(getattr(response, "id", None))}
+
+
+def plan_download_files(reader: reads.Reader, args: dict) -> Draft:
+    _need(args, "download_files", "dataset_id", "destination")
+    project = _project(reader, args)
+    row = _dataset(reader, project["id"], args["dataset_id"])
+    entries, total, _artifacts = reads._manifest(
+        reader, project["id"], row["id"],
+        is_terminal=bool(row.get("is_terminal")))
+    capped = total is not None and len(entries) < total
+    glob = args.get("glob")
+    if glob:
+        import fnmatch
+        entries = [e for e in entries if fnmatch.fnmatch(e["path"].lower(), glob.lower())]
+    total_bytes = sum(e.get("size") or 0 for e in entries)
+
+    destination = Path(args["destination"]).expanduser().resolve()
+    free = shutil.disk_usage(destination if destination.exists()
+                             else destination.parent).free
+    warnings = []
+    if total_bytes > free * 0.9:
+        warnings.append(
+            f"This needs {S.human_bytes(total_bytes)} but only {S.human_bytes(free)} is "
+            "free at the destination.")
+    if capped and not glob:
+        # Without a glob apply downloads everything, so approving a capped figure would
+        # understate the transfer.
+        warnings.append(
+            f"This dataset has {total} files but the manifest was read only to "
+            f"{len(entries)}, so the counts above are a lower bound and the actual "
+            "download will be larger.")
+
+    patterns = S.name_patterns([e["path"] for e in entries], limit=5)
+    lines = [
+        f"Download {len(entries)} files ({S.human_bytes(total_bytes)}) from "
+        f"{row['name']} ({row['id']}) to local disk.",
+        "", f"  Destination  {destination}",
+        f"  Free space   {S.human_bytes(free)}",
+        f"  Filter       {glob or '(all files)'}",
+        "", "  Files:",
+    ]
+    lines += [f"    {p['template']}  x{p['n']}" for p in patterns]
+    lines += ["", "This writes to the local filesystem, not to Cirro."]
+    return Draft(args={"project_id": project["id"], "dataset_id": row["id"],
+                       "destination": str(destination),
+                       "files": [e["path"] for e in entries] if glob else None,
+                       "n_files": len(entries), "total_bytes": total_bytes},
+                 summary="\n".join(lines), warnings=warnings)
+
+
+def apply_download_files(reader: reads.Reader, args: dict) -> dict:
+    destination = Path(args["destination"])
+    destination.mkdir(parents=True, exist_ok=True)
+    reader.client.datasets.download_files(
+        project_id=args["project_id"], dataset_id=args["dataset_id"],
+        download_location=str(destination), files=args.get("files"))
+    return {"downloaded_to": str(destination), "n_files": args.get("n_files"),
+            "bytes": args.get("total_bytes")}
+
+
+DATASET_OPS = [
+    Op("update_dataset", RISK_WRITE, plan_update_dataset, apply_update_dataset),
+    Op("update_samplesheet", RISK_WRITE, plan_update_samplesheet, apply_update_samplesheet),
+    Op("delete_dataset", RISK_DESTRUCTIVE, plan_delete_dataset, apply_delete_dataset),
+    Op("upload_dataset", RISK_WRITE, plan_upload_dataset, apply_upload_dataset,
+       outputs=("dataset_id", "uploaded_to_project")),
+    Op("upload_reference", RISK_WRITE, plan_upload_reference, apply_upload_reference),
+    Op("import_public", RISK_WRITE, plan_import_public, apply_import_public,
+       outputs=("created_dataset_id",)),
+    Op("download_files", RISK_LOCAL, plan_download_files, apply_download_files),
+]
+
+mutations.OPS.update({op.name: op for op in DATASET_OPS})

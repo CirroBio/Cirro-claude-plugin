@@ -366,15 +366,25 @@ def test_a_cirro_curated_process_is_refused():
     assert caught.value.code == "FORBIDDEN"
 
 
-def test_the_two_worker_modules_import_in_either_order():
-    """pipeline_ops registers itself, so neither module has to be imported first."""
+OP_MODULES = ("analysis_ops", "chain_ops", "dataset_ops", "pipeline_ops",
+              "project_ops", "share_ops")
+
+
+@pytest.mark.parametrize("first", OP_MODULES + ("mutations",))
+def test_any_op_module_can_be_imported_first(first):
+    """Each family registers itself, so none of them has to be imported before another.
+
+    Run in a fresh interpreter, because the failure this guards -- a module reading
+    from a partially initialized mutations -- only shows on first import.
+    """
     import subprocess
     import sys
-    for first, second in (("pipeline_ops", "mutations"), ("mutations", "pipeline_ops")):
-        code = (f"from cirro_agent.worker import {first}, {second};"
-                "from cirro_agent.worker.mutations import OPS;"
-                "assert 'create_process' in OPS and 'run_analysis' in OPS")
-        assert subprocess.run([sys.executable, "-c", code]).returncode == 0, first
+    code = (f"from cirro_agent.worker import {first};"
+            "from cirro_agent.worker.mutations import OPS;"
+            "assert len(OPS) == 34, len(OPS);"
+            "assert 'create_process' in OPS and 'run_analysis' in OPS and 'chain' in OPS")
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr[-800:]
 
 
 def test_commit_never_pushes():

@@ -8,7 +8,7 @@ approved argument.
 import pytest
 
 from cirro_agent import errors
-from cirro_agent.worker import mutations
+from cirro_agent.worker import chain_ops, mutations
 
 
 def _steps(**overrides):
@@ -29,14 +29,14 @@ def _steps(**overrides):
 
 def _plan(**overrides):
     from unittest.mock import MagicMock
-    return mutations.plan_chain(MagicMock(), _steps(**overrides))
+    return chain_ops.plan_chain(MagicMock(), _steps(**overrides))
 
 
 # --- references are dataflow edges, not wildcards ----------------------------
 
 def test_a_reference_is_resolved_from_the_recorded_output_of_an_earlier_step():
     outputs = [{"created_process_id": "process-abc"}, {"dataset_id": "ds_new"}]
-    resolved = mutations._resolve_references(
+    resolved = chain_ops._resolve_references(
         {"process": {"from_step": 0, "field": "created_process_id"},
          "source_dataset_ids": [{"from_step": 1, "field": "dataset_id"}],
          "name": "Test run"}, outputs)
@@ -46,7 +46,7 @@ def test_a_reference_is_resolved_from_the_recorded_output_of_an_earlier_step():
 
 def test_a_reference_may_only_read_an_earlier_step():
     with pytest.raises(errors.AgentError) as caught:
-        mutations._chain_steps({"steps": [
+        chain_ops._chain_steps({"steps": [
             {"op": "run_analysis", "args": {
                 "source_dataset_ids": [{"from_step": 1, "field": "dataset_id"}]}},
             {"op": "upload_dataset", "args": {}},
@@ -57,7 +57,7 @@ def test_a_reference_may_only_read_an_earlier_step():
 def test_a_reference_must_name_a_field_the_earlier_step_produces():
     """Refused at plan time, rather than failing halfway through an approved chain."""
     with pytest.raises(errors.AgentError) as caught:
-        mutations._chain_steps({"steps": [
+        chain_ops._chain_steps({"steps": [
             {"op": "upload_dataset", "args": {}},
             {"op": "run_analysis", "args": {
                 "source_dataset_ids": [{"from_step": 0, "field": "nonesuch"}]}},
@@ -95,7 +95,7 @@ def test_steps_with_deferred_figures_are_called_out():
 def test_the_chain_risk_widens_when_a_step_writes_local_disk():
     plain = _plan()
     assert plain.risk == mutations.RISK_WRITE
-    with_local = mutations.plan_chain(None, {"steps": [
+    with_local = chain_ops.plan_chain(None, {"steps": [
         {"op": "upload_dataset", "args": {"source_dir": "/tmp/d"}},
         {"op": "download_files", "args": {"dataset_id": "ds_1"}},
     ]})
@@ -107,7 +107,7 @@ def test_the_chain_risk_widens_when_a_step_writes_local_disk():
 def test_a_destructive_step_cannot_hide_inside_a_chain():
     """One "yes" must never authorize a deletion the person was not looking at."""
     with pytest.raises(errors.AgentError) as caught:
-        mutations._chain_steps({"steps": [
+        chain_ops._chain_steps({"steps": [
             {"op": "upload_dataset", "args": {}},
             {"op": "delete_dataset", "args": {"dataset_id": "ds_1"}},
         ]})
@@ -117,25 +117,25 @@ def test_a_destructive_step_cannot_hide_inside_a_chain():
 
 def test_a_chain_cannot_contain_a_chain():
     with pytest.raises(errors.AgentError):
-        mutations._chain_steps({"steps": [{"op": "chain", "args": {}}]})
+        chain_ops._chain_steps({"steps": [{"op": "chain", "args": {}}]})
 
 
 def test_an_empty_chain_is_refused():
     with pytest.raises(errors.AgentError) as caught:
-        mutations._chain_steps({"steps": []})
+        chain_ops._chain_steps({"steps": []})
     assert "at least one step" in caught.value.message
 
 
 def test_a_chain_has_a_step_ceiling():
-    many = [{"op": "upload_dataset", "args": {}}] * (mutations.CHAIN_MAX_STEPS + 1)
+    many = [{"op": "upload_dataset", "args": {}}] * (chain_ops.CHAIN_MAX_STEPS + 1)
     with pytest.raises(errors.AgentError) as caught:
-        mutations._chain_steps({"steps": many})
+        chain_ops._chain_steps({"steps": many})
     assert "at most" in caught.value.message
 
 
 def test_duplicate_labels_are_refused():
     with pytest.raises(errors.AgentError) as caught:
-        mutations._chain_steps({"steps": [
+        chain_ops._chain_steps({"steps": [
             {"label": "same", "op": "upload_dataset", "args": {}},
             {"label": "same", "op": "run_analysis", "args": {}},
         ]})
@@ -230,7 +230,7 @@ def test_a_resumed_chain_reuses_what_earlier_steps_produced(tmp_path):
                     "result": {"dataset_id": "ds_uploaded"}},
                    {"step": 2, "label": "configure", "result": {}},
                    {"step": 3, "label": "run", "result": {}}])
-    draft = mutations.plan_chain(_reader_for(session), {
+    draft = chain_ops.plan_chain(_reader_for(session), {
         "restart_from": {"plan_id": plan.plan_id, "label": "configure", "attempt": 2}})
     assert [s["label"] for s in draft.args["steps"]] == ["configure", "run"]
     assert draft.args["carried"] == [{"dataset_id": "ds_uploaded"}]
@@ -240,7 +240,7 @@ def test_a_resumed_chain_reuses_what_earlier_steps_produced(tmp_path):
 
 def test_a_resumed_chain_still_resolves_references_into_carried_outputs(tmp_path):
     """Step 3 references step 1, which is not being re-run."""
-    resolved = mutations._resolve_references(
+    resolved = chain_ops._resolve_references(
         {"source_dataset_ids": [{"from_step": 0, "field": "dataset_id"}]},
         [{"dataset_id": "ds_uploaded"}])
     assert resolved == {"source_dataset_ids": ["ds_uploaded"]}
@@ -253,7 +253,7 @@ def test_the_retry_shows_only_what_changed(tmp_path):
                     "result": {"dataset_id": "ds_uploaded"}}])
     changed = [dict(step) for step in _labelled_steps()]
     changed[1]["args"] = {**changed[1]["args"], "design_spec": "/work/spec-v2.md"}
-    draft = mutations.plan_chain(_reader_for(session), {
+    draft = chain_ops.plan_chain(_reader_for(session), {
         "restart_from": {"plan_id": plan.plan_id, "label": "configure", "attempt": 2},
         "steps": changed})
     assert "Changed since the last attempt:" in draft.summary
@@ -271,7 +271,7 @@ def test_a_retry_cannot_change_a_field_the_policy_pinned(tmp_path):
     changed = [dict(step) for step in _labelled_steps()]
     changed[2]["args"] = {**changed[2]["args"], "project_id": "proj_somewhere_else"}
     with pytest.raises(errors.AgentError) as caught:
-        mutations.plan_chain(_reader_for(session), {
+        chain_ops.plan_chain(_reader_for(session), {
             "restart_from": {"plan_id": plan.plan_id, "label": "configure",
                              "attempt": 2},
             "steps": changed})
@@ -282,7 +282,7 @@ def test_a_retry_cannot_change_a_field_the_policy_pinned(tmp_path):
 def test_the_attempt_ceiling_is_enforced_on_resume(tmp_path):
     session, plan = _prior(tmp_path, steps=_labelled_steps())
     with pytest.raises(errors.AgentError) as caught:
-        mutations.plan_chain(_reader_for(session), {
+        chain_ops.plan_chain(_reader_for(session), {
             "restart_from": {"plan_id": plan.plan_id, "label": "configure",
                              "attempt": 4}})
     assert "allows 3" in caught.value.message
@@ -291,7 +291,7 @@ def test_the_attempt_ceiling_is_enforced_on_resume(tmp_path):
 def test_resuming_at_a_step_the_policy_does_not_cover_is_refused(tmp_path):
     session, plan = _prior(tmp_path, steps=_labelled_steps())
     with pytest.raises(errors.AgentError) as caught:
-        mutations.plan_chain(_reader_for(session), {
+        chain_ops.plan_chain(_reader_for(session), {
             "restart_from": {"plan_id": plan.plan_id, "label": "upload", "attempt": 2}})
     assert "re-runs configure, run" in caught.value.message
 
@@ -300,7 +300,7 @@ def test_a_chain_approved_without_a_retry_policy_cannot_be_resumed(tmp_path):
     # `{}` rather than None: the helper reads None as "use the usual policy".
     session, plan = _prior(tmp_path, steps=_labelled_steps(), retry={})
     with pytest.raises(errors.AgentError) as caught:
-        mutations.plan_chain(_reader_for(session), {
+        chain_ops.plan_chain(_reader_for(session), {
             "restart_from": {"plan_id": plan.plan_id, "label": "configure"}})
     assert "without a retry policy" in caught.value.message
 
@@ -310,7 +310,7 @@ def test_an_identical_retry_is_flagged_as_pointless(tmp_path):
         tmp_path, steps=_labelled_steps(),
         completed=[{"step": 1, "label": "upload",
                     "result": {"dataset_id": "ds_uploaded"}}])
-    draft = mutations.plan_chain(_reader_for(session), {
+    draft = chain_ops.plan_chain(_reader_for(session), {
         "restart_from": {"plan_id": plan.plan_id, "label": "configure", "attempt": 2}})
     assert any("will fail the same way" in w for w in draft.warnings)
 
@@ -318,7 +318,7 @@ def test_an_identical_retry_is_flagged_as_pointless(tmp_path):
 def test_resuming_a_step_whose_predecessors_never_ran_is_refused(tmp_path):
     session, plan = _prior(tmp_path, steps=_labelled_steps(), completed=[])
     with pytest.raises(errors.AgentError) as caught:
-        mutations.plan_chain(_reader_for(session), {
+        chain_ops.plan_chain(_reader_for(session), {
             "restart_from": {"plan_id": plan.plan_id, "label": "run", "attempt": 2}})
     assert "never completed" in caught.value.message
 
@@ -361,7 +361,7 @@ def _fake_ops(monkeypatch, log, *, fail_at=None, fail_with=None):
 def test_the_executor_feeds_each_step_what_the_one_before_it_produced(monkeypatch):
     log = []
     _fake_ops(monkeypatch, log)
-    result = mutations.apply_chain(None, {"steps": [
+    result = chain_ops.apply_chain(None, {"steps": [
         {"label": "make", "op": "producer", "args": {"tag": "alpha"}},
         {"label": "use", "op": "consumer",
          "args": {"uses": {"from_step": 0, "field": "made_id"}}},
@@ -377,7 +377,7 @@ def test_a_chain_that_fails_partway_reports_both_halves(monkeypatch):
     """Raising would report the whole chain as failed while step 1 had already run."""
     log = []
     _fake_ops(monkeypatch, log, fail_at="consumer")
-    result = mutations.apply_chain(None, {"steps": [
+    result = chain_ops.apply_chain(None, {"steps": [
         {"label": "make", "op": "producer", "args": {"tag": "beta"}},
         {"label": "use", "op": "consumer",
          "args": {"uses": {"from_step": 0, "field": "made_id"}}},
@@ -396,7 +396,7 @@ def test_a_chain_that_fails_at_its_first_step_is_an_error_because_nothing_change
     log = []
     _fake_ops(monkeypatch, log)
     with pytest.raises(errors.AgentError) as caught:
-        mutations.apply_chain(None, {"steps": [
+        chain_ops.apply_chain(None, {"steps": [
             {"label": "use", "op": "consumer", "args": {"uses": "not-a-produced-id"}},
         ]})
     assert caught.value.code == "UPSTREAM_ERROR"
@@ -409,7 +409,7 @@ def test_a_typed_refusal_mid_chain_keeps_its_code(monkeypatch):
     _fake_ops(monkeypatch, log,
               fail_at="consumer",
               fail_with=errors.Forbidden("not yours", what="w", user_action="ask"))
-    result = mutations.apply_chain(None, {"steps": [
+    result = chain_ops.apply_chain(None, {"steps": [
         {"op": "producer", "args": {"tag": "d"}},
         {"op": "consumer", "args": {"uses": {"from_step": 0, "field": "made_id"}}},
     ]})
@@ -420,7 +420,7 @@ def test_a_resumed_chain_starts_from_the_carried_outputs(monkeypatch):
     """Step numbering and references both continue from where the earlier run stopped."""
     log = []
     _fake_ops(monkeypatch, log)
-    result = mutations.apply_chain(None, {
+    result = chain_ops.apply_chain(None, {
         "carried": [{"made_id": "made-from-before"}],
         "steps": [
             {"label": "use", "op": "consumer",
@@ -434,7 +434,7 @@ def test_the_executor_never_takes_a_value_from_the_caller_for_a_reference(monkey
     """The substitution source is the recorded output list and nothing else."""
     log = []
     _fake_ops(monkeypatch, log)
-    result = mutations.apply_chain(None, {"steps": [
+    result = chain_ops.apply_chain(None, {"steps": [
         {"op": "producer", "args": {"tag": "real"}},
         {"op": "consumer", "args": {"uses": {"from_step": 0, "field": "made_id",
                                              "value": "made-injected"}}},

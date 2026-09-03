@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from cirro_agent.worker import mutations
+from cirro_agent.worker import dataset_ops, mutations, project_ops, share_ops
 
 # op -> args a planner would realistically produce (resolved, IDs only).
 APPLY_CASES = {
@@ -130,7 +130,7 @@ def test_every_registered_op_is_covered_here():
 def test_update_dataset_sends_every_required_field():
     """The specific trap: the request replaces the record, so a missing field blanks it."""
     reader = _reader()
-    mutations.apply_update_dataset(reader, dict(APPLY_CASES["update_dataset"]))
+    dataset_ops.apply_update_dataset(reader, dict(APPLY_CASES["update_dataset"]))
     request = reader.client.datasets.update.call_args.kwargs["request"]
     assert reader.client.datasets.update.call_count == 1
     assert request.name == "n"
@@ -144,7 +144,7 @@ def test_update_dataset_sends_every_required_field():
 
 def test_create_project_sends_the_budget():
     reader = _reader()
-    mutations.apply_create_project(reader, dict(APPLY_CASES["create_project"]))
+    project_ops.apply_create_project(reader, dict(APPLY_CASES["create_project"]))
     request = reader.client.projects.create.call_args.kwargs["request"]
     assert request.settings.budget_amount == 1000
     assert request.settings.budget_period == "MONTHLY"
@@ -153,7 +153,7 @@ def test_create_project_sends_the_budget():
 
 def test_create_share_sends_conditions():
     reader = _reader()
-    mutations.apply_create_share(reader, dict(APPLY_CASES["create_share"]))
+    share_ops.apply_create_share(reader, dict(APPLY_CASES["create_share"]))
     request = reader.client.shares.create.call_args.kwargs["share"]
     assert request.conditions[0].field == "process_id"
     assert request.classification_ids == []
@@ -161,7 +161,7 @@ def test_create_share_sends_conditions():
 
 def test_create_workspace_sends_the_container_image():
     reader = _reader()
-    mutations.apply_create_workspace(reader, dict(APPLY_CASES["create_workspace"]))
+    share_ops.apply_create_workspace(reader, dict(APPLY_CASES["create_workspace"]))
     request = reader.client.workspaces.create.call_args.kwargs["workspace"]
     assert request.compute_config.container_image_uri == "ghcr.io/org/image:1.0"
     assert request.compute_config.cpu == 4

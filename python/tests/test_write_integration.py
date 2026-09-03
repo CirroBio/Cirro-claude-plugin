@@ -265,14 +265,14 @@ def test_apply_refuses_when_the_facts_changed_after_approval(writable_tenant,
 
     # The dataset picks up a tag from elsewhere between approval and execution, so the
     # tag list the person approved replacing is no longer the list that exists.
-    from cirro_agent.worker import mutations
-    original = mutations._dataset
+    from cirro_agent.worker import dataset_ops
+    original = dataset_ops._dataset
 
     def drifted(reader, project_id, given):
         row = dict(original(reader, project_id, given))
         row["tags"] = row["tags"] + ["added-by-someone-else"]
         return row
-    monkeypatch.setattr(mutations, "_dataset", drifted)
+    monkeypatch.setattr(dataset_ops, "_dataset", drifted)
 
     applied = apply_from(writable_tenant, session_dir, planned)
 
@@ -299,12 +299,12 @@ def test_a_plan_whose_target_disappeared_is_stale_not_a_crash(writable_tenant,
                          "tags": ["new-tag"]})
 
     from cirro_agent import errors
-    from cirro_agent.worker import mutations
+    from cirro_agent.worker import dataset_ops
 
     def gone(*_args, **_kwargs):
         raise errors.NotFound("no such dataset", what="w",
                               retry_with=[{"verb": "query"}])
-    monkeypatch.setattr(mutations, "_dataset", gone)
+    monkeypatch.setattr(dataset_ops, "_dataset", gone)
 
     applied = apply_from(writable_tenant, session_dir, planned)
     assert applied["error"]["code"] == "PLAN_STALE"
