@@ -68,8 +68,8 @@ def test_datasets_facets_account_for_every_match(project):
         other = (facet.get("other") or {}).get("n", 0)
         assert shown + other == matched or facet.get("multi_valued"), \
             f"facet {name}: {shown}+{other} != {matched}"
-    assert result["rows_are"] in ("page", "preview_not_page", "sample",
-                                  "absent_aggregation_only")
+    assert result["counts"]["rows_are"] in ("page", "preview_not_page", "sample",
+                                            "absent_aggregation_only")
 
 
 def test_a_second_read_is_served_from_the_snapshot(project):
@@ -90,10 +90,18 @@ def test_next_calls_predict_counts_that_hold(project):
         assert again["result"]["counts"]["matched"] == predicted, suggestion
 
 
-@pytest.mark.parametrize("listing", ["folders", "reference-types", "compute-envs",
-                                     "shares", "workspaces", "project-users"])
-def test_every_listing_returns(project, listing):
+@pytest.mark.parametrize("listing", ["folders", "compute-envs", "shares", "workspaces",
+                                     "project-users"])
+def test_every_project_listing_returns(project, listing):
     out = read(listing, "-p", project, max_tokens=3000)
+    _invariants(out, 3000)
+    assert "items" in out["result"]
+
+
+@pytest.mark.parametrize("listing", ["reference-types", "users"])
+def test_every_tenant_listing_returns(listing):
+    """These are tenant-wide; the CLI refuses a project for them."""
+    out = read(listing, max_tokens=3000)
     _invariants(out, 3000)
     assert "items" in out["result"]
 

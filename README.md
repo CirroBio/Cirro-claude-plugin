@@ -301,6 +301,10 @@ claude --plugin-dir ./
 `python/tests/test_readme_current.py` fails when this file falls out of step with the
 code, so drift breaks the build rather than accumulating.
 
+`python/tests/test_live_reads.py` runs every read against a real tenant, using the
+session folder of the directory you run it from. It is skipped unless you set
+`CIRRO_AGENT_E2E=1`, and it changes nothing.
+
 CI (`.github/workflows/ci.yml`) runs the tests, the lint, and `claude plugin validate`
 on every push, and again weekly so a new `cirro` release that breaks the pinned client
 is caught by `test_runtime_contract.py` rather than by a user. Coverage has a floor

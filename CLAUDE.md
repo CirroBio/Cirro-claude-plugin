@@ -76,9 +76,10 @@ configuration is impossible without them. `test_runtime_contract.py` fails if a 
 `Reader` -- the client, cache, cost accounting and name resolution -- plus the single
 implementation of each expensive fetch (`dataset_detail`, `dataset_manifest`,
 `dataset_tasks`, `process_detail`, `spec_shape`, `file_count`). The verbs live in `read_query` (query, get),
-`read_summaries` (summarize, task_logs), `read_listings` (list) and `read_process`
-(process_params, process_config); each imports from `reads` and nothing imports them
-but `dispatch`. The three reads that need no session, credential or network --
+`read_summaries` (summarize, task_logs), `read_listings` (list), `read_process`
+(process_params, process_config) and `read_chains` (chain_status, which reads plan
+records and the audit and touches no API); each imports from `reads` and nothing
+imports them but `dispatch`. The three reads that need no session, credential or network --
 describe, workflow_spec, check_config -- live in `cirro_agent/local_reads.py`, outside
 `worker/`, and the CLI runs them in the parent process; that is the only read path that
 does not go through the subprocess, and it must stay cirro-free. The gated write path
