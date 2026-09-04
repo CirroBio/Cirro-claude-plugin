@@ -188,7 +188,10 @@ what is referenceable and a test asserts each declaration is really returned.
 Destructive ops are refused inside a chain, so one "yes" can never authorize a
 deletion nobody was looking at. Retries are a policy the person approves once:
 bounded attempts, and a `may_change` allowlist that is enforced by refusing a diff
-outside it rather than by rendering it and hoping. A chain drops each step's declared
+outside it rather than by rendering it and hoping. A step being re-run sheds the
+`resolved_args` the first attempt recorded and is planned again when it runs: apply
+prefers `resolved_args` over `args`, so carrying them forward rendered a changed field
+in the retry's diff and then executed the old value. A chain drops each step's declared
 cache scopes as that step finishes rather than when the chain ends, because a later
 step plans against listings an earlier one has already changed -- deferring it is why
 `create_process` -> `upload_process_config` refused `NOT_FOUND` on the process the step

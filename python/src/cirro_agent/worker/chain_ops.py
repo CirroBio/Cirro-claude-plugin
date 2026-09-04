@@ -396,7 +396,16 @@ def _restart_steps(root, outcomes: dict, label: str) -> tuple:
             field="restart_from", given=label,
             retry_with=[{"op": "chain", "note": "plan a fresh chain from the start"}],
         )
-    tail = [dict(step) for step in steps[offset:]]
+    # A step being re-run is planned again when it runs, so it sheds what the first
+    # attempt resolved. apply prefers `resolved_args` over `args`, so carrying them
+    # forward meant a retry that changed a field the policy allows rendered the change
+    # in its diff and then executed the old value. The restart approval shows no
+    # figures for the tail anyway -- only the ops, the carried outputs and the diff --
+    # so re-planning costs no disclosure, and lets each planner refuse if what it
+    # depended on has moved since the attempt that failed.
+    tail = [{k: v for k, v in step.items()
+             if k not in ("resolved_args", "invalidates")}
+            for step in steps[offset:]]
     return tail, [outcomes[i] for i in range(offset)], offset
 
 

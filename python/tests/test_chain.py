@@ -519,6 +519,38 @@ def _finished_two_step(tmp_path, first_op="upload_dataset", second_op="update_da
     return session, plan, steps
 
 
+def test_a_retry_executes_the_value_its_own_diff_promised(tmp_path, fake_ops):
+    """A tail step carried the figures the first attempt resolved, and apply prefers
+    those over `args` -- so a retry rendered "from 'OLD' to 'NEW'" in the text the
+    person approved and then ran 'OLD'."""
+    from cirro_agent import plans
+    from cirro_agent.session import Session
+    log = fake_ops
+    session = Session(base_url="app.cirro.test", dir=str(tmp_path))
+    (tmp_path / "plans").mkdir(parents=True, exist_ok=True)
+    reader = _reader_for(session)
+
+    first = chain_ops.plan_chain(reader, {
+        "retry": {"redo": ["tune"], "max_attempts": 3, "may_change": ["tag"]},
+        "steps": [{"label": "make", "op": "producer", "args": {"tag": "a"}},
+                  {"label": "tune", "op": "producer", "args": {"tag": "OLD"}}]})
+    assert first.args["steps"][1]["resolved_args"] == {"tag": "OLD"}, \
+        "the step must be one the approval pre-planned, or there is nothing to shed"
+    root = plans.create(session, op="chain", args=first.args, summary=first.summary,
+                        username="sminot", risk="cirro_write")
+    plans.claim(session, root.plan_id, digest=root.digest,
+                approved_summary=root.summary, username="sminot")
+    plans.finish(session, root, result={"completed": [
+        {"step": 1, "label": "make", "result": {"made_id": "made-a"}}]})
+
+    again = chain_ops.plan_chain(reader, {
+        "restart_from": {"plan_id": root.plan_id, "label": "tune"},
+        "steps": [{"label": "tune", "op": "producer", "args": {"tag": "NEW"}}]})
+    assert "to    'NEW'" in again.summary
+    chain_ops.apply_chain(reader, again.args)
+    assert log == [("producer", {"tag": "NEW"})]
+
+
 def test_a_restart_cannot_swap_the_operation_behind_a_label(tmp_path):
     """The diff compared args only, so update_dataset could become delete_dataset
     under a "retry" approval whose text never named the new op."""
