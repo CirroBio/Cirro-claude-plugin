@@ -374,7 +374,7 @@ def _fake_ops(monkeypatch, log, *, fail_at=None, fail_with=None):
 
 def test_the_executor_feeds_each_step_what_the_one_before_it_produced(fake_ops):
     log = fake_ops
-    result = chain_ops.apply_chain(None, {"steps": [
+    result = chain_ops.apply_chain(MagicMock(), {"steps": [
         {"label": "make", "op": "producer", "args": {"tag": "alpha"}},
         {"label": "use", "op": "consumer",
          "args": {"uses": {"from_step": 0, "field": "made_id"}}},
@@ -390,7 +390,7 @@ def test_a_chain_that_fails_partway_reports_both_halves(monkeypatch):
     """Raising would report the whole chain as failed while step 1 had already run."""
     log = []
     _fake_ops(monkeypatch, log, fail_at="consumer")
-    result = chain_ops.apply_chain(None, {"steps": [
+    result = chain_ops.apply_chain(MagicMock(), {"steps": [
         {"label": "make", "op": "producer", "args": {"tag": "beta"}},
         {"label": "use", "op": "consumer",
          "args": {"uses": {"from_step": 0, "field": "made_id"}}},
@@ -408,7 +408,7 @@ def test_a_chain_that_fails_at_its_first_step_is_an_error_because_nothing_change
         fake_ops):
     log = fake_ops
     with pytest.raises(errors.AgentError) as caught:
-        chain_ops.apply_chain(None, {"steps": [
+        chain_ops.apply_chain(MagicMock(), {"steps": [
             {"label": "use", "op": "consumer", "args": {"uses": "not-a-produced-id"}},
         ]})
     assert caught.value.code == "INVALID_QUERY", "the planner's refusal, not RETRYABLE"
@@ -421,7 +421,7 @@ def test_a_typed_refusal_mid_chain_keeps_its_code(monkeypatch):
     _fake_ops(monkeypatch, log,
               fail_at="consumer",
               fail_with=errors.Forbidden("not yours", what="w", user_action="ask"))
-    result = chain_ops.apply_chain(None, {"steps": [
+    result = chain_ops.apply_chain(MagicMock(), {"steps": [
         {"op": "producer", "args": {"tag": "d"}},
         {"op": "consumer", "args": {"uses": {"from_step": 0, "field": "made_id"}}},
     ]})
@@ -431,7 +431,7 @@ def test_a_typed_refusal_mid_chain_keeps_its_code(monkeypatch):
 def test_a_resumed_chain_starts_from_the_carried_outputs(fake_ops):
     """Step numbering and references both continue from where the earlier run stopped."""
     log = fake_ops
-    result = chain_ops.apply_chain(None, {
+    result = chain_ops.apply_chain(MagicMock(), {
         "carried": [{"made_id": "made-from-before"}],
         "steps": [
             {"label": "use", "op": "consumer",
@@ -444,13 +444,61 @@ def test_a_resumed_chain_starts_from_the_carried_outputs(fake_ops):
 def test_the_executor_never_takes_a_value_from_the_caller_for_a_reference(fake_ops):
     """The substitution source is the recorded output list and nothing else."""
     log = fake_ops
-    result = chain_ops.apply_chain(None, {"steps": [
+    result = chain_ops.apply_chain(MagicMock(), {"steps": [
         {"op": "producer", "args": {"tag": "real"}},
         {"op": "consumer", "args": {"uses": {"from_step": 0, "field": "made_id",
                                              "value": "made-injected"}}},
     ]})
     assert log[1] == ("consumer", {"uses": "made-real"})
     assert result["n_completed"] == 2
+
+
+def test_a_chain_drops_the_snapshots_its_own_earlier_steps_made_stale(
+        monkeypatch, tmp_path):
+    """Invalidating only once the whole chain had finished is why create_process ->
+    upload_process_config raised NOT_FOUND on the process step 1 had just created:
+    step 2 resolved it against a process listing step 1's own planner had cached."""
+    from cirro_agent.cache import SnapshotCache
+    cache = SnapshotCache(tmp_path, "app.cirro.test", "sminot")
+    cache.put("datasets", [{"id": "ds_old"}], project="proj_a")
+    cache.put("processes", [{"id": "proc_old"}], archived=True)
+    reader = MagicMock()
+    reader.cache = cache
+
+    def stales(kind):
+        return lambda reader, args: mutations.Draft(
+            args=dict(args), summary=f"makes {kind} stale",
+            invalidates=[mutations._inv(kind)])
+
+    seen = []
+
+    def plan_observer(reader, args):
+        seen.append(sorted(
+            kind for kind, scope in (("datasets", {"project": "proj_a"}),
+                                     ("processes", {"archived": True}))
+            if reader.cache.get(kind, **scope) is not None))
+        return mutations.Draft(args=dict(args), summary="observe")
+
+    for kind in ("datasets", "processes"):
+        monkeypatch.setitem(mutations.OPS, f"stales_{kind}", mutations.Op(
+            f"stales_{kind}", mutations.RISK_WRITE, stales(kind),
+            lambda reader, args, kind=kind: {"made_id": kind}, outputs=("made_id",)))
+    monkeypatch.setitem(mutations.OPS, "observer", mutations.Op(
+        "observer", mutations.RISK_WRITE, plan_observer, lambda reader, args: {}))
+
+    made = {"from_step": 0, "field": "made_id"}
+    draft = chain_ops.plan_chain(reader, {"steps": [
+        {"op": "stales_datasets", "args": {}},
+        {"op": "stales_processes", "args": {"after": made}},
+        {"op": "observer", "args": {"after": made}},
+    ]})
+    result = chain_ops.apply_chain(reader, draft.args)
+
+    assert result["n_completed"] == 3
+    assert seen == [[]], (
+        "step 3 planned against listings the two steps before it had made stale")
+    assert sorted(result["invalidated"]) == ["datasets@project=proj_a",
+                                             "processes@archived=True"]
 
 
 # --- a restart can widen nothing --------------------------------------------

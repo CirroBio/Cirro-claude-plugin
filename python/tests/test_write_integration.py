@@ -117,6 +117,32 @@ def test_apply_invalidates_the_snapshot_it_made_stale(writable_tenant, session_d
     assert refetched["cost"]["by_kind"].get("datasets.list", 0) >= 1
 
 
+def test_a_chain_step_can_resolve_what_the_step_before_it_created(
+        writable_tenant, session_dir):
+    """The chain invalidated only once it had finished, so step 2 resolved its subject
+    against a listing step 1's own planner had cached -- and no listing taken before
+    step 1 ran can contain what step 1 made. This is the shape that made
+    create_process -> upload_process_config refuse NOT_FOUND on the new process."""
+    planned = call(writable_tenant, session_dir, "plan", op="chain", args={"steps": [
+        {"label": "run", "op": "run_analysis",
+         "args": {"project_id": "proj_a", "process": "proc_rnaseq",
+                  "name": "RNAseq batch 32", "source_dataset_ids": ["ds_0000"],
+                  "params": {"genome": "GRCh38"}}},
+        {"label": "file", "op": "update_dataset",
+         "args": {"project_id": "proj_a",
+                  "dataset_id": {"from_step": 0, "field": "created_dataset_id"},
+                  "folder": "Immuno"}},
+    ]})
+    assert planned["ok"], planned
+
+    applied = apply_from(writable_tenant, session_dir, planned)
+    assert applied["ok"], applied
+    result = applied["result"]
+    assert result["n_completed"] == 2, result.get("failed_at")
+    assert result["completed"][1]["op"] == "update_dataset"
+    assert any("proj_a" in label for label in applied["invalidated"])
+
+
 def test_apply_cannot_be_replayed(writable_tenant, session_dir):
     planned = plan_run(writable_tenant, session_dir)
     assert apply_from(writable_tenant, session_dir, planned)["ok"]

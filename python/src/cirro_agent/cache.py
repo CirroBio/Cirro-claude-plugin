@@ -153,6 +153,22 @@ class SnapshotCache:
                 path.unlink(missing_ok=True)
         return dropped
 
+    def invalidate_entries(self, entries: list) -> list:
+        """Drop every snapshot the given scopes cover, and name what went.
+
+        An entry carrying nothing but its kind means every snapshot of that kind,
+        whatever it was keyed by: `invalidate` with an empty scope would compute a
+        key nothing was stored under and remove nothing.
+        """
+        dropped = []
+        for entry in entries:
+            scope = {k: v for k, v in entry.items() if k != "kind"}
+            if scope:
+                dropped.append(self.invalidate(entry["kind"], **scope))
+            else:
+                dropped += self.invalidate_kinds([entry["kind"]])
+        return dropped
+
     def _evict(self) -> None:
         if not self.root.is_dir():
             return

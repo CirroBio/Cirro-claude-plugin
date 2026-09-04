@@ -38,11 +38,12 @@ SYSTEM_INFO = {
 
 
 def _dataset_payload(index, *, status="COMPLETED", process="proc_rnaseq",
-                     created="2026-08-20T00:00:00Z", owner="sminot", parents=None):
+                     created="2026-08-20T00:00:00Z", owner="sminot", parents=None,
+                     dataset_id=None):
     """Built through the generated model so the fixture cannot drift from the API."""
     from cirro_api_client.v1.models import Dataset, Status, Tag
     return Dataset(
-        id=f"ds_{index:04d}", name=f"RNAseq_batch{index % 20}_S{index}",
+        id=dataset_id or f"ds_{index:04d}", name=f"RNAseq_batch{index % 20}_S{index}",
         project_id="proj_a", process_id=process,
         source_dataset_ids=parents or [], status=Status(status),
         # Varied per dataset: a fixture where every row carries the same tags cannot
@@ -231,6 +232,9 @@ def fake_tenant(monkeypatch):
                    "processes": processes, "router": router}
 
 
+# The dataset a launched analysis creates, and which then joins the project listing.
+LAUNCHED_DATASET = "ds_new_0001"
+
 PARAMETER_SPEC = {
     "form": {"type": "object",
              "properties": {"aligner": {"type": "string", "default": "star"},
@@ -242,14 +246,31 @@ PARAMETER_SPEC = {
 
 @pytest.fixture
 def writable_tenant(fake_tenant):
-    """Add the mutation endpoints to the active router of the read-only tenant."""
+    """Add the mutation endpoints to the active router of the read-only tenant.
+
+    A launched analysis joins the project listing, as it does on a real tenant. A
+    fixture whose listing never grew could not tell a chain that re-reads after each
+    step from one that answers step 2 out of a snapshot taken before step 1 ran.
+    """
+    import httpx
     router = fake_tenant["router"]
-    router.post(f"{API}/projects/proj_a/execution").respond(
-        json={"id": "ds_new_0001", "message": "submitted"})
+    datasets = fake_tenant["datasets"]
+
+    def launch(request):
+        datasets.append(_dataset_payload(9001, status="PENDING",
+                                         dataset_id=LAUNCHED_DATASET))
+        return httpx.Response(200, json={"id": LAUNCHED_DATASET,
+                                         "message": "submitted"})
+
+    def listing(request):
+        return httpx.Response(200, json={"data": datasets, "nextToken": None})
+
+    router.post(f"{API}/projects/proj_a/execution").mock(side_effect=launch)
+    router.get(f"{API}/projects/proj_a/datasets").mock(side_effect=listing)
     # The client parses this as a full DatasetDetail, so a partial body fails.
-    router.put(url__regex=rf"{API}/projects/proj_a/datasets/ds_\d+$").respond(
+    router.put(url__regex=rf"{API}/projects/proj_a/datasets/ds_\w+$").respond(
         json=_detail_payload(fake_tenant["datasets"][0]))
-    router.delete(url__regex=rf"{API}/projects/proj_a/datasets/ds_\d+$").respond(
+    router.delete(url__regex=rf"{API}/projects/proj_a/datasets/ds_\w+$").respond(
         status_code=204)
     router.get(f"{API}/processes/proc_rnaseq/parameters").respond(json=PARAMETER_SPEC)
     return fake_tenant

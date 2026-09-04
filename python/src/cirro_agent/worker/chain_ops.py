@@ -244,6 +244,7 @@ def _pre_plan(reader: reads.Reader, steps: list) -> list:
             continue
         draft = get_op(step["op"]).plan(reader, dict(step.get("args") or {}))
         step["resolved_args"] = draft.args
+        step["invalidates"] = draft.invalidates
         drafts.append(draft)
     return drafts
 
@@ -596,17 +597,17 @@ def apply_chain(reader: reads.Reader, args: dict) -> dict:
     """
     outputs = list(args.get("carried") or [])
     offset = len(outputs)
-    done, failure, touched = [], None, []
+    done, failure, dropped = [], None, []
     for index, step in enumerate(args["steps"], start=offset):
         op = get_op(step["op"])
         try:
             if "resolved_args" in step:
                 applied = step["resolved_args"]
+                made_stale = step.get("invalidates") or []
             else:
                 resolved = _resolve_references(step.get("args") or {}, outputs)
                 draft = op.plan(reader, resolved)
-                touched += draft.invalidates
-                applied = draft.args
+                applied, made_stale = draft.args, draft.invalidates
             result = op.apply(reader, applied)
             if op.outputs and not isinstance(result, dict):
                 raise errors.UpstreamError(
@@ -617,13 +618,19 @@ def apply_chain(reader: reads.Reader, args: dict) -> dict:
         except Exception as exc:
             failure = _failure(index, step, exc)
             break
+        # The next step plans against these listings, so the snapshots this one made
+        # stale go now rather than when the whole chain finishes. Waiting is why
+        # create_process -> upload_process_config raised NOT_FOUND on the process the
+        # step before it had just created: step 2 resolved it against a process
+        # listing step 1's own planner had cached, which cannot contain it.
+        dropped += reader.cache.invalidate_entries(made_stale)
         outputs.append(result if isinstance(result, dict) else {})
         done.append({"step": index + 1, "label": step.get("label") or op.name,
                      "op": op.name, "result": result})
 
     total = offset + len(args["steps"])
     response = {"completed": done, "n_completed": len(done), "n_steps": total,
-                "invalidates": touched}
+                "invalidated": dropped}
     if failure is None:
         return response
     exc = failure.pop("exc")

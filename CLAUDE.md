@@ -188,7 +188,12 @@ what is referenceable and a test asserts each declaration is really returned.
 Destructive ops are refused inside a chain, so one "yes" can never authorize a
 deletion nobody was looking at. Retries are a policy the person approves once:
 bounded attempts, and a `may_change` allowlist that is enforced by refusing a diff
-outside it rather than by rendering it and hoping.
+outside it rather than by rendering it and hoping. A chain drops each step's declared
+cache scopes as that step finishes rather than when the chain ends, because a later
+step plans against listings an earlier one has already changed -- deferring it is why
+`create_process` -> `upload_process_config` refused `NOT_FOUND` on the process the step
+before it had just created. `SnapshotCache.invalidate_entries` is the one place a
+declared scope becomes a dropped snapshot; `do_apply` and the chain executor share it.
 
 **The plan expiry only guards intent; accuracy is guarded by re-planning.** `apply`
 re-plans from the stored `request_args` and refuses with `PLAN_STALE` if the same

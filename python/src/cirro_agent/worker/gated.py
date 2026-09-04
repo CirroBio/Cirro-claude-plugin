@@ -149,21 +149,13 @@ def do_apply(request: dict) -> dict:
                                  "command": f"cirro-agent read chain-status {record.plan_id}"}
 
     # Synchronous invalidation: the next read must not answer from a snapshot this
-    # mutation just made wrong.
-    cache = reader.cache
-    invalidated = []
-    touched = list(record.invalidates)
-    if isinstance(result, dict):
-        touched += result.get("invalidates") or []
-    for entry in touched:
-        scope = {k: v for k, v in entry.items() if k != "kind"}
-        if scope:
-            invalidated.append(cache.invalidate(entry["kind"], **scope))
-        else:
-            # No scope means every snapshot of this kind, whatever it was keyed by;
-            # `invalidate` with an empty scope would compute a key nothing was stored
-            # under and remove nothing.
-            invalidated += cache.invalidate_kinds([entry["kind"]])
+    # mutation just made wrong. A chain has already dropped its own steps' scopes as
+    # it went -- it has to, so that a later step sees what an earlier one made -- and
+    # reports them here, so this pass covers the plan's declared scopes and the
+    # response names everything that went.
+    by_the_op = (result.get("invalidated") or []) if isinstance(result, dict) else []
+    invalidated = list(dict.fromkeys(
+        list(by_the_op) + reader.cache.invalidate_entries(record.invalidates)))
     return {
         "ok": True,
         "applied": record.op,
