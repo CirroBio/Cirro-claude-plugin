@@ -1010,7 +1010,7 @@ def plan_update_process(reader: reads.Reader, args: dict) -> Draft:
                             "documentation_url": detail.get("documentation_url"),
                             "uses_sample_sheet": bool(detail.get("uses_sample_sheet")),
                             "allow_multiple_sources":
-                                bool(detail.get("allow_multiple_sources", True))}}
+                                bool(detail.get("allow_multiple_sources"))}}
     return Draft(args=resolved, summary="\n".join(lines), warnings=warnings,
                  invalidates=[_inv("processes")])
 

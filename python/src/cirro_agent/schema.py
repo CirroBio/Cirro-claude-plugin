@@ -175,6 +175,8 @@ PROCESS = EntitySpec(
         "custom_settings": (DETAIL, "the git repo, branch and folder Cirro syncs config"
                                     " from, for the repo-backed config sources"),
         "pipeline_code": (DETAIL, "the workflow code: repository, version, entrypoint"),
+        "allow_multiple_sources": (DETAIL, "whether a run may take more than one input"
+                                           " dataset"),
         "file_mapping_rules": (DETAIL, "how dataset files map to the workflow's inputs"),
         "is_custom": (DERIVED, "has an owner, so it was registered by a user rather than"
                                " curated by Cirro"),

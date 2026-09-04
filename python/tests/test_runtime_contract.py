@@ -66,7 +66,7 @@ def test_process_detail_exposes_the_fields_the_probe_reads():
     from cirro_api_client.v1.models import ProcessDetail
     names = {a.name for a in attr.fields(ProcessDetail)}
     assert {"config_source", "custom_settings", "owner", "pipeline_code",
-            "is_archived"} <= names
+            "is_archived", "allow_multiple_sources"} <= names
 
 
 def test_custom_pipeline_settings_defaults_to_the_dot_cirro_folder():

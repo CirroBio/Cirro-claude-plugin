@@ -217,6 +217,11 @@ def process_detail(detail, base: Optional[dict] = None) -> dict:
     else:
         row["pipeline_code"] = None
 
+    # Only on the detail payload, and an update replaces the whole record, so without
+    # it here every edit had to guess the flag and could flip it by accident.
+    row["allow_multiple_sources"] = bool(
+        plain(getattr(detail, "allow_multiple_sources", None)))
+
     row["config_location"] = _config_location(row)
     row["code_location"] = _code_location(row.get("pipeline_code"))
     rules = plain(getattr(detail, "file_mapping_rules", None)) or []

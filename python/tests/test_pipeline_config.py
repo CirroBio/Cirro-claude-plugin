@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from cirro_agent import errors, formcheck, formgen
-from cirro_agent.worker import pipeline_ops
+from cirro_agent.worker import pipeline_ops, rows
 
 SPEC = {
     "workflow": {"name": "epi2me-labs/wf-demo", "repository":
@@ -973,6 +973,17 @@ def _reader_for(record):
     reader.username = record["owner"]
     reader.processes.return_value = [record]
     reader.process.return_value = record
+    # The detail payload, not a bare MagicMock: every attribute of a mock is truthy,
+    # so the row mapping would read the record's booleans back as True whatever the
+    # fixture says, and a diff against them would test nothing.
+    def namespace(value):
+        return SimpleNamespace(**value) if isinstance(value, dict) else value
+    reader.client.processes.get.return_value = SimpleNamespace(
+        allow_multiple_sources=record.get("allow_multiple_sources", False),
+        config_source=record.get("config_source"),
+        custom_settings=namespace(record.get("custom_settings")),
+        pipeline_code=namespace(record.get("pipeline_code")),
+        file_mapping_rules=[])
     return reader
 
 
@@ -1024,3 +1035,12 @@ def test_omitting_documentation_url_is_not_a_request_to_clear_it():
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_update_process(reader, {"process_id": "org-demo"})
     assert caught.value.code == "INVALID_QUERY"
+
+
+def test_allow_multiple_sources_is_read_from_the_detail_payload():
+    """It is absent from the list payload, so an update that guessed could flip it."""
+    detail = SimpleNamespace(allow_multiple_sources=False, config_source="STORAGE",
+                             custom_settings=None, pipeline_code=None,
+                             file_mapping_rules=[])
+    row = rows.process_detail(detail, base=_owned(allow_multiple_sources=True))
+    assert row["allow_multiple_sources"] is False
