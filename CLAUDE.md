@@ -124,6 +124,12 @@ the root and that the shell resolver and `runner.plugin_data()` still agree. The
 drifted inside it once: 1.2 MB of tracked content installed as 536 MB, three copies of
 one virtualenv, one of them in a git worktree nobody had removed.
 
+The same rule covers the session folder, and there the stake is not disk. Binding this
+repo's own directory to a tenant puts `.cirro/` in the plugin root, so the tenant URL,
+the username and the SDK's token cache are copied into the plugin cache on every
+install. The token file happened to be empty when this was found; it is not always.
+Bind a scratch directory for testing, not the checkout.
+
 **`CIRRO_HOME` is frozen at import time.** `cirro.config.Constants` reads it in a class
 body, so it must be in a child process's environment *before* Python starts. Setting
 `os.environ` after `import cirro` silently writes to the user's real `~/.cirro`. Only
