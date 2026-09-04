@@ -2,7 +2,7 @@
 
     CIRRO_AGENT_E2E=1 CIRRO_AGENT_E2E_WRITE_PROJECT=<project id> \\
     CIRRO_AGENT_E2E_WRITE_DATASET=<dataset id> \\
-    PYTHONPATH=python/src .dev-venv/bin/python -m pytest python/tests/test_live_writes.py
+    PYTHONPATH=python/src "$DEV_VENV/bin/python" -m pytest python/tests/test_live_writes.py
 
 No mutation has ever run against a live tenant through this plugin. Four bugs of the
 kind that only a real call finds were fixed on 2026-08-27 from doubles alone. This

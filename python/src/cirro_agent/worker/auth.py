@@ -392,7 +392,7 @@ def whoami(request: dict) -> dict:
         version = "unknown"
     import cirro
     sdk_path = Path(cirro.__file__).resolve()
-    editable = ".dev-venv" not in str(sdk_path) and "site-packages" not in str(sdk_path)
+    editable = "dev-venv" not in str(sdk_path) and "site-packages" not in str(sdk_path)
 
     runtime = {
         "cirro_version": version,

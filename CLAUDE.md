@@ -113,6 +113,17 @@ unchanged and do the work: the machine-wide global credential folder is still re
 nothing is created implicitly, and `session_dir` is inside `DIGEST_FIELDS`, so a plan
 made in one folder cannot be applied in another.
 
+**Nothing may live in the plugin root that is not meant to ship.** A directory
+marketplace copies the whole tree into every install, verbatim: it consults no
+`.gitignore`, takes no exclude list, and skips only `.git` and `node_modules` from a
+list inside Claude Code. There is a `mode: "link"` source that copies nothing, but it
+exists only for `command` sources, not the relative path a marketplace entry uses. So
+both virtualenvs default outside the root -- `${XDG_DATA_HOME:-~/.local/share}/cirro-agent`,
+holding `venv` and `dev-venv` -- and `test_runner.py` asserts the default is outside
+the root and that the shell resolver and `runner.plugin_data()` still agree. They had
+drifted inside it once: 1.2 MB of tracked content installed as 536 MB, three copies of
+one virtualenv, one of them in a git worktree nobody had removed.
+
 **`CIRRO_HOME` is frozen at import time.** `cirro.config.Constants` reads it in a class
 body, so it must be in a child process's environment *before* Python starts. Setting
 `os.environ` after `import cirro` silently writes to the user's real `~/.cirro`. Only

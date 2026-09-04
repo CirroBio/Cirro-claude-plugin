@@ -1,6 +1,6 @@
 """Every read verb against a real tenant. Opt-in, never in CI.
 
-    CIRRO_AGENT_E2E=1 PYTHONPATH=python/src .dev-venv/bin/python -m pytest \
+    CIRRO_AGENT_E2E=1 PYTHONPATH=python/src "$DEV_VENV/bin/python" -m pytest \
         python/tests/test_live_reads.py
 
 Runs against whatever session folder the working directory resolves to, so it uses

@@ -15,6 +15,9 @@ from . import errors, session as session_mod
 
 WORKER_TIMEOUT = 900  # uploads and downloads are legitimately slow
 READY_MARKER = "cirro-agent-ready.json"
+# The maintainer's environment, built by the README's uv sync. It sits beside the
+# installed runtime rather than in the checkout, for the reason plugin_data() gives.
+DEV_VENV = "dev-venv"
 
 
 def plugin_root() -> Path:
@@ -27,11 +30,18 @@ def plugin_root() -> Path:
 
 
 def plugin_data() -> Path:
+    """Where the runtime lives. Never inside the plugin root.
+
+    A directory marketplace copies that tree verbatim into every install -- no
+    .gitignore, no exclude list -- so a virtualenv left there is shipped with the
+    plugin. `scripts/_resolve-python.sh` is the other half of this and must agree.
+    """
     for var in ("CIRRO_AGENT_PLUGIN_DATA", "CLAUDE_PLUGIN_DATA"):
         value = os.environ.get(var)
         if value:
             return Path(value)
-    return plugin_root() / ".plugin-data"
+    share = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
+    return Path(share) / "cirro-agent"
 
 
 def interpreter() -> Path:
@@ -45,14 +55,14 @@ def interpreter() -> Path:
     if override:
         return Path(override)
     for candidate in (plugin_data() / "venv" / "bin" / "python",
-                      plugin_root() / ".dev-venv" / "bin" / "python"):
+                      plugin_data() / DEV_VENV / "bin" / "python"):
         if candidate.exists():
             return candidate
     raise errors.RuntimeNotInstalled(
         "The Cirro runtime is not installed yet.",
         what="The plugin runs the Cirro SDK in its own pinned Python environment.",
         user_action="Run /cirro:setup (takes up to two minutes on first use).",
-        looked_in=[str(plugin_data() / "venv"), str(plugin_root() / ".dev-venv")],
+        looked_in=[str(plugin_data() / "venv"), str(plugin_data() / DEV_VENV)],
     )
 
 
@@ -65,8 +75,8 @@ def check_ready() -> dict:
             return json.loads(marker.read_text())
         except (OSError, ValueError):
             pass
-    if (plugin_root() / ".dev-venv").exists() and str(python).endswith(
-            str(Path(".dev-venv") / "bin" / "python")):
+    dev = plugin_data() / DEV_VENV
+    if dev.exists() and str(python).startswith(str(dev)):
         return {"mode": "dev", "python": str(python)}
     raise errors.RuntimeNotInstalled(
         f"{python} exists but the runtime was never marked ready.",

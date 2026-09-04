@@ -16,6 +16,12 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # Outside the checkout on purpose: a directory marketplace copies the plugin
+      # root verbatim into every install, so a virtualenv in the tree ships with the
+      # plugin. Setting it explicitly also means the resolvers and the runner agree
+      # here without depending on what HOME happens to be on the runner.
+      CIRRO_AGENT_PLUGIN_DATA: ${{ runner.temp }}/cirro-agent
     steps:
       - uses: actions/checkout@v7
 
@@ -24,15 +30,15 @@ jobs:
           version: "0.5.16"
 
       - name: Build the pinned runtime
-        run: UV_PROJECT_ENVIRONMENT="$PWD/.dev-venv" uv sync --locked --python 3.12 --project runtime --group dev
+        run: UV_PROJECT_ENVIRONMENT="$CIRRO_AGENT_PLUGIN_DATA/dev-venv" uv sync --locked --python 3.12 --project runtime --group dev
 
       - name: Lint
-        run: .dev-venv/bin/python -m flake8 python/src python/tests scripts/gate.py
+        run: "$CIRRO_AGENT_PLUGIN_DATA/dev-venv/bin/python" -m flake8 python/src python/tests scripts/gate.py
 
       - name: Test
         # The coverage floor is a ratchet, not a target: it sits just under the
         # measured figure so a change that drops coverage fails, and it only moves up.
-        run: PYTHONPATH=python/src .dev-venv/bin/python -m pytest python/tests -q --cov=cirro_agent --cov-report=term-missing:skip-covered --cov-fail-under=69
+        run: PYTHONPATH=python/src "$CIRRO_AGENT_PLUGIN_DATA/dev-venv/bin/python" -m pytest python/tests -q --cov=cirro_agent --cov-report=term-missing:skip-covered --cov-fail-under=69
 
       - name: The gate runs without the virtualenv
         # scripts/gate.py is a PreToolUse hook and must work with a bare system Python;

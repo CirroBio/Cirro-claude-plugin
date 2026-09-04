@@ -65,3 +65,32 @@ def test_a_missing_session_folder_never_falls_back_to_the_home_directory(
     assert out["ok"] is False
     assert out["error"]["code"] in ("NO_SESSION_FOLDER", "no_session_folder")
     assert json.dumps(out)  # serialisable, like every response
+
+
+def test_the_runtime_never_defaults_inside_the_plugin_root(tmp_path, monkeypatch):
+    """A directory marketplace copies the plugin root verbatim into every install,
+    honouring no .gitignore and taking no exclude list. Three virtualenvs left in
+    the tree once turned a 1.2 MB plugin into a 536 MB one."""
+    monkeypatch.setenv("CIRRO_AGENT_PLUGIN_ROOT", str(tmp_path))
+    for var in ("CIRRO_AGENT_PLUGIN_DATA", "CLAUDE_PLUGIN_DATA"):
+        monkeypatch.delenv(var, raising=False)
+    data = runner.plugin_data()
+    assert tmp_path != data and tmp_path not in data.parents, \
+        f"{data} is inside the plugin root and would ship with the plugin"
+    assert tmp_path not in (runner.plugin_data() / runner.DEV_VENV).parents
+
+
+def test_the_shell_resolver_and_the_runner_agree_on_the_runtime_location(monkeypatch):
+    """Two mirrors of one path: scripts/setup builds where the shell says, and the
+    worker is launched from where the runner says. Drift means setup silently
+    installs somewhere nothing looks."""
+    import subprocess
+    root = Path(__file__).resolve().parents[2]
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("CIRRO_AGENT_PLUGIN_DATA", "CLAUDE_PLUGIN_DATA")}
+    shell = subprocess.run(
+        ["bash", "-c", f'source "{root}/scripts/_resolve-python.sh"; resolve_plugin_data'],
+        capture_output=True, text=True, env=env, check=True).stdout.strip()
+    for var in ("CIRRO_AGENT_PLUGIN_DATA", "CLAUDE_PLUGIN_DATA"):
+        monkeypatch.delenv(var, raising=False)
+    assert Path(shell) == runner.plugin_data()

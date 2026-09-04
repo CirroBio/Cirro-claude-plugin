@@ -313,10 +313,16 @@ registering a pipeline has not yet been done against a live tenant.
 See [CLAUDE.md](CLAUDE.md) for the standing rules, the architecture and the traps.
 
 ```bash
-UV_PROJECT_ENVIRONMENT="$PWD/.dev-venv" uv sync --python 3.12 --project runtime --group dev
-PYTHONPATH=python/src .dev-venv/bin/python -m pytest python/tests -q
+DEV_VENV="${XDG_DATA_HOME:-$HOME/.local/share}/cirro-agent/dev-venv"
+UV_PROJECT_ENVIRONMENT="$DEV_VENV" uv sync --python 3.12 --project runtime --group dev
+PYTHONPATH=python/src "$DEV_VENV/bin/python" -m pytest python/tests -q
 claude --plugin-dir ./
 ```
+
+The environment lives outside the checkout deliberately. A directory marketplace
+copies the plugin root verbatim into every install — it honours no `.gitignore` and
+takes no exclude list — so a virtualenv inside the tree is shipped with the plugin,
+and a second one appears in every git worktree you open.
 
 `python/tests/test_readme_current.py` fails when this file falls out of step with the
 code, so drift breaks the build rather than accumulating.
