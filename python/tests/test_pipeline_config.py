@@ -976,6 +976,7 @@ def _reader_for(record):
     # The detail payload, not a bare MagicMock: every attribute of a mock is truthy,
     # so the row mapping would read the record's booleans back as True whatever the
     # fixture says, and a diff against them would test nothing.
+
     def namespace(value):
         return SimpleNamespace(**value) if isinstance(value, dict) else value
     reader.client.processes.get.return_value = SimpleNamespace(
