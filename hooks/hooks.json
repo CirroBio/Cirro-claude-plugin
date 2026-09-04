@@ -12,7 +12,7 @@
         ]
       },
       {
-        "matcher": "mcp__cirro__apply",
+        "matcher": "mcp__.*cirro.*__apply",
         "hooks": [
           {
             "type": "command",

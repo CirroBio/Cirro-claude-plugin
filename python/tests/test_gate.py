@@ -1,6 +1,7 @@
 """The PreToolUse gate. Table-driven over a bypass corpus."""
 import ast
 import json
+import re
 import subprocess
 import sys
 import time
@@ -360,3 +361,39 @@ def test_a_chain_approval_names_every_step_before_the_argument_dump(workdir):
     assert "2. upload_dataset  [upload]" in reason
     assert "3. run_analysis  [run]" in reason
     assert "reusing 1 earlier step(s)" in reason
+
+
+# --- the hook registration ---
+
+PLUGIN_ROOT = GATE.parents[1]
+
+
+def apply_tool_names() -> list:
+    """Every name Claude Code can give the apply tool.
+
+    A plugin's MCP tools are namespaced mcp__plugin_<plugin>_<server>__<tool>; the
+    bare mcp__<server>__<tool> spelling is what a hand-configured server gets.
+    """
+    plugin = json.loads((PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text())
+    servers = plugin["mcpServers"]
+    return ([f"mcp__{server}__apply" for server in servers]
+            + [f"mcp__plugin_{plugin['name']}_{server}__apply" for server in servers])
+
+
+@pytest.mark.parametrize("tool_name", apply_tool_names())
+def test_the_hook_matcher_covers_every_spelling_of_apply(tool_name):
+    """The matcher was the literal mcp__cirro__apply, which the namespaced name never
+    equals, so the hook never fired: apply received no approved_summary from the plan
+    and rejected every call until the summary was retyped by hand."""
+    registered = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text())
+    matchers = [entry["matcher"] for entry in registered["hooks"]["PreToolUse"]]
+    assert any(re.search(matcher, tool_name) for matcher in matchers), \
+        f"no PreToolUse matcher in hooks.json fires for {tool_name}"
+
+
+@pytest.mark.parametrize("tool_name", apply_tool_names())
+def test_every_spelling_of_apply_reaches_the_apply_gate(workdir, tool_name):
+    plan = make_plan(workdir)
+    assert run({"tool_name": tool_name, "cwd": str(workdir.path.parent),
+                "tool_input": {"plan_id": plan.plan_id,
+                               "digest": plan.digest}}) == ASK
