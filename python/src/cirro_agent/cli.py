@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from . import errors, runner
+from . import errors, formgen, runner
 
 # The complete set of verbs this binary may ask the worker for.
 READ_VERBS = frozenset({"query", "get", "summarize", "describe", "list",
@@ -180,14 +180,14 @@ def build_parser() -> argparse.ArgumentParser:
         "id", help="process name or ID")
     pc = add("process-config", "a process's configuration assets and where they live")
     pc.add_argument("id", help="process ID")
-    from .worker.read_process import CONFIG_SLOTS
-    pc.add_argument("--slot", choices=list(CONFIG_SLOTS),
+    pc.add_argument("--slot", choices=list(formgen.CONFIG_SLOTS),
                     help="limit to one asset slot")
     pc.add_argument("--raw", action="store_true",
                     help="include verbatim file contents")
     files = add("files", "summarize a dataset's file manifest", project=True, dataset=True)
     files.add_argument("--glob", help="restrict to matching paths")
-    files.add_argument("--file-limit", type=int, default=20000)
+    files.add_argument("--file-limit", type=int,
+                       help="cap the manifest scan (default 20000)")
     add("samples", "summarize project sample metadata", project=True)
     add("references", "list reference data in a project", project=True, filters=True)
     add("folders", "folders datasets are organized into, with counts",
@@ -272,7 +272,7 @@ def main(argv=None) -> int:
                      "scope": _scope(args), "include": args.include or []}, args)
 
     if command == "chain-status":
-        return _run(_common({"verb": "chain_status", "plan_id": args.plan_id}, args), args)
+        return _run({"verb": "chain_status", "plan_id": args.plan_id}, args)
 
     if command == "analysis-status":
         request = {"verb": "get", "entity": "dataset", "id": args.dataset_id,

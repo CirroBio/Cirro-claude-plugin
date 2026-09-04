@@ -4,11 +4,19 @@ These modules were the least tested in the repo (read_process 11%, read_listings
 local_reads 20%), so each verb is driven end to end here through dispatch.
 """
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
-from cirro_agent import local_reads
-from cirro_agent.worker import dispatch
+from cirro_agent import formgen, local_reads
+from cirro_agent.worker import dispatch, read_process
+
+SRC = Path(__file__).resolve().parents[1] / "src"
 
 
 def _read(tenant, session_dir, verb, **extra):
@@ -164,6 +172,151 @@ def test_process_params_accepts_a_name_and_refuses_a_stranger(writable_tenant, s
     assert stranger["error"]["remediation"]["candidates"] == []
 
 
+WIDE_SPEC = {
+    "form": {"type": "object",
+             "properties": {f"param_{i:02d}": {"type": "string",
+                                               "default": f"default_value_{i:02d}",
+                                               "title": f"Parameter {i}"}
+                            for i in range(40)},
+             "required": ["param_00"]},
+    "ui": {},
+}
+
+
+def test_a_truncated_process_params_says_what_it_dropped(writable_tenant, session_dir):
+    """This verb halved its parameter list and recorded the loss nowhere -- neither in
+    `omitted` nor in `budget.degraded`."""
+    writable_tenant["router"].get(
+        f"https://{writable_tenant['base_url']}/api/processes/proc_rnaseq/parameters"
+    ).respond(json=WIDE_SPEC)
+    out = _read(writable_tenant, session_dir, "process_params", id="proc_rnaseq",
+                max_tokens=800)
+    assert out["ok"], out
+    result = out["result"]
+    assert result["n_parameters"] == 40, "the count describes the whole spec"
+    assert len(result["parameters"]) == result["parameters_truncated_to"] < 40
+    entry = next(o for o in out["omitted"] if o["code"] == "LIST_TRUNCATED")
+    assert entry["field"] == "parameters"
+    assert entry["fix"] == {"verb": "process_params", "id": "proc_rnaseq",
+                            "max_tokens": 1600}
+    assert any(step["what"] == "parameters" for step in out["budget"]["degraded"])
+
+
+# --- process configuration --------------------------------------------------
+
+class _Resource:
+    """A generated-client Response double: a status code and a parsed body."""
+
+    def __init__(self, status_code=200, **parsed):
+        self.status_code = status_code
+        self.parsed = SimpleNamespace(**parsed) if parsed else None
+
+
+REVISION_API = ("cirro_api_client.v1.api.processes.get_latest_process_revision"
+                ".sync_detailed")
+RESOURCE_API = ("cirro_api_client.v1.api.processes.get_process_resource"
+                ".sync_detailed")
+
+
+def _reader():
+    reader = MagicMock()
+    reader.cost.to_dict.return_value = {"api_calls": 0}
+    return reader
+
+
+def test_the_read_iterates_the_whole_slot_vocabulary(monkeypatch):
+    """The read and the planner now share one fetch, so they cover the same slots."""
+    asked = []
+
+    def record(_process_id, resource, **_kwargs):
+        asked.append(str(resource))
+        return _Resource(content="{}")
+
+    monkeypatch.setattr(REVISION_API, lambda *_a, **_k: _Resource(revision_number=3))
+    monkeypatch.setattr(RESOURCE_API, record)
+
+    out = read_process._storage_config(_reader(), "p1", {})
+    assert asked == list(formgen.CONFIG_SLOTS)
+    assert out["update_token"] == "3", "if_match is the revision number as a string"
+    assert out["slots_present"] == sorted(formgen.CONFIG_SLOTS)
+
+
+def test_a_slot_the_read_could_not_get_is_reported_not_dropped(monkeypatch):
+    """`slots_present` would otherwise understate what the process holds, and the
+    caller would have no way to tell an empty slot from an unread one."""
+    def only_form(_process_id, resource, **_kwargs):
+        return (_Resource(content='{"form": {}}') if str(resource) == "form"
+                else _Resource(status_code=500))
+
+    monkeypatch.setattr(REVISION_API, lambda *_a, **_k: _Resource(revision_number=3))
+    monkeypatch.setattr(RESOURCE_API, only_form)
+
+    out = read_process._storage_config(_reader(), "p1", {})
+    assert out["slots_present"] == ["form"]
+    unread = {entry["what"] for entry in out["omitted"]}
+    assert "the compute slot" in unread and "the metadata slot" in unread
+    assert all(entry["fix"]["verb"] == "process_config" for entry in out["omitted"])
+
+
+def test_an_unreadable_revision_is_not_reported_as_unconfigured(monkeypatch):
+    """A 404 means the process really has no configuration; a failure means nobody
+    knows. Reporting the second as the first told the caller a configured process was
+    registered but unconfigured."""
+    def unavailable(*_a, **_k):
+        raise ConnectionError("connection reset by peer")
+
+    monkeypatch.setattr(REVISION_API, unavailable)
+    out = read_process._storage_config(_reader(), "p1", {})
+    assert out["revision"] is None
+    assert "unconfigured" not in out["note"]
+    assert "connection reset by peer" in out["note"]
+    assert out["omitted"][0]["fix"] == {"verb": "process_config", "id": "p1"}
+
+
+def test_no_revision_at_all_still_reads_as_unconfigured(monkeypatch):
+    from cirro_api_client.v1.errors import NotFoundException
+
+    def missing(*_a, **_k):
+        raise NotFoundException({"statusCode": 404, "errorCode": "NOT_FOUND",
+                                 "errorDetail": "nothing in storage", "errors": []})
+
+    monkeypatch.setattr(REVISION_API, missing)
+    out = read_process._storage_config(_reader(), "p1", {})
+    assert out["revision"] is None and "unconfigured" in out["note"]
+    assert "omitted" not in out
+
+
+def test_building_the_read_parser_does_not_import_the_worker():
+    """`--slot` used to take its choices from worker.read_process, which pulled reads,
+    portal, cache, session, query and summarize into the parent process on every
+    invocation -- `cirro-agent --help` included."""
+    code = ("import sys; from cirro_agent import cli; cli.build_parser();"
+            " print([m for m in sys.modules if m.startswith('cirro_agent.worker')])")
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                          env={**os.environ,
+                               "PYTHONPATH": str(SRC) + os.pathsep
+                               + os.environ.get("PYTHONPATH", "")})
+    assert done.returncode == 0, done.stderr[-800:]
+    assert done.stdout.strip() == "[]", done.stdout
+
+
+def test_the_session_free_reads_do_not_import_the_worker():
+    """describe, workflow_spec and check_config run in the PARENT process, which is
+    why they live outside worker/. `DETAIL_BUDGET` was imported from worker.read_query,
+    inverting that boundary and pulling five worker modules in to read one integer --
+    two of them being where a future top-level `import cirro` would silently break the
+    rule that only the child imports the SDK."""
+    code = ("import sys; import cirro_agent.local_reads;"
+            " print([m for m in sys.modules if m.startswith('cirro_agent.worker')],"
+            " [m for m in sys.modules if m.split('.')[0] == 'cirro'])")
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                          env={**os.environ,
+                               "PYTHONPATH": str(SRC) + os.pathsep
+                               + os.environ.get("PYTHONPATH", "")})
+    assert done.returncode == 0, done.stderr[-800:]
+    assert done.stdout.strip() == "[] []", done.stdout
+
+
 # --- summaries --------------------------------------------------------------
 
 def test_summarize_files_collapses_names_into_patterns(fake_tenant, session_dir):
@@ -225,3 +378,49 @@ def test_check_config_passes_generated_assets_and_flags_a_dangling_mapping(tmp_p
     flagged = local_reads.do_check_config({"verb": "check_config", "path": str(folder)})
     assert flagged["result"]["ok"] is False
     assert any("ghost" in p["message"] for p in flagged["result"]["problems"])
+
+
+def test_a_truncated_workflow_spec_says_what_it_dropped(tmp_path):
+    """The other local read that halves a list. It marked the cut but declared it
+    nowhere a caller reading `omitted` would see."""
+    body = "\n".join(f"  param_{i:02d} = 'default_value_{i:02d}'" for i in range(60))
+    (tmp_path / "main.nf").write_text("workflow { }\n")
+    (tmp_path / "nextflow.config").write_text(f"params {{\n{body}\n}}\n")
+
+    out = local_reads.do_workflow_spec({"verb": "workflow_spec",
+                                        "target": str(tmp_path), "max_tokens": 900})
+    assert out["ok"], out
+    result = out["result"]
+    assert result["counts"]["params_declared"] == 60, "the count covers the whole file"
+    assert len(result["params"]) == result["params_truncated_to"] < 60
+    entry = next(o for o in out["omitted"] if o["code"] == "LIST_TRUNCATED")
+    assert entry["field"] == "params"
+    assert entry["fix"]["verb"] == "workflow_spec"
+    assert entry["fix"]["target"] == str(tmp_path)
+    assert any(step["what"] == "params" for step in out["budget"]["degraded"])
+
+
+def test_a_truncated_check_config_says_what_it_dropped(tmp_path):
+    """300 dangling mappings ran to 20,000 tokens against a 6,000 budget, with no
+    truncation, no degraded step and no note -- it simply overran."""
+    from test_pipeline_config import SPEC
+    folder = tmp_path / "config"
+    folder.mkdir()
+    for name, text in formgen.generate(SPEC).items():
+        (folder / name).write_text(text)
+    mapping = json.loads((folder / formgen.INPUT).read_text())
+    for i in range(300):
+        mapping[f"ghost_{i}"] = f"$.dataset.params.advanced.ghost_{i}"
+    (folder / formgen.INPUT).write_text(json.dumps(mapping))
+
+    out = local_reads.do_check_config({"verb": "check_config", "path": str(folder)})
+    result = out["result"]
+    assert result["ok"] is False
+    assert result["n_errors"] >= 300, "the verdict counts every problem, not the shown ones"
+    assert len(result["problems"]) == result["problems_truncated_to"] < 300
+    entry = next(o for o in out["omitted"] if o["code"] == "LIST_TRUNCATED")
+    assert entry["field"] == "problems"
+    assert entry["fix"] == {"verb": "check_config", "path": str(folder),
+                            "max_tokens": 12000}
+    assert any(step["what"] == "problems" for step in out["budget"]["degraded"])
+    assert out["budget"]["used_est"] <= out["budget"]["max_tokens"]

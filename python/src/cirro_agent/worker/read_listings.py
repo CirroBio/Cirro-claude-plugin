@@ -21,8 +21,9 @@ def _flat(reader: Reader, request: dict, kind: str, items: list,
                 **({"totals": totals} if totals else {}),
                 "next_calls": next_calls or [], **({"note": note} if note else {})},
         cost=reader.cost.to_dict(), max_tokens=max_tokens)
-    shrink_to_fit(envelope["result"], "items", floor=3, max_tokens=max_tokens,
-                  degraded=envelope["budget"]["degraded"])
+    shrink_to_fit(envelope, "items", floor=3, max_tokens=max_tokens,
+                  fix={"verb": "list", "of": kind, "scope": request.get("scope") or {},
+                       "max_tokens": max_tokens * 2})
     envelope["budget"]["used_est"] = estimate_tokens(envelope)
     return envelope
 

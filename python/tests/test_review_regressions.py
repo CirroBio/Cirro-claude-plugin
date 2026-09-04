@@ -64,9 +64,22 @@ def test_numeric_fields_sort_numerically(field, values):
 
 
 def test_missing_values_sort_last_not_first():
+    """`reverse` inverts the whole sort key, so the missing-last rank came out
+    missing-FIRST on a descending sort: `-file_count` led with the rows that have
+    none. Missing must be last in both directions."""
     rows = [{"id": "a", "file_count": 5}, {"id": "b"}, {"id": "c", "file_count": 1}]
     assert [r["id"] for r in read_query._sorted(rows, ["file_count"], schema.DATASET)] == \
         ["c", "a", "b"]
+    assert [r["id"] for r in read_query._sorted(rows, ["-file_count"], schema.DATASET)] == \
+        ["a", "c", "b"]
+
+    # Also for a string field, where the present rows key on the third tuple slot.
+    dated = [{"id": "a", "updated_at": "2026-01-05T00:00:00Z"}, {"id": "b"},
+             {"id": "c", "updated_at": "2026-03-05T00:00:00Z"}]
+    assert [r["id"] for r in read_query._sorted(dated, ["updated_at"],
+                                                schema.DATASET)] == ["a", "c", "b"]
+    assert [r["id"] for r in read_query._sorted(dated, ["-updated_at"],
+                                                schema.DATASET)] == ["c", "a", "b"]
 
 
 def test_string_fields_still_sort(tmp_path):
@@ -112,11 +125,10 @@ def test_output_dir_detection_groups_its_operators():
 
 def test_one_bad_timestamp_does_not_abort_an_aggregation():
     """Every other date path skips unparseable rows; group_by raised INVALID_QUERY."""
-    ctx = Q.Ctx(username="u")
     rows = [{"id": "a", "created_at": "2026-01-05T00:00:00Z"},
             {"id": "b", "created_at": "not-a-date"},
             {"id": "c", "created_at": "2026-01-06T00:00:00Z"}]
-    groups, _tail, totals = Q.group(rows, ["created_at:month"], ["count"], ctx)
+    groups, _tail, totals = Q.group(rows, ["created_at:month"], ["count"])
     assert totals["count"] == 3
     keys = {g["key"]["created_at:month"] for g in groups}
     assert "2026-01" in keys and None in keys
@@ -209,7 +221,7 @@ def test_a_facet_counts_rows_whose_list_is_empty():
 def test_an_unknown_metric_is_rejected_even_with_no_matches():
     from cirro_agent import errors
     with pytest.raises(errors.AgentError) as caught:
-        Q.group([], ["status"], ["median:size"], Q.Ctx(username="u"))
+        Q.group([], ["status"], ["median:size"])
     assert caught.value.code == "INVALID_QUERY"
 
 
@@ -272,16 +284,72 @@ def test_spec_shape_declares_parameters_hidden_behind_a_selector():
                                                      "default": 500}}},
                 {"properties": {"use_qdnaseq": {"enum": [False]}}}]}}}}}
 
-    class Model:  # what the generated client returns: a model with to_dict()
-        def to_dict(self):
-            return {"form": form, "ui": {}}
     reader = MagicMock()
+    # ParameterSpecification.form_spec_json is `form_schema.form.additional_properties`
+    # -- a plain dict that is already the schema, never a model and never the
+    # {form, ui} pair. A double that hands back either of those tests a shape the API
+    # does not produce.
     reader.client.processes.get_parameter_spec.return_value = SimpleNamespace(
-        form_spec_json=Model())
+        form_spec_json=form)
     defaults, declared, _required = reads.spec_shape(reader, "proc_x")
     assert "qdnaseq_bin_size" in declared
     assert defaults["qdnaseq_bin_size"] == 500
     assert "cnv_options" not in declared, "groups are containers, not parameters"
+
+
+IF_THEN_FORM = {"ui": {}, "form": {"type": "object", "properties": {
+    "align": {"type": "object",
+              "properties": {"aligner": {"type": "string",
+                                         "enum": ["bwa", "star"]}},
+              "if": {"properties": {"aligner": {"const": "star"}}},
+              "then": {"properties": {
+                  "star_index": {"type": "string", "default": "GRCh38",
+                                 "pathType": "references",
+                                 "file": "**/*.tar.gz"}}},
+              "else": {"properties": {
+                  "bwa_threads": {"type": "integer", "default": 4},
+                  "bwa_seed": {"type": "string", "file": "**/*.bed"}}}}}}}
+
+
+def test_both_form_walk_consumers_see_if_then_conditional_fields():
+    """`form_paths` and `check_form` used to run two independent walks whose wrapper
+    keys had drifted: only `form_paths` descended if/then, so a then-branch field was
+    both reported as a dangling mapping and exempt from the picker checks."""
+    from cirro_agent import formcheck
+
+    paths = formcheck.form_paths(IF_THEN_FORM)
+    assert "$.dataset.params.align.star_index" in paths
+    assert "$.dataset.params.align.bwa_threads" in paths
+    # The one walk answers both consumers, so they cannot disagree again.
+    assert paths == {p for p, _f in
+                     formcheck.iter_fields(IF_THEN_FORM["form"], "$.dataset.params")}
+
+    # Consumer one: a mapping onto a then-branch field is live, not dangling.
+    assert not formcheck.check_input_map(
+        {"index": "$.dataset.params.align.star_index"}, IF_THEN_FORM)
+
+    # Consumer two: the picker checks reach inside the branches. `bwa_seed` has a
+    # `file` glob and no pathType, which renders nothing.
+    problems = formcheck.check_form(IF_THEN_FORM)
+    assert [(p.level, p.where) for p in problems] == \
+        [("error", "form.align.bwa_seed.pathType")]
+
+
+def test_spec_shape_declares_parameters_behind_an_if_then():
+    """spec_shape reached for the narrower of the two walks, so an if/then form's
+    conditional parameters read as undeclared -- the same wrong answer as before."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    reader = MagicMock()
+    # The form half only -- see the note in the cnv_options test above.
+    reader.client.processes.get_parameter_spec.return_value = SimpleNamespace(
+        form_spec_json=IF_THEN_FORM["form"])
+    defaults, declared, _required = reads.spec_shape(reader, "proc_y")
+    assert "star_index" in declared and "bwa_threads" in declared
+    assert defaults["star_index"] == "GRCh38"
+    assert defaults["bwa_threads"] == 4
+    assert "align" not in declared, "groups are containers, not parameters"
 
 
 def test_the_root_cause_lookup_books_its_detail_call():
@@ -291,3 +359,179 @@ def test_the_root_cause_lookup_books_its_detail_call():
     reader.cost = MagicMock()
     read_summaries._primary_failed_index(reader, "proj_a", "ds_1", [])
     reader.cost.call.assert_called_with("datasets.get", detail=True)
+
+
+# --- the metadata schema is read from the field that exists ------------------
+
+def _schema_reader(document):
+    """A Reader whose metadata service returns a real generated FormSchema.
+
+    Built through the model so the fixture cannot drift from the API: FormSchema is
+    form / ui / metadataRequirements, and unknown top-level keys land in
+    additional_properties.
+    """
+    from unittest.mock import MagicMock
+    from cirro_api_client.v1.models import FormSchema
+    reader = MagicMock()
+    reader.cost = MagicMock()
+    reader.resolve_project.return_value = {"id": "proj_a", "name": "Immuno"}
+    reader.client.metadata.get_project_schema.return_value = FormSchema.from_dict(document)
+    return reader
+
+
+def test_a_schema_plan_names_the_keys_it_removes():
+    """FormSchema has no `form_spec_json`, so the baseline was empty for every project:
+    a replacement that dropped `sex` rendered as "keys removed []" and warned nothing.
+    """
+    from cirro_agent.worker import project_ops
+    reader = _schema_reader({"ui": {}, "form": {"type": "object", "properties": {
+        "condition": {"type": "string"}, "sex": {"type": "string"}}}})
+    draft = project_ops.plan_update_project_schema(
+        reader, {"project_id": "proj_a",
+                 "schema": {"properties": {"condition": {"type": "string"}}}})
+    assert "keys removed  ['sex']" in draft.summary
+    assert "keys added    []" in draft.summary
+    assert any("sex" in w for w in draft.warnings), draft.warnings
+
+
+def test_a_schema_baseline_is_also_read_from_metadata_requirements():
+    """Which half of the document a tenant fills is not fixed, and an approval that
+    reads only one half understates what it removes."""
+    from cirro_agent.worker import project_ops
+    reader = _schema_reader({"metadataRequirements": {"type": "object", "properties": {
+        "sex": {"type": "string"}}}})
+    draft = project_ops.plan_update_project_schema(
+        reader, {"project_id": "proj_a", "schema": {"properties": {}}})
+    assert "keys removed  ['sex']" in draft.summary
+
+
+def test_an_unreadable_schema_shape_is_an_unknown_baseline_not_an_empty_one():
+    from cirro_agent.worker import project_ops
+    reader = _schema_reader({"somethingElse": {"fields": ["sex"]}})
+    draft = project_ops.plan_update_project_schema(
+        reader, {"project_id": "proj_a",
+                 "schema": {"properties": {"condition": {"type": "string"}}}})
+    assert "keys removed  unknown" in draft.summary
+    assert any("could not be read" in w for w in draft.warnings), draft.warnings
+
+
+def test_declared_metadata_keys_come_from_the_schema_document():
+    """schema_keys of [] reported every observed metadata key as drift."""
+    reader = _schema_reader({"form": {"properties": {"condition": {}, "sex": {}}}})
+    keys = read_summaries._declared_metadata_keys(reader, "proj_a")
+    assert set(keys) == {"condition", "sex"}
+    reader.cost.call.assert_called_with("metadata.schema")
+
+
+def test_an_unreadable_schema_claims_no_drift_in_either_direction():
+    from unittest.mock import MagicMock
+    reader = MagicMock()
+    reader.cost = MagicMock()
+    reader.client.metadata.get_project_schema.side_effect = RuntimeError("no schema")
+    assert read_summaries._declared_metadata_keys(reader, "proj_a") is None
+    assert "schema_drift" not in S.samples([{"id": "s1", "name": "S1",
+                                             "metadata": {"condition": "Tumor"}}],
+                                           schema_keys=None)
+
+
+# --- one summary describes one project --------------------------------------
+
+def test_a_narrowed_summary_scope_says_which_projects_it_left_out():
+    """Summarizing project_ids[0] under an echo naming every project asked for
+    reported one project's figures as though they covered them all."""
+    entry, = read_summaries._projects_left_out("samples", ["proj_a", "proj_b"], None)
+    assert entry["code"] == "SCOPE_NARROWED"
+    assert entry["projects_not_read"] == ["proj_b"]
+    assert entry["fix"]["retry_with"][0]["scope"]["project_ids"] == ["proj_b"]
+
+    # A dataset-scoped summary is reported too. It looks like nothing is omitted --
+    # the dataset lives in one project -- but if it lives in proj_b the read comes
+    # back empty, which the caller cannot tell from a dataset with no files.
+    scoped, = read_summaries._projects_left_out("files", ["proj_a", "proj_b"], "ds_1")
+    assert scoped["projects_not_read"] == ["proj_b"]
+    assert "empty rather than wrong" in scoped["detail"]
+    assert scoped["fix"]["retry_with"][0]["dataset_id"] == "ds_1"
+
+    # Both read verbs answer the same scope the same way, under the same key.
+    query_side, = read_query._projects_left_out("file", ["proj_a", "proj_b"], "ds_1")
+    assert query_side["projects_not_read"] == scoped["projects_not_read"]
+    assert query_side["code"] == scoped["code"]
+
+
+def test_a_summary_echoes_only_the_project_it_read(fake_tenant, session_dir):
+    from cirro_agent.worker import dispatch
+    out = dispatch.run({"verb": "summarize", "of": "files", "dataset_id": "ds_0000",
+                        "base_url": fake_tenant["base_url"],
+                        "session_dir": str(session_dir.path),
+                        "scope": {"project_ids": ["proj_a", "proj_b"]}})
+    assert out["ok"], out
+    assert out["query"]["scope"]["project_ids"] == ["proj_a"]
+    assert out["result"]["next_calls"][0]["call"]["scope"]["project_ids"] == ["proj_a"]
+
+
+# --- include only buys the calls it needs ------------------------------------
+
+def test_a_list_tier_include_costs_no_process_detail_call(monkeypatch):
+    """The process branch fetched process_detail for every matched row whenever
+    `include` was non-empty, so include:["name"] -- already in the listing -- cost one
+    processes.get per process. The dataset branch has always gated on the tier."""
+    from unittest.mock import MagicMock
+    from cirro_agent import errors
+    fetched = []
+
+    def detail(reader, process_id, base):
+        fetched.append(process_id)
+        return {"config_source": "STORAGE"}
+
+    monkeypatch.setattr(read_query, "process_detail", detail)
+    rows = [{"id": f"proc_{i}", "name": f"n{i}"} for i in range(4)]
+
+    granted, _notes = read_query._apply_include(
+        MagicMock(), "process", rows, ["name"], schema.PROCESS, [])
+    assert granted == {"name"}
+    assert fetched == [], "a list-tier include must not cost an API call per process"
+
+    read_query._apply_include(MagicMock(), "process", rows, ["config_location"],
+                              schema.PROCESS, [])
+    assert fetched == [r["id"] for r in rows], \
+        "config_location is only produced by the detail fetch, so it still pays for it"
+
+    # One gate, and it still refuses the same thing: config_location reads as DERIVED
+    # but costs a call per row, so it is gated like any detail-tier field.
+    many = [{"id": f"proc_{i}"} for i in range(read_query.DETAIL_BUDGET + 1)]
+    with pytest.raises(errors.AgentError) as caught:
+        read_query._apply_include(MagicMock(), "process", many, ["config_location"],
+                                  schema.PROCESS, [])
+    assert caught.value.code == "COST_GATE"
+    assert any(r.get("confirm_detail_cost") for r in caught.value.retry_with)
+
+
+def test_a_gated_field_is_not_faceted_until_include_grants_it():
+    """config_source is detail-tier but sits in PROCESS.facet_priority, so a process
+    query without `include` emitted a facet whose one bucket was {value: null, n: all}
+    while shape.unavailable in the same response called the field unavailable."""
+    rows = [{"id": "p1", "name": "a", "executor": "NEXTFLOW"},
+            {"id": "p2", "name": "b", "executor": "NEXTFLOW"}]
+    facets = read_query._visible_facets(rows, schema.PROCESS, {}, set())
+    assert "config_source" not in facets, "nothing fetched it, so there is nothing to count"
+    shape = Q.compute_shape(rows, schema.PROCESS, Q.Ctx(username="u"), granted=set())
+    assert shape["unavailable"]["config_source"]["available"] is False
+
+    with_detail = [dict(r, config_source="STORAGE") for r in rows]
+    facets = read_query._visible_facets(with_detail, schema.PROCESS, {},
+                                        {"config_source"})
+    assert [cell["value"] for cell in facets["config_source"].render(10)["top"]] == \
+        ["STORAGE"]
+
+
+# --- one dataset lives in one project ---------------------------------------
+
+def test_a_file_read_says_which_named_projects_it_never_looked_at():
+    """The manifest was read from project_ids[0] while the echo named every project
+    given, so one project's files were reported as though they covered both."""
+    entry, = read_query._projects_left_out("file", ["proj_a", "proj_b"], "ds_1")
+    assert entry["code"] == "SCOPE_NARROWED"
+    assert entry["projects_not_read"] == ["proj_b"]
+    assert entry["fix"]["retry_with"][0] == {
+        "entity": "file", "dataset_id": "ds_1", "scope": {"project_ids": ["proj_b"]}}
+    assert read_query._projects_left_out("task", ["proj_a"], "ds_1") == []

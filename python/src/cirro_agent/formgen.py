@@ -18,12 +18,36 @@ import json
 import re
 from typing import Optional
 
+from . import errors
+
 FORM = "process-form.json"
 INPUT = "process-input.json"
 OUTPUT = "process-output.json"
 COMPUTE = "process-compute.config"
 PREPROCESS = "preprocess.py"
 DOCUMENTATION = "README.md"
+
+# The one declaration of the ProcessResource slot vocabulary: every slot a process's
+# configuration can occupy in Cirro storage, and the filename each is written as.
+# `metadata` is the only slot nothing here generates, so it has no filename.
+#
+# This mirrors `cirro_api_client.v1.models.ProcessResource` minus its UNKNOWN fallback,
+# and is mirrored rather than imported because both this module and the CLI parser that
+# offers these as `--slot` choices must stay free of the SDK -- importing it would pull
+# the whole generated model package into the parent process on every `cirro-agent
+# --help`. The enum also maps an unrecognized value onto UNKNOWN instead of raising, so
+# a drifted mirror would fail silently on the wire; test_pipeline_config checks it.
+_SLOT_FILES = {"compute": COMPUTE, "documentation": DOCUMENTATION, "form": FORM,
+               "input": INPUT, "metadata": None, "output": OUTPUT,
+               "preprocess": PREPROCESS}
+
+CONFIG_SLOTS = tuple(_SLOT_FILES)
+
+# Filename -> the ProcessResource slot it uploads to.
+SLOTS = {filename: slot for slot, filename in _SLOT_FILES.items() if filename}
+
+# Slots holding a JSON document rather than free text.
+JSON_SLOTS = ("form", "input", "output", "metadata")
 
 # Which library a picker resolves from. A genome or annotation belongs to the shared
 # reference library; anything sample-specific comes from the input dataset.
@@ -177,18 +201,24 @@ def parse_when(predicate: str) -> Optional[tuple]:
     return selector, raw
 
 
-def _conditional(selector_field: dict, selector: str, enabling, revealed: dict) -> dict:
-    """The shape Cirro's renderer expects for a conditionally-shown field.
+def _conditional(selector_field: dict, selector: str, by_value: dict) -> dict:
+    """The shape Cirro's renderer expects for fields shown by one selector.
 
-    Two branches: one where the selector holds the enabling value and the extra fields
-    appear, one where it does not and they are absent.
+    One branch per enabling value, carrying the fields that value reveals, then a
+    single branch holding every remaining value where none of them appear.
+
+    The negative branch has to exclude *all* the enabling values at once. Building a
+    positive/negative pair per value instead leaves each negative enum still holding
+    the other enabling values, so a selector value that enables one field satisfies
+    both its own branch and another's negative branch, and `oneOf` matches twice.
     """
     if selector_field.get("type") == "boolean":
-        others = [not bool(enabling)]
+        values = [True, False]
     else:
         values = list(selector_field.get("enum") or [])
-        others = [v for v in values if v != enabling]
-    branches = [{"properties": {selector: {"enum": [enabling]}, **revealed}}]
+    branches = [{"properties": {selector: {"enum": [value]}, **revealed}}
+                for value, revealed in by_value.items()]
+    others = [v for v in values if v not in by_value]
     if others:
         branches.append({"properties": {selector: {"enum": others}}})
     return {"oneOf": branches}
@@ -245,14 +275,10 @@ def build_form(spec: dict) -> dict:
         by_value: dict = {}
         for value, entry in pending:
             by_value.setdefault(value, {})[entry["name"]] = _field_for_parameter(entry)
+        # `conditional` is keyed by (group, selector), so each selector's whole value
+        # set is in hand here and the dependency is written once.
         dependencies = block.setdefault("dependencies", {})
-        for value, revealed in by_value.items():
-            existing = dependencies.get(selector)
-            branch = _conditional(selector_field, selector, value, revealed)
-            if existing is None:
-                dependencies[selector] = branch
-            else:
-                existing["oneOf"] = branch["oneOf"][:1] + existing["oneOf"]
+        dependencies[selector] = _conditional(selector_field, selector, by_value)
 
     for name, block in groups.items():
         if required.get(name):
@@ -272,6 +298,18 @@ def build_input_map(spec: dict) -> dict:
     # role maps to the dataset path. Keyed by role so a second role has a place to
     # land, rather than a conditional whose branches were identical.
     for name, role in managed.items():
+        if role not in MANAGED_PATHS:
+            raise errors.InvalidQuery(
+                f"managed parameter {name!r} declares role {role!r}, which Cirro does "
+                f"not supply. Known roles: {', '.join(sorted(MANAGED_PATHS))}.",
+                what="Give the parameter a role Cirro supplies, or drop it from "
+                     "managed_parameters and let it render as a form field.",
+                field="cirro.managed_parameters",
+                given=role,
+                candidates=sorted(MANAGED_PATHS),
+                user_action="Correct the role in the design spec; a re-run will not "
+                            "change the outcome.",
+            )
         mapping[name] = MANAGED_PATHS[role]
     for entry in pickers:
         mapping[entry["name"]] = f"$.dataset.params.{entry['group']}.{entry['name']}"
@@ -332,8 +370,3 @@ def generate(spec: dict, *,
         assets[PREPROCESS] = preprocess
     assets[DOCUMENTATION] = build_documentation(spec)
     return assets
-
-
-# Filename -> the ProcessResource slot it uploads to.
-SLOTS = {FORM: "form", INPUT: "input", OUTPUT: "output", COMPUTE: "compute",
-         PREPROCESS: "preprocess", DOCUMENTATION: "documentation"}

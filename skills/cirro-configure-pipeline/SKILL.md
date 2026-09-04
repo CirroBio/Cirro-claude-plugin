@@ -63,6 +63,10 @@ understands, pickers that actually offer something, every input mapping pointing
 field the form really has, and no `../` anywhere — Cirro sits behind a WAF that rejects
 any request body containing that literal, even inside a comment.
 
+`n_errors` and `n_warnings` count every problem found. A folder with hundreds of them
+shortens the `problems` list to fit the response budget and says so with a
+`LIST_TRUNCATED` entry in `omitted`; re-run the call it carries to see the rest.
+
 Read the generated form for sense, not just validity. Groups in a sane order, titles a
 biologist would recognize, pickers pointing at the right library, conditional fields
 where a large parameter set would otherwise be a wall.

@@ -36,9 +36,10 @@ TTL = {
     "workspaces": 120,
     "manifest_terminal": 24 * 3600,
     "manifest_active": 60,
-    "execution_terminal": 24 * 3600,
-    "execution_active": 30,
 }
+
+# A kind with no entry in TTL caches as briefly as the most volatile listed kind.
+DEFAULT_TTL_S = 300
 
 MAX_ENTRIES = 200
 
@@ -49,7 +50,9 @@ FRESH_ANY = "any"           # serve even if expired, and say so
 
 @dataclass
 class Snapshot:
-    key: str
+    # The human-readable scope label, not the storage key: this is what cost
+    # accounting shows a person. SnapshotCache.key() is the hashed key on disk.
+    label: str
     kind: str
     items: list
     created_at: float
@@ -102,9 +105,9 @@ class SnapshotCache:
         except (OSError, ValueError):
             return None
         snapshot = Snapshot(
-            key=self._scope_label(kind, scope), kind=kind, items=raw.get("items", []),
+            label=self._scope_label(kind, scope), kind=kind, items=raw.get("items", []),
             created_at=raw.get("created_at", 0.0),
-            ttl_s=ttl_s if ttl_s is not None else TTL.get(kind, 300),
+            ttl_s=ttl_s if ttl_s is not None else TTL.get(kind, DEFAULT_TTL_S),
             meta=raw.get("meta", {}),
         )
         if not snapshot.fresh and freshness != FRESH_ANY:
@@ -114,17 +117,16 @@ class SnapshotCache:
     def put(self, kind: str, items: list, *, meta: Optional[dict] = None,
             ttl_s: Optional[int] = None, **scope: Any) -> Snapshot:
         snapshot = Snapshot(
-            key=self._scope_label(kind, scope), kind=kind, items=items,
+            label=self._scope_label(kind, scope), kind=kind, items=items,
             created_at=time.time(),
-            ttl_s=ttl_s if ttl_s is not None else TTL.get(kind, 300),
+            ttl_s=ttl_s if ttl_s is not None else TTL.get(kind, DEFAULT_TTL_S),
             meta=meta or {},
         )
         self.root.mkdir(parents=True, exist_ok=True)
-        key = self.key(kind, **scope)
-        path = self._path(key)
+        path = self._path(self.key(kind, **scope))
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps({
-            "label": snapshot.key, "kind": kind, "created_at": snapshot.created_at,
+            "label": snapshot.label, "kind": kind, "created_at": snapshot.created_at,
             "meta": snapshot.meta, "items": items,
         }, default=str))
         tmp.replace(path)
@@ -179,7 +181,3 @@ class SnapshotCache:
 
 def manifest_ttl(is_terminal: bool) -> int:
     return TTL["manifest_terminal"] if is_terminal else TTL["manifest_active"]
-
-
-def execution_ttl(is_terminal: bool) -> int:
-    return TTL["execution_terminal"] if is_terminal else TTL["execution_active"]

@@ -20,7 +20,33 @@ def call(tenant, session_dir, verb, **overrides):
     return dispatch.run(request)
 
 
-def plan_run(tenant, session_dir, **arg_overrides):
+# The account the fake tenant's token is minted for, and the address a launch
+# notifies when the caller names nobody.
+SESSION_EMAIL = "sminot@cirro.test"
+
+DEFAULT_USER = {"email": SESSION_EMAIL}
+
+
+def serve_user(tenant, *, email=SESSION_EMAIL, notifications=True):
+    """The authenticated account's own record, which is where its email lives.
+
+    Built through the generated model, as the other fixtures are, so it cannot claim
+    a shape UserDetail does not have. Re-registering the same pattern replaces the
+    route, so a test may serve a different record before planning.
+    """
+    from cirro_api_client.v1.models import UserDetail, UserSettings
+    payload = UserDetail(
+        username="sminot", name="Sam Minot", email=email, organization="Cirro",
+        project_assignments=[], global_roles=[],
+        settings=UserSettings(analysis_update_notifications_enabled=notifications),
+    ).to_dict()
+    tenant["router"].get(f"{API}/users/sminot").respond(json=payload)
+
+
+def plan_run(tenant, session_dir, notify_user=DEFAULT_USER, **arg_overrides):
+    """Plan a launch. `notify_user=None` leaves the user endpoint as the test set it."""
+    if notify_user is not None:
+        serve_user(tenant, **notify_user)
     args = {"project_id": "proj_a", "process": "proc_rnaseq",
             "name": "RNAseq batch 32", "source_dataset_ids": ["ds_0000"],
             "params": {"genome": "GRCh38"}}
@@ -38,7 +64,8 @@ def test_plan_renders_a_summary_a_person_can_check(writable_tenant, session_dir)
     assert "nf-core/rnaseq v3.14" in rendered
     assert "RNAseq batch 32" in rendered
     assert "genome" in rendered
-    assert "no cost estimate is possible" in rendered
+    assert "Nothing prices a run before it happens" in rendered
+    assert "no pricing API" not in rendered, "Cirro does report spend, after the fact"
     assert result["risk"] == "cirro_write"
     assert result["expires_in_s"] == plans.TTL_SECONDS
 
@@ -82,6 +109,112 @@ def test_plan_writes_a_private_single_use_record(writable_tenant, session_dir):
     # Only resolved IDs are stored, never the names the caller may have used.
     assert stored["args"]["process_id"] == "proc_rnaseq"
     assert stored["args"]["source_dataset_ids"] == ["ds_0000"]
+
+
+# --- a launch mails whoever launched it, and says so before it does ---
+
+def notify_line(session_dir, plan_id):
+    shown = approved_summary(session_dir, plan_id)
+    lines = [line for line in shown.split("\n") if line.strip().startswith("Notify")]
+    assert len(lines) == 1, shown
+    return lines[0]
+
+
+def test_a_launch_notifies_the_authenticated_user_by_default(writable_tenant,
+                                                             session_dir):
+    """What the web UI does. The plugin sent notificationEmails=[] on every launch."""
+    planned = plan_run(writable_tenant, session_dir)
+    assert planned["ok"], planned
+    record = plans.load(session_dir, planned["plan_id"])
+    assert record.args["notification_emails"] == [SESSION_EMAIL]
+    assert SESSION_EMAIL in notify_line(session_dir, planned["plan_id"])
+    assert not [w for w in planned["warnings"] if "email" in w]
+
+
+def test_the_default_is_disclosed_in_the_text_that_gets_approved(writable_tenant,
+                                                                 session_dir):
+    """A default that causes mail to be sent has to be in what the person reads."""
+    planned = plan_run(writable_tenant, session_dir)
+    line = notify_line(session_dir, planned["plan_id"])
+    assert SESSION_EMAIL in line and "default" in line
+    assert line in planned["rendered"]
+
+
+def test_the_notified_address_reaches_the_launch_request(writable_tenant, session_dir):
+    planned = plan_run(writable_tenant, session_dir)
+    assert apply_from(writable_tenant, session_dir, planned)["ok"]
+    posted = [c for c in writable_tenant["router"].calls
+              if c.request.method == "POST" and c.request.url.path.endswith("/execution")]
+    assert json.loads(posted[-1].request.content)["notificationEmails"] == [SESSION_EMAIL]
+
+
+def test_an_explicit_address_is_used_as_given(writable_tenant, session_dir):
+    planned = plan_run(writable_tenant, session_dir,
+                       notification_emails=["ops@example.org"])
+    record = plans.load(session_dir, planned["plan_id"])
+    assert record.args["notification_emails"] == ["ops@example.org"]
+    assert "ops@example.org" in notify_line(session_dir, planned["plan_id"])
+    assert SESSION_EMAIL not in record.summary
+
+
+def test_an_explicit_empty_list_is_a_real_opt_out(writable_tenant, session_dir):
+    """`args.get(...) or []` could not tell "notify nobody" from silence."""
+    planned = plan_run(writable_tenant, session_dir, notification_emails=[])
+    record = plans.load(session_dir, planned["plan_id"])
+    assert record.args["notification_emails"] == []
+    line = notify_line(session_dir, planned["plan_id"])
+    assert "nobody" in line and "empty" in line
+
+
+def test_a_failed_email_lookup_warns_and_does_not_block_the_launch(writable_tenant,
+                                                                   session_dir):
+    """A notification address is not worth refusing a launch over, and no address is
+    invented in its place."""
+    import httpx
+    writable_tenant["router"].get(f"{API}/users/sminot").mock(
+        side_effect=httpx.ConnectError("users endpoint unreachable"))
+    planned = plan_run(writable_tenant, session_dir, notify_user=None)
+    assert planned["ok"], planned
+    record = plans.load(session_dir, planned["plan_id"])
+    assert record.args["notification_emails"] == []
+    assert "nobody" in notify_line(session_dir, planned["plan_id"])
+    assert any("Could not look up the email address" in w for w in planned["warnings"]), \
+        planned["warnings"]
+    assert apply_from(writable_tenant, session_dir, planned)["ok"]
+
+
+def test_an_account_with_no_email_on_record_notifies_nobody(writable_tenant,
+                                                            session_dir):
+    planned = plan_run(writable_tenant, session_dir, notify_user={"email": ""})
+    record = plans.load(session_dir, planned["plan_id"])
+    assert record.args["notification_emails"] == []
+    assert any("no email address on record" in w for w in planned["warnings"]), \
+        planned["warnings"]
+
+
+def test_a_profile_that_turned_analysis_notifications_off_is_not_opted_in(
+        writable_tenant, session_dir):
+    """The account's own preference, not something to default over."""
+    planned = plan_run(writable_tenant, session_dir,
+                       notify_user={"notifications": False})
+    record = plans.load(session_dir, planned["plan_id"])
+    assert record.args["notification_emails"] == []
+    assert "turned off" in notify_line(session_dir, planned["plan_id"])
+
+
+def test_a_resumed_run_notifies_the_authenticated_user_too(writable_tenant,
+                                                           session_dir):
+    """resume_analysis plans through run_analysis, so the default has to reach it."""
+    serve_user(writable_tenant)
+    planned = call(writable_tenant, session_dir, "plan", op="resume_analysis",
+                   args={"project_id": "proj_a", "resume_dataset_id": "ds_0000",
+                         "process": "proc_rnaseq",
+                         "source_dataset_ids": ["ds_0000"],
+                         "params": {"genome": "GRCh38"}})
+    assert planned["ok"], planned
+    record = plans.load(session_dir, planned["plan_id"])
+    assert record.args["notification_emails"] == [SESSION_EMAIL]
+    assert SESSION_EMAIL in notify_line(session_dir, planned["plan_id"])
 
 
 # --- apply executes exactly what was approved ---
@@ -418,3 +551,113 @@ def test_a_warnings_only_change_counts_as_stale(writable_tenant, session_dir,
     applied = apply_from(writable_tenant, session_dir, planned)
     assert applied["error"]["code"] == "PLAN_STALE"
     assert applied["error"]["detail"]["changed"] == "disclosure"
+
+
+# --- what an approval quotes has to be stable enough to survive a re-plan -----
+
+def _download_plan(tenant, session_dir, destination, free, monkeypatch):
+    from cirro_agent.worker import dataset_ops
+    monkeypatch.setattr(dataset_ops.shutil, "disk_usage",
+                        lambda _probe: type("DU", (), {"free": free})())
+    return call(tenant, session_dir, "plan", op="download_files",
+                args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                      "destination": str(destination)})
+
+
+def test_ordinary_disk_churn_does_not_change_the_download_disclosure(
+        writable_tenant, session_dir, tmp_path, monkeypatch):
+    """Free space is reported coarsely because apply re-plans and compares.
+
+    _same_disclosure counts any change to the summary or the warnings as new to
+    read, so an exact figure made every download plan PLAN_STALE after unrelated
+    disk activity: human_bytes prints one decimal, so 50 MB on a 500 GB volume
+    moved it.
+    """
+    from cirro_agent.worker import gated
+
+    # Chosen so the exact figure straddles a one-decimal boundary: 543.3 GB before
+    # the churn, 543.2 GB after it.
+    volume = 543_290_000_000
+    first = _download_plan(writable_tenant, session_dir, tmp_path,
+                           volume, monkeypatch)
+    assert first["ok"], first
+    churned = _download_plan(writable_tenant, session_dir, tmp_path,
+                             volume - 50_000_000, monkeypatch)
+    assert churned["ok"], churned
+
+    before = plans.load(session_dir, first["plan_id"])
+    after = plans.load(session_dir, churned["plan_id"])
+    assert gated._same_disclosure(before, after), (before.summary, after.summary)
+
+
+def test_the_download_approval_still_states_the_room_available(
+        writable_tenant, session_dir, tmp_path, monkeypatch):
+    """Coarse is not silent: the figure is in the summary, and a real change moves
+    it."""
+    from cirro_agent.worker import gated
+
+    roomy = _download_plan(writable_tenant, session_dir, tmp_path,
+                           543_210_000_000, monkeypatch)
+    assert "540.0 GB" in roomy["rendered"]
+    tight = _download_plan(writable_tenant, session_dir, tmp_path,
+                           2_000_000_000, monkeypatch)
+    assert "2.0 GB" in tight["rendered"]
+    assert not gated._same_disclosure(plans.load(session_dir, roomy["plan_id"]),
+                                      plans.load(session_dir, tight["plan_id"]))
+
+
+def test_the_notification_default_survives_a_re_plan(writable_tenant, session_dir):
+    """The default is resolved in the planner, so apply re-resolves it and compares.
+
+    A lookup whose rendered text or warnings moved between the two would make every
+    launch PLAN_STALE -- the shape that a coarse free-space figure was needed for on
+    the download path.
+    """
+    from cirro_agent.worker import gated
+
+    first = plan_run(writable_tenant, session_dir)
+    second = plan_run(writable_tenant, session_dir)
+    before, after = (plans.load(session_dir, first["plan_id"]),
+                     plans.load(session_dir, second["plan_id"]))
+    assert gated._same_disclosure(before, after), (before.summary, after.summary)
+    assert apply_from(writable_tenant, session_dir, first)["ok"]
+
+
+def test_a_changed_notification_address_counts_as_a_changed_disclosure(
+        writable_tenant, session_dir):
+    """Stable is not the same as unchecked: a different address is new to read."""
+    from cirro_agent.worker import gated
+
+    mine = plan_run(writable_tenant, session_dir)
+    theirs = plan_run(writable_tenant, session_dir,
+                      notify_user={"email": "someone.else@example.org"})
+    assert not gated._same_disclosure(plans.load(session_dir, mine["plan_id"]),
+                                      plans.load(session_dir, theirs["plan_id"]))
+
+
+def test_the_samplesheet_preview_is_a_budget_of_diff_lines(
+        writable_tenant, session_dir, monkeypatch):
+    """The cap is on diff lines, and the remainder is stated from the same constant.
+
+    It was named and documented as a character budget while slicing a list of lines,
+    so raising it to a plausible character value would have quoted thousands of lines
+    into an approval prompt; the remainder was hardcoded beside it.
+    """
+    from cirro_agent.worker import dataset_ops
+    contents = "".join(f"sample{i},r{i}_1.fastq.gz\n" for i in range(200))
+
+    quoted, remainder = {}, {}
+    for budget in (10, 20):
+        monkeypatch.setattr(dataset_ops, "DIFF_PREVIEW_LINES", budget)
+        planned = call(writable_tenant, session_dir, "plan", op="update_samplesheet",
+                       args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                             "contents": contents})
+        assert planned["ok"], planned
+        body = plans.load(session_dir, planned["plan_id"]).summary.split("\n")[2:]
+        tail = [line for line in body if "more diff lines" in line]
+        assert len(tail) == 1, body
+        quoted[budget] = [line for line in body if line not in tail]
+        remainder[budget] = int(tail[0].split()[1])
+
+    assert (len(quoted[10]), len(quoted[20])) == (10, 20)
+    assert remainder[10] - remainder[20] == 10

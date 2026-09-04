@@ -290,6 +290,69 @@ def test_a_retry_cannot_change_a_field_the_policy_pinned(tmp_path):
     assert "does not allow" in caught.value.message
 
 
+def _finished_attempt(session, root, tail, carried, failed_code):
+    """One more finished-and-failed attempt on `root`, recording the tail it re-ran."""
+    from cirro_agent import plans
+    again = plans.create(
+        session, op="chain", summary="s", username="u", risk="cirro_write",
+        args={"steps": tail, "retry": root.args["retry"], "root": root.plan_id,
+              "restarted_from": root.plan_id, "carried": carried})
+    plans.claim(session, again.plan_id, digest=again.digest, approved_summary="s",
+                username="u")
+    plans.finish(session, again, result={
+        "completed": [], "failed_at": {"step": len(carried) + 1, "code": failed_code}})
+    return again
+
+
+def _after_a_restart_at_run(tmp_path):
+    """A chain whose attempt 2 resumed at "run", leaving "configure" in no attempt's
+    recorded steps while still being a step the policy lets attempt 3 re-run."""
+    steps = _labelled_steps()
+    session, plan = _prior(
+        tmp_path, steps=steps,
+        completed=[{"step": 1, "label": "upload",
+                    "result": {"dataset_id": "ds_uploaded"}},
+                   {"step": 2, "label": "configure", "result": {}}])
+    _finished_attempt(session, plan, steps[2:],
+                      [{"dataset_id": "ds_uploaded"}, {}], "UPSTREAM_ERROR")
+    return session, plan, steps
+
+
+def test_a_second_restart_earlier_than_the_first_checks_every_re_run_step(tmp_path):
+    """The diff was taken against the previous attempt's steps alone, and any label
+    that attempt had not re-run was skipped. Restarting earlier than the last restart
+    puts those steps back in the tail, where `_replace_tail` accepts edited args for
+    them, so a substituted project_id or dataset_id was checked against nothing -- and
+    appeared in no approval text, the restart summary listing re-run steps by op and
+    label only."""
+    session, plan, steps = _after_a_restart_at_run(tmp_path)
+    substituted = [{**steps[1], "args": {**steps[1]["args"],
+                                         "process_id": "process-EVIL"}},
+                   dict(steps[2])]
+    with pytest.raises(errors.AgentError) as caught:
+        chain_ops.plan_chain(_reader_for(session), {
+            "restart_from": {"plan_id": plan.plan_id, "label": "configure"},
+            "steps": substituted})
+    assert caught.value.code == "INVALID_QUERY"
+    assert "process_id" in caught.value.message
+    assert "does not allow" in caught.value.message
+
+
+def test_a_step_no_attempt_re_ran_is_diffed_against_the_root_chain(tmp_path):
+    """The same step edited within the policy: rendered, rather than reported as
+    "Nothing differs from the last attempt.\""""
+    session, plan, steps = _after_a_restart_at_run(tmp_path)
+    edited = [{**steps[1], "args": {**steps[1]["args"],
+                                    "design_spec": "/work/spec-v3.md"}},
+              dict(steps[2])]
+    draft = chain_ops.plan_chain(_reader_for(session), {
+        "restart_from": {"plan_id": plan.plan_id, "label": "configure"},
+        "steps": edited})
+    assert "configure.design_spec" in draft.summary
+    assert "from  '/work/spec.md'" in draft.summary
+    assert "to    '/work/spec-v3.md'" in draft.summary
+
+
 def test_a_caller_supplied_attempt_number_is_ignored(tmp_path):
     """The count is derived from finished attempts; the caller's figure is not consulted."""
     session, plan = _prior(

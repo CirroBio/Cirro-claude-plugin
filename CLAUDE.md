@@ -84,8 +84,13 @@ configuration is impossible without them. `test_runtime_contract.py` fails if a 
 **Reads are split by verb, with one shared fetch layer.** `worker/reads.py` holds
 `Reader` -- the client, cache, cost accounting and name resolution -- plus the single
 implementation of each expensive fetch (`dataset_detail`, `dataset_manifest`,
-`dataset_tasks`, `process_detail`, `spec_shape`, `file_count`, `project_metrics`,
-`all_project_metrics`). The verbs live in `read_query` (query, get),
+`dataset_tasks`, `process_detail`, `process_revision`, `process_assets`, `spec_shape`,
+`file_count`, `project_metrics`, `all_project_metrics`, `portal_dataset`). The op
+families plan against this layer too, so "a fetch two verbs need" includes a verb and a
+planner: `process_revision` and `process_assets` are here because the read path and
+`plan_upload_process_config` had each grown their own copy, and the two had drifted to
+different slot counts -- so the approval understated what a revision would replace. The
+verbs live in `read_query` (query, get),
 `read_summaries` (summarize, task_logs), `read_listings` (list), `read_process`
 (process_params, process_config) and `read_chains` (chain_status, which reads plan
 records and the audit and touches no API); each imports from `reads` and nothing
@@ -153,7 +158,12 @@ because when both were called `folder` one of them was a footgun.
 `dependencies.<selector>.oneOf[].properties`, and `dependencies` keys are *selector field
 names*, not a nesting level. Any analysis that walks only `properties` will report live,
 correctly-mapped fields as dangling — this has already produced one wrong answer to a
-user. Use `formcheck.form_paths()`, which is the one implementation of that walk.
+user. Use `formcheck.iter_fields()`, which is the one implementation of that walk; it
+yields `(path, field)` pairs, covers every wrapper in `formcheck.WRAPPERS`
+(`dependencies`, `oneOf`, `allOf`, `anyOf`, `then`, `else`) and holds the
+selector-is-transparent rule in one place. `form_paths()` is its path-only view. There
+were two walks once, and they had already drifted apart over `then`/`else` -- which is
+how the wrong answer above got out.
 
 **Configuration assets may be authored, not only generated.** `assets_dir` is a
 first-class alternative to `design_spec` on `create_process` and

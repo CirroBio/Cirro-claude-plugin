@@ -1,10 +1,27 @@
-"""The four read verbs: query, get, summarize, describe.
+"""The shared core every read verb is built on -- no verb lives here.
+
+`Reader` holds what a read needs and nothing a verb decides: the authenticated
+client, the snapshot cache backing every listing, the cost accounting the envelope
+reports, and the name-to-id resolution a filter or a planner asks for
+(`resolve_project`, `resolve_process`, `resolve_named`, `pick`, `near_misses`).
+
+Beside it sits the single implementation of each expensive fetch -- `dataset_detail`,
+`dataset_manifest`, `dataset_tasks`, `process_detail`, `process_revision`,
+`process_assets`, `spec_shape`, `file_count`, `project_metrics`, `all_project_metrics`
+-- so that two verbs asking Cirro the same question pay for it once and shape the
+answer identically.
+
+The verbs themselves live in `read_query` (query, get), `read_summaries` (summarize,
+task_logs), `read_listings` (list), `read_process` (process_params, process_config)
+and `read_chains` (chain_status); each imports from here, and nothing imports them but
+`dispatch`. A fetch two callers need belongs here -- the op families plan against this
+layer as well, so "two callers" is not always two verbs; a verb does not.
 """
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
-from .. import errors, formcheck, query as Q
+from .. import errors, formcheck, formgen, query as Q
 from ..session import Session
 from ..cache import SnapshotCache, FRESH_DEFAULT, manifest_ttl
 from ..envelope import Cost
@@ -95,14 +112,14 @@ class Reader:
                   **scope) -> Tuple[list, bool]:
         hit = self.cache.get(kind, ttl_s=ttl_s, freshness=self.freshness, **scope)
         if hit is not None:
-            self.cost.snapshot(hit.key, hit.age_s, hit.ttl_s, hit.item_count, hit.fresh)
+            self.cost.snapshot(hit.label, hit.age_s, hit.ttl_s, hit.item_count, hit.fresh)
             return hit.items, hit.meta.get("scan_complete", True)
         items, complete = loader()
         snap = self.cache.put(kind, items, meta={"scan_complete": complete},
                               ttl_s=ttl_s, **scope)
         # A miss: this came from the network. Recording it as fresh booked every cold
         # fetch as a cache hit, so fraction_from_cache always read 1.0.
-        self.cost.snapshot(snap.key, 0.0, snap.ttl_s, snap.item_count, fresh=False)
+        self.cost.snapshot(snap.label, 0.0, snap.ttl_s, snap.item_count, fresh=False)
         return items, complete
 
     # ---------------------------------------------------------------- fetchers
@@ -477,6 +494,88 @@ def process_detail(reader: Reader, process_id: str, base: dict) -> dict:
     return R.process_detail(detail, base)
 
 
+def process_revision(reader: Reader,
+                     process_id: str) -> Tuple[Optional[dict], Optional[dict]]:
+    """The configuration revision a process is serving now, from Cirro storage.
+
+    Three outcomes, and nothing may conflate them. `(revision, None)` is a revision;
+    `(None, None)` is a 404, which is the API's answer for a process with no
+    configuration in tenant storage, so there genuinely is none; `(None, failure)` is
+    anything else, meaning the current revision is *unknown*. Reporting an unknown
+    revision as "none" both understates what an upload would replace and sends the
+    write with no if_match, dropping the guard against overwriting a revision nobody
+    looked at. Only the caller knows what that costs it, so it phrases the refusal.
+
+    `failure` is {"reason", "status_code"}; the revision is projected to plain values.
+    """
+    from cirro_api_client.v1.api.processes import get_latest_process_revision
+    from cirro_api_client.v1.errors import NotFoundException
+    try:
+        response = get_latest_process_revision.sync_detailed(
+            process_id, client=reader.client._api_client)
+    except NotFoundException:
+        reader.cost.call("processes.latest_revision")
+        return None, None
+    except Exception as exc:
+        reader.cost.call("processes.latest_revision")
+        return None, {"reason": str(exc) or exc.__class__.__name__,
+                      "status_code": None}
+    reader.cost.call("processes.latest_revision")
+    if response.status_code >= 400:
+        return None, {"reason": f"HTTP {response.status_code}",
+                      "status_code": response.status_code}
+    number = R.plain(getattr(response.parsed, "revision_number", None))
+    return {
+        "number": number,
+        "committed_at": R.plain(getattr(response.parsed, "created_at", None)),
+        "commit_message": R.plain(getattr(response.parsed, "commit_message", None)),
+        # The token an update sends as if_match is the revision number as a string,
+        # not the per-slot content hash.
+        "token": str(number) if number is not None else None,
+    }, None
+
+
+def process_assets(reader: Reader, process_id: str,
+                   slots: Optional[list] = None) -> Tuple[dict, dict]:
+    """The configuration assets Cirro is serving now, by slot.
+
+    Returns `({slot: content}, {slot: failure})`. A 404 means the slot holds nothing,
+    which is ordinary -- most processes have no preprocess.py -- and that slot appears
+    in neither map. Any other failure leaves the slot's content unknown and puts it in
+    the second map, because an unknown slot silently reported as empty lets a caller
+    call the asset New and understate what an upload replaces.
+
+    The default slot list is the whole `formgen.CONFIG_SLOTS` vocabulary: a caller
+    iterating a narrower one sees less than Cirro holds.
+    """
+    from cirro_api_client.v1.api.processes import get_process_resource
+    from cirro_api_client.v1.errors import NotFoundException
+    from cirro_api_client.v1.models import ProcessResource
+    content: dict = {}
+    unreadable: dict = {}
+    for slot in (slots or formgen.CONFIG_SLOTS):
+        try:
+            response = get_process_resource.sync_detailed(
+                process_id, ProcessResource(slot), client=reader.client._api_client)
+        except NotFoundException:
+            reader.cost.call("processes.get_resource")
+            continue
+        except Exception as exc:
+            reader.cost.call("processes.get_resource")
+            unreadable[slot] = {"reason": str(exc) or exc.__class__.__name__,
+                                "status_code": None}
+            continue
+        reader.cost.call("processes.get_resource")
+        if response.status_code >= 400:
+            unreadable[slot] = {"reason": f"HTTP {response.status_code}",
+                                "status_code": response.status_code}
+            continue
+        text = R.plain(getattr(response.parsed, "content", None))
+        if text:
+            content[slot] = text
+    return content, unreadable
+
+
 def spec_shape(reader: Reader, process_id: Optional[str]) -> Tuple[dict, Optional[list],
                                                                    Optional[list]]:
     if not process_id:
@@ -486,21 +585,22 @@ def spec_shape(reader: Reader, process_id: Optional[str]) -> Tuple[dict, Optiona
         reader.cost.call("processes.parameter_spec")
     except Exception:
         return {}, None, None
-    raw = getattr(spec, "form_spec_json", None)
-    # The SDK hands the spec back as a generated model, not a dict, and the document
-    # itself is the {form, ui} pair Cirro stores -- the schema is the `form` half.
-    # Neither was unwrapped before, so every parameter read as undeclared and
-    # run_analysis warned "usually a typo" on all of them.
-    form = raw.to_dict() if hasattr(raw, "to_dict") else raw
-    if isinstance(form, dict) and isinstance(form.get("form"), dict):
-        form = form["form"]
+    # `get_parameter_spec` returns the hand-written ParameterSpecification, whose
+    # `form_spec_json` is `form_schema.form.additional_properties` -- already the
+    # JSONSchema, with `properties` at its root. It is a plain dict, never a generated
+    # model, and never the {form, ui} pair. Note this is the OPPOSITE shape from
+    # `metadata.get_project_schema`, which does hand back the whole FormSchema; the two
+    # look alike and are not, so `declared_schema_keys` exists separately for that one.
+    # Unwrapping a `form` key here would descend into any parameter that happens to be
+    # named `form` and analyse the wrong subtree.
+    form = getattr(spec, "form_spec_json", None)
     if not isinstance(form, dict):
         return {}, None, None
-    # formcheck owns the one correct walk over a form: conditional fields live inside
-    # dependencies.<selector>.oneOf[].properties, and walking `properties` alone
-    # reported every conditional parameter as undeclared.
+    # formcheck.iter_fields is the one correct walk over a form: conditional fields
+    # live inside dependencies.<selector>.oneOf[] and then/else, and walking
+    # `properties` alone reported every conditional parameter as undeclared.
     defaults, declared = {}, []
-    for path, field in formcheck._iter_fields(form):
+    for path, field in formcheck.iter_fields(form):
         if isinstance(field, dict) and field.get("type") == "object" \
                 and "properties" in field:
             continue
@@ -513,10 +613,52 @@ def spec_shape(reader: Reader, process_id: Optional[str]) -> Tuple[dict, Optiona
     return defaults, declared, required
 
 
+def project_schema_document(reader: Reader, project_id: str) -> Optional[dict]:
+    """A project's metadata schema as a plain document, or None if it is not one.
+
+    Exceptions propagate: a summary treats an unreadable schema as "no opinion", while
+    a gated schema replacement has to treat it as an unknown baseline and say so, so
+    the two callers cannot share one answer to a failed fetch.
+    """
+    current = reader.client.metadata.get_project_schema(project_id=project_id)
+    reader.cost.call("metadata.schema")
+    document = current.to_dict() if hasattr(current, "to_dict") else current
+    return document if isinstance(document, dict) else None
+
+
+def declared_schema_keys(document: Optional[dict]) -> Optional[list]:
+    """Every metadata key a FormSchema document declares, or None if it declares them
+    in no shape this recognises.
+
+    `metadata.get_project_schema` returns the generated FormSchema, whose fields are
+    form / ui / metadataRequirements -- there is NO `form_spec_json` on it, and reading
+    that absent attribute is what made a schema replacement render "keys removed []"
+    while dropping keys, and made every observed metadata key report as drift. Any
+    unrecognised top-level key stays in additional_properties, so the bare JSONSchema
+    the update operation itself sends round-trips at the document root.
+
+    Which half a tenant populates is not fixed, so both are read and the union
+    reported: an approval that must not understate a removal has to treat a key seen
+    anywhere as one that could be dropped. Callers distinguish an empty document (which
+    declares nothing) from an unrecognised one (which is unknown) themselves.
+    """
+    if not isinstance(document, dict):
+        return None
+    found, keys = False, []
+    for block in (document.get("form"), document.get("metadataRequirements"), document):
+        props = block.get("properties") if isinstance(block, dict) else None
+        if isinstance(props, dict):
+            found = True
+            keys.extend(key for key in props if key not in keys)
+    return sorted(keys) if found else None
+
+
 def portal_dataset(reader: Reader, project_id: str, dataset_id: str):
     """The SDK's DataPortalDataset for one dataset, with the detail fetch booked.
 
-    Three call sites built this by hand and one of them forgot the cost call.
+    Call sites kept building this by hand and one of them forgot the cost call; a
+    fourth hand-built copy had grown back in `plan_update_samplesheet` by the time
+    anyone looked. Three callers now, all through here.
     """
     from cirro.sdk.dataset import DataPortalDataset
     detail = reader.client.datasets.get(project_id=project_id, dataset_id=dataset_id)

@@ -48,6 +48,20 @@ APPLYING = "applying"
 DONE = "done"
 FAILED = "failed"
 
+# A plan that was claimed and ran to a conclusion, either way.
+FINISHED = (DONE, FAILED)
+
+# Why a stored plan is not applicable. Both enforcement points -- the PreToolUse gate
+# and claim() below -- reach a verdict with `preflight`, on their own reading of the
+# plan file, and each phrases its own refusal in its own terms. Sharing the predicate
+# means one definition of "applicable"; sharing no authority means two refusals that
+# do not depend on each other, so neither can be talked out of its answer by the other
+# having already said yes.
+NOT_PENDING = "not_pending"
+EXPIRED = "expired"
+DIGEST_TAMPERED = "digest_tampered"
+DIGEST_MISMATCH = "digest_mismatch"
+
 
 def canonical_digest(record: dict) -> str:
     """Hash every field the approval depends on.
@@ -62,6 +76,47 @@ def canonical_digest(record: dict) -> str:
     payload = json.dumps({k: record.get(k) for k in DIGEST_FIELDS},
                          sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _expires_at(record: dict) -> float:
+    """The stored expiry, or zero if it cannot be read as a time.
+
+    An unreadable expiry counts as expired. The clock cannot vouch for it, and only an
+    edited file has one -- which the digest check refuses a moment later anyway.
+    """
+    try:
+        return float(record.get("expires_at"))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def preflight(record: dict, *, supplied_digest: Optional[str] = None) -> Optional[str]:
+    """Why this stored plan may not be applied, or None if it may.
+
+    Checked in this order because the cheapest and most conclusive answers come first:
+    a plan that already ran cannot run again whatever its digest says.
+
+    There is no grace on the expiry. Both callers read the same `time.time()` on the
+    same machine, and the gate always reads it before the worker does, so slack could
+    only ever admit a plan the worker will then refuse -- asking a person to approve
+    something that cannot execute, which is the one thing an approval prompt must
+    never do.
+
+    Agreement with `supplied_digest` is only checked when one was offered; whether a
+    caller is obliged to offer one belongs to that caller's own contract, not to
+    whether the plan on disk is applicable.
+    """
+    if record.get("status") != PENDING:
+        return NOT_PENDING
+    if time.time() > _expires_at(record):
+        return EXPIRED
+    # Recomputed from the stored record, so an edit that leaves the digest field alone
+    # is still caught. Comparing only the caller's digest to the stored one would pass.
+    if canonical_digest(record) != record.get("digest"):
+        return DIGEST_TAMPERED
+    if supplied_digest and supplied_digest != record.get("digest"):
+        return DIGEST_MISMATCH
+    return None
 
 
 @dataclass
@@ -83,10 +138,6 @@ class Plan:
     risk: str = "cirro_write"
     warnings: list = field(default_factory=list)
     invalidates: list = field(default_factory=list)
-
-    @property
-    def expired(self) -> bool:
-        return time.time() > self.expires_at
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -170,43 +221,56 @@ def _save(session: Session, plan: Plan) -> None:
                   json.dumps(plan.to_dict(), indent=2, default=str))
 
 
+def _not_applicable(plan_id: str, plan: Plan, reason: str) -> errors.PlanInvalid:
+    """This layer's wording for a shared `preflight` verdict.
+
+    The predicate is one definition; the phrasing and the error type are not. The gate
+    writes plain text to a terminal and refuses on its own reading of the same file.
+    """
+    again = [{"tool": "plan", "op": plan.op}]
+    if reason == NOT_PENDING:
+        return errors.PlanInvalid(
+            f"Plan {plan_id} is {plan.status}, not pending. A plan authorizes exactly "
+            "one mutation.",
+            what="Create a new plan for another attempt.",
+            retry_with=again,
+            status=plan.status,
+        )
+    if reason == EXPIRED:
+        return errors.PlanInvalid(
+            f"Plan {plan_id} expired at "
+            f"{time.strftime('%H:%M:%SZ', time.gmtime(plan.expires_at))}.",
+            what="Approval does not carry over; re-plan so the human sees current figures.",
+            retry_with=again,
+        )
+    if reason == DIGEST_TAMPERED:
+        return errors.PlanInvalid(
+            f"Plan {plan_id} does not match its own digest; it was modified after it "
+            "was created.",
+            what="Discard it and plan again.",
+            retry_with=again,
+        )
+    return errors.PlanInvalid(
+        "The supplied digest does not match the stored plan.",
+        what="Re-read the plan and use its digest verbatim.",
+        retry_with=again,
+    )
+
+
 def claim(session: Session, plan_id: str, *, digest: str, approved_summary: str,
           username: Optional[str]) -> Plan:
     """Transition pending -> applying, atomically, or refuse with a reason."""
     plan = load(session, plan_id)
 
-    if plan.status != PENDING:
-        raise errors.PlanInvalid(
-            f"Plan {plan_id} is {plan.status}, not pending. A plan authorizes exactly "
-            "one mutation.",
-            what="Create a new plan for another attempt.",
-            retry_with=[{"tool": "plan", "op": plan.op}],
-            status=plan.status,
-        )
-    if plan.expired:
-        raise errors.PlanInvalid(
-            f"Plan {plan_id} expired at "
-            f"{time.strftime('%H:%M:%SZ', time.gmtime(plan.expires_at))}.",
-            what="Approval does not carry over; re-plan so the human sees current figures.",
-            retry_with=[{"tool": "plan", "op": plan.op}],
-        )
-    # Integrity of the stored record, not just agreement with the caller: recompute
-    # the digest from what is on disk. Comparing the caller's digest to the stored one
-    # would pass even if the args had been edited afterwards, since an editor can leave
-    # the digest field untouched.
-    if canonical_digest(plan.to_dict()) != plan.digest:
-        raise errors.PlanInvalid(
-            f"Plan {plan_id} does not match its own digest; it was modified after it "
-            "was created.",
-            what="Discard it and plan again.",
-            retry_with=[{"tool": "plan", "op": plan.op}],
-        )
-    if digest != plan.digest:
-        raise errors.PlanInvalid(
-            "The supplied digest does not match the stored plan.",
-            what="Re-read the plan and use its digest verbatim.",
-            retry_with=[{"tool": "plan", "op": plan.op}],
-        )
+    refusal = preflight(plan.to_dict(), supplied_digest=digest)
+    # claim takes the digest as a required argument, so an absent one is a caller that
+    # cannot have read the plan -- a mismatch here, rather than the gate's "nothing was
+    # offered to compare".
+    if refusal is None and not digest:
+        refusal = DIGEST_MISMATCH
+    if refusal is not None:
+        raise _not_applicable(plan_id, plan, refusal)
+
     if plan.base_url != session.base_url or plan.session_dir != str(session.path.resolve()):
         raise errors.TenantMismatch(
             f"Plan {plan_id} was made for {plan.base_url} in {plan.session_dir}, but this "
@@ -316,6 +380,56 @@ def outcomes(session: Session, plan: Plan) -> dict:
     return found
 
 
+def chain_plans(session: Session) -> list:
+    """Every chain plan this folder holds, in plan-id order.
+
+    One file walk for both readers of a lineage. A neighbouring plan that will not load
+    is skipped rather than failing the walk: a damaged file belongs to whoever asks for
+    it by name, and asking for it by name still refuses.
+    """
+    found = []
+    for path in sorted((session.path / "plans").glob("plan_*.json")):
+        try:
+            plan = load(session, path.stem)
+        except errors.AgentError:
+            continue
+        if plan.op == "chain":
+            found.append(plan)
+    return found
+
+
+def attempts_of(root: Plan, candidates: list, *, finished_only: bool) -> list:
+    """The root's attempts, oldest first, from an already-walked set of chain plans.
+
+    The root leads: a retry can only name a root that already exists, so the root is
+    always the oldest, and only the retries need ordering among themselves.
+
+    `finished_only` is the difference between the two callers and it is not cosmetic.
+    A restart is a diff against something a person approved and applied, so it counts
+    only claimed-and-finished attempts; chain_status reports what the folder holds, a
+    pending attempt included, because that is the question it was asked.
+    """
+    retries = [plan for plan in candidates
+               if plan.plan_id != root.plan_id
+               and plan.args.get("root") == root.plan_id
+               and (not finished_only or plan.status in FINISHED)]
+    return [root] + sorted(retries, key=lambda plan: plan.created_at)
+
+
+def lineage(session: Session, plan_id: str, *, finished_only: bool) -> tuple:
+    """The root chain plan named plan_id descends from, and its attempts.
+
+    Every restart plan records its root, so any plan in a lineage identifies the whole
+    of it. The root is loaded by name rather than picked out of the walk, so a lineage
+    whose root has gone missing refuses instead of quietly re-rooting itself on a
+    retry -- a restart planned against the wrong root reuses the wrong outputs.
+    """
+    given = load(session, plan_id)
+    root_id = given.args.get("root") or given.plan_id
+    root = given if root_id == given.plan_id else load(session, root_id)
+    return root, attempts_of(root, chain_plans(session), finished_only=finished_only)
+
+
 def record(session: Session, plan: Plan, *, phase: str, result: Any = None,
            error: Optional[str] = None) -> None:
     """Append-only audit log. Written before the mutation and after it."""
@@ -337,14 +451,36 @@ def record(session: Session, plan: Plan, *, phase: str, result: Any = None,
         stream.write(json.dumps(entry, default=str) + "\n")
 
 
-def render(plan: dict) -> str:
-    """The text a human approves. Tenant and identity on line one, always."""
-    lines = [
-        f"Cirro {plan['base_url']} as {plan.get('username') or 'unknown user'}",
-        f"Operation: {plan['op']}  (risk: {plan.get('risk', 'cirro_write')})",
-        "",
-        plan["summary"].rstrip(),
+def approval_header(plan: dict) -> list:
+    """Tenant and identity on line one, operation and risk on line two, always.
+
+    Shared with the PreToolUse gate, which renders the same two lines from the same
+    stored record: this is the text a person actually reads before approving, and two
+    copies of it could disagree about which tenant or which operation they described.
+    Both are also inside the digest, so the bytes here are load-bearing -- changing
+    one of them stales every plan already on disk.
+    """
+    return [
+        f"Cirro {plan.get('base_url')} as {plan.get('username') or 'unknown user'}",
+        f"Operation: {plan.get('op')}  (risk: {plan.get('risk') or 'cirro_write'})",
     ]
-    if plan.get("warnings"):
-        lines += ["", "Warnings:"] + [f"  - {w}" for w in plan["warnings"]]
+
+
+def approval_warnings(plan: dict) -> list:
+    """The warnings block, or nothing at all when there are none.
+
+    The block only; each caller places its own blank lines around it.
+    """
+    warnings = plan.get("warnings")
+    if not isinstance(warnings, (list, tuple)) or not warnings:
+        return []
+    return ["Warnings:"] + [f"  - {warning}" for warning in warnings]
+
+
+def render(plan: dict) -> str:
+    """The text a human approves."""
+    lines = approval_header(plan) + ["", plan["summary"].rstrip()]
+    warnings = approval_warnings(plan)
+    if warnings:
+        lines += [""] + warnings
     return "\n".join(lines)

@@ -166,6 +166,12 @@ A few things worth knowing:
   preserving it. You can also name the folder when you upload data or launch an
   analysis, so filing happens as part of that change rather than as a second one to
   approve.
+- **A launch emails you when it finishes**, as it does when you start one in the web
+  UI. `run_analysis` and `resume_analysis` default the notification address to the
+  account the session is signed in as, and the plan names that address before you
+  approve it. Pass `notification_emails` to notify someone else, or an empty list to
+  notify nobody. If your address cannot be looked up the plan says so and notifies
+  nobody, rather than holding up the launch.
 - **Some things are deliberately not offered** — renaming or re-billing a project,
   editing a live share's conditions, billing changes. Those belong in the Cirro web UI
   where their effects are visible.

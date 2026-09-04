@@ -6,6 +6,7 @@ configuration looks like, not what seemed reasonable.
 """
 import json
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -84,6 +85,19 @@ def test_a_managed_parameter_is_not_a_form_field(form, input_map):
     assert input_map["outdir"] == "$.dataset.dataPath"
 
 
+def test_an_unknown_managed_role_names_the_field_and_the_valid_roles():
+    """A KeyError here surfaced as UPSTREAM_ERROR advising a retry that cannot help."""
+    spec = json.loads(json.dumps(SPEC))
+    spec["cirro"]["managed_parameters"][0]["role"] = "scratch"
+    with pytest.raises(errors.AgentError) as caught:
+        formgen.build_input_map(spec)
+    assert caught.value.code == "INVALID_QUERY"
+    assert caught.value.field == "cirro.managed_parameters"
+    assert caught.value.given == "scratch"
+    assert caught.value.candidates == ["output_directory"]
+    assert caught.value.user_action
+
+
 def test_secondary_file_inputs_become_pickers(form):
     inputs = form["form"]["properties"]["input"]["properties"]
     assert inputs["ref"]["pathType"] == "references", "a genome is reference data"
@@ -126,6 +140,34 @@ def test_a_when_predicate_becomes_a_conditional_field():
     assert "snp_model" in branch
     # It still reads back under its group, so the mapping is unchanged.
     assert "$.dataset.params.workflow.snp_model" in formcheck.form_paths(form)
+
+
+def test_two_conditional_values_on_one_selector_match_exactly_one_branch():
+    """Splicing a positive/negative pair in per value made `oneOf` match twice.
+
+    The second value's positive branch was prepended but the first value's negative
+    branch kept its enum, so selecting the second value satisfied both and the form
+    failed oneOf validation. formcheck does not detect the overlap.
+    """
+    spec = json.loads(json.dumps(SPEC))
+    spec["parameters"] += [
+        {"name": "mode", "type": "enum", "group": "workflow", "required": False,
+         "default": "image", "choices": ["image", "text", "audio"],
+         "description": "Input kind"},
+        {"name": "dpi", "type": "integer", "group": "workflow", "required": False,
+         "when": "mode == image", "description": "Raster density"},
+        {"name": "font", "type": "string", "group": "workflow", "required": False,
+         "when": "mode == text", "description": "Font family"},
+    ]
+    form = json.loads(formgen.generate(spec)[formgen.FORM])
+    branches = form["form"]["properties"]["workflow"]["dependencies"]["mode"]["oneOf"]
+    for value in ("image", "text", "audio"):
+        matched = [b for b in branches if value in b["properties"]["mode"]["enum"]]
+        assert len(matched) == 1, f"{value} satisfies {len(matched)} branches"
+    revealed = {value: sorted(set(b["properties"]) - {"mode"})
+                for value in ("image", "text", "audio")
+                for b in branches if value in b["properties"]["mode"]["enum"]}
+    assert revealed == {"image": ["dpi"], "text": ["font"], "audio": []}
 
 
 def test_an_unparseable_when_leaves_the_field_visible():
@@ -350,6 +392,46 @@ def test_registering_over_an_existing_id_is_refused(tmp_path):
     assert "already exists" in caught.value.message
 
 
+def test_a_spec_without_a_workflow_version_is_refused(tmp_path):
+    """`str(workflow.get("version"))` registered a pipeline pinned to the ref "None".
+
+    version is required on PipelineCode, so there is nothing to omit: the spec has to
+    name a ref, and the approval must never render one that resolves to nothing.
+    """
+    spec = json.loads(json.dumps(SPEC))
+    del spec["workflow"]["version"]
+    reader = MagicMock()
+    reader.processes.return_value = []
+    reader.base_url = "app.cirro.test"
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops.plan_create_process(reader, {
+            "design_spec": _write_spec(tmp_path, spec), "config_source": "STORAGE"})
+    assert caught.value.code == "INVALID_QUERY"
+    assert "version" in caught.value.message
+    assert caught.value.field == "design_spec"
+
+
+def test_a_new_config_repository_type_reaches_the_approved_diff(monkeypatch):
+    """apply read it out of `changes`, but the planner never put it there.
+
+    So the one field the update path exists to protect could not be changed, and the
+    change was absent from the diff the person approved.
+    """
+    monkeypatch.setattr(pipeline_ops, "_owned_process", lambda _r, _p: {
+        "name": "Demo", "id": "p1", "config_source": pipeline_ops.EXTERNAL,
+        "pipeline_code": {"repository_path": "org/wf", "version": "v1",
+                          "entry_point": "main.nf",
+                          "repository_type": "GITHUB_PUBLIC"},
+        "custom_settings": {"repository": "Org/configs", "branch": "main",
+                            "folder": ".cirro",
+                            "repository_type": "GITHUB_PUBLIC"}})
+    draft = pipeline_ops.plan_update_process(
+        MagicMock(), {"process_id": "p1", "config_repository_type": "GITHUB_PRIVATE"})
+    assert draft.args["changes"]["config_repository_type"] == "GITHUB_PRIVATE"
+    assert "GITHUB_PRIVATE" in draft.summary
+    assert "GITHUB_PUBLIC" in draft.summary, "the diff names what it changes from"
+
+
 def test_a_spec_without_frontmatter_is_refused(tmp_path):
     path = tmp_path / "design-spec.md"
     path.write_text("# just prose\n")
@@ -422,6 +504,153 @@ def test_commit_never_pushes():
     assert '"push"' not in source and "'push'" not in source
 
 
+# --- the revision the upload would replace -----------------------------------
+
+REVISION_API = ("cirro_api_client.v1.api.processes.get_latest_process_revision"
+                ".sync_detailed")
+RESOURCE_API = ("cirro_api_client.v1.api.processes.get_process_resource"
+                ".sync_detailed")
+
+
+class _Response:
+    """A generated-client Response double: a status code and a parsed body."""
+
+    def __init__(self, status_code=200, **parsed):
+        self.status_code = status_code
+        self.parsed = SimpleNamespace(**parsed) if parsed else None
+
+
+def _not_found(*_args, **_kwargs):
+    """What the generated client raises for a 404 -- and 404 is how the revision
+    endpoint answers for a process with no configuration in tenant storage."""
+    from cirro_api_client.v1.errors import NotFoundException
+    raise NotFoundException({"statusCode": 404, "errorCode": "NOT_FOUND",
+                             "errorDetail": "no configuration in storage",
+                             "errors": []})
+
+
+def _field(summary: str, label: str) -> str:
+    """The value on one aligned `  Label   value` line of an approval summary."""
+    for line in summary.splitlines():
+        if line.strip().startswith(label):
+            return line.strip()[len(label):].strip()
+    raise AssertionError(f"no {label!r} line in:\n{summary}")
+
+
+@pytest.fixture
+def storage_process(monkeypatch):
+    """A STORAGE process this user owns, so planning reaches the revision read."""
+    monkeypatch.setattr(pipeline_ops, "_owned_process",
+                        lambda _r, _p: {"name": "Demo", "id": "p1",
+                                        "config_source": pipeline_ops.STORAGE})
+    reader = MagicMock()
+    reader.base_url = "app.cirro.test"
+    return reader
+
+
+@pytest.fixture
+def first_upload(monkeypatch):
+    """Nothing in storage yet: both revision and resource endpoints answer 404."""
+    monkeypatch.setattr(REVISION_API, _not_found)
+    monkeypatch.setattr(RESOURCE_API, _not_found)
+
+
+def test_an_unreadable_revision_is_refused_not_called_a_first_upload(
+        tmp_path, monkeypatch, storage_process):
+    """One `except Exception` covered the revision read, so a transient failure was
+    indistinguishable from having no revision at all: the approval said "none -- this
+    would be the first", reported every asset as New, suppressed the no-op warning,
+    and left if_match None so the write went up UNSET. The optimistic-concurrency
+    guard was silently dropped and a live revision overwritten unseen."""
+    def unavailable(*_a, **_k):
+        raise ConnectionError("connection reset by peer")
+    monkeypatch.setattr(REVISION_API, unavailable)
+
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops.plan_upload_process_config(
+            storage_process, {"process_id": "p1",
+                              "design_spec": _write_spec(tmp_path)})
+    assert caught.value.code == "UPSTREAM_ERROR"
+    assert "connection reset by peer" in caught.value.message
+    assert caught.value.retry_with
+
+
+def test_no_revision_at_all_is_still_reported_as_the_first_upload(
+        tmp_path, storage_process, first_upload):
+    """The other half of the distinction: a 404 really does mean nothing is there."""
+    draft = pipeline_ops.plan_upload_process_config(
+        storage_process, {"process_id": "p1", "design_spec": _write_spec(tmp_path)})
+    assert draft.args["if_match"] is None
+    assert _field(draft.summary, "Current revision") == "none — this would be the first"
+    assert "process-form.json" in _field(draft.summary, "New")
+
+
+def test_an_unreadable_live_slot_keeps_the_revision_guard(tmp_path, monkeypatch,
+                                                          storage_process):
+    """A failure reading the live slots must not throw away a token already obtained.
+
+    Nor may an unread slot be listed as New: that understates what the upload
+    replaces, which is the one thing this approval cannot get wrong.
+    """
+    monkeypatch.setattr(REVISION_API, lambda *_a, **_k: _Response(revision_number=4))
+    monkeypatch.setattr(RESOURCE_API, lambda *_a, **_k: _Response(status_code=500))
+
+    draft = pipeline_ops.plan_upload_process_config(
+        storage_process, {"process_id": "p1", "design_spec": _write_spec(tmp_path)})
+
+    assert draft.args["if_match"] == "4", "the guard was obtained; it must still be sent"
+    assert _field(draft.summary, "Current revision") == "4"
+    assert _field(draft.summary, "New").startswith("unknown")
+    assert _field(draft.summary, "Changed").startswith("unknown")
+    assert any("cannot say which slots" in w for w in draft.warnings)
+    assert not any("no-op" in w for w in draft.warnings), \
+        "a comparison that did not happen cannot conclude nothing changed"
+
+
+# --- one slot vocabulary, shared by the read and the write -------------------
+
+def test_the_slot_vocabulary_is_the_sdk_enum_minus_its_fallback():
+    """The vocabulary is a mirror of a generated enum, so it is checked, not trusted.
+
+    `ProcessResource._missing_` maps an unrecognized value onto UNKNOWN instead of
+    raising, so a slot name that has drifted from the enum would go out on the wire as
+    UNKNOWN rather than failing loudly here.
+    """
+    from cirro_api_client.v1.models import ProcessResource
+    declared = tuple(sorted(m.value for m in ProcessResource
+                            if m is not ProcessResource.UNKNOWN))
+    assert formgen.CONFIG_SLOTS == declared
+    assert set(formgen.JSON_SLOTS) <= set(formgen.CONFIG_SLOTS)
+
+
+def test_the_filename_map_covers_every_slot_but_metadata():
+    """`SLOTS` is derived from the vocabulary, so it cannot name a slot that is not in
+    it -- the drift this replaces had `metadata` in one list and not the other."""
+    assert set(formgen.SLOTS.values()) <= set(formgen.CONFIG_SLOTS)
+    assert set(formgen.CONFIG_SLOTS) - set(formgen.SLOTS.values()) == {"metadata"}
+
+
+def test_the_planner_sees_a_live_slot_no_asset_of_its_own_covers(
+        tmp_path, monkeypatch, storage_process):
+    """The planner read six slots while the read verb read seven, so a live `metadata`
+    slot was invisible to the approval: New and Changed named only what the upload
+    carries, and nothing said the revision holds a slot this upload does not."""
+    def only_metadata(_process_id, resource, **_kwargs):
+        if str(resource) == "metadata":
+            return _Response(content='{"kept": true}')
+        _not_found()
+
+    monkeypatch.setattr(REVISION_API, lambda *_a, **_k: _Response(revision_number=4))
+    monkeypatch.setattr(RESOURCE_API, only_metadata)
+
+    draft = pipeline_ops.plan_upload_process_config(
+        storage_process, {"process_id": "p1", "design_spec": _write_spec(tmp_path)})
+
+    assert _field(draft.summary, "Not uploaded") == "metadata (live now, no asset here)"
+    assert any("metadata" in w for w in draft.warnings)
+    assert "process-form.json" in _field(draft.summary, "New")
+
+
 # --- the user keeps a copy of what was uploaded ------------------------------
 
 def test_uploaded_configuration_is_staged_beside_the_design_spec(tmp_path):
@@ -445,7 +674,7 @@ def test_a_relative_stage_dir_lands_beside_the_spec_not_in_the_plugin(tmp_path):
     assert staged == tmp_path / "config"
 
 
-def test_the_plan_says_where_the_copy_will_land(tmp_path, monkeypatch):
+def test_the_plan_says_where_the_copy_will_land(tmp_path, monkeypatch, first_upload):
     reader = MagicMock()
     reader.base_url = "app.cirro.test"
     reader.username = "me@example.org"
@@ -526,7 +755,8 @@ def test_an_upload_that_also_writes_local_disk_says_so_in_the_approval():
     assert mutations.OPS["update_process"].risk == mutations.RISK_WRITE
 
 
-def test_the_plan_names_the_local_files_it_would_replace(tmp_path, monkeypatch):
+def test_the_plan_names_the_local_files_it_would_replace(tmp_path, monkeypatch,
+                                                         first_upload):
     """write_process_config already holds this standard; both paths now match."""
     spec = _write_spec(tmp_path)
     stale = tmp_path / pipeline_ops.STAGING_DIR
@@ -639,7 +869,8 @@ def test_unrecognized_files_in_the_folder_are_left_alone(tmp_path):
     assert "notes.md" not in assets and "old.json.bak" not in assets
 
 
-def test_upload_takes_authored_assets_instead_of_a_spec(tmp_path, monkeypatch):
+def test_upload_takes_authored_assets_instead_of_a_spec(tmp_path, monkeypatch,
+                                                        first_upload):
     directory = _authored(tmp_path, extra={"preprocess.py": "def x(): pass\n"})
     reader = MagicMock()
     reader.base_url = "app.cirro.test"

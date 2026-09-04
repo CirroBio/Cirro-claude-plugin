@@ -3,38 +3,75 @@
 
 Stdlib only and no virtualenv, so it stays fast enough to run on every Bash call.
 
-Three jobs:
+Two jobs:
   1. Deny routes that reach the Cirro SDK without going through the approval gate.
   2. On mcp__cirro__apply, read the plan file itself -- server truth, not the model's
      claim -- and surface it, refusing outright if the plan is not applicable.
-  3. Ask before writing a Python file that imports cirro, since that file could
-     later be executed outside the gate.
+
+It judges execution and never authoring: what a command runs is read from disk -- an
+interpreter's script argument, a module, a `source`d or piped file, a bare `./x.py` --
+and judged by what is in it. Writing such a file is not running it and does not prompt.
 
 Honest about its ceiling: this is string analysis of a shell command. It is
-defeated by base64, by writing a script and running it, or by an interpreter it
-does not know. It makes accidental bypass impossible and deliberate bypass
-conspicuous. It is not a sandbox. The real boundary is a `permissions.deny` rule
-in the user's own settings, which a plugin cannot ship -- see the README.
+defeated by a base64 payload, by an interpreter it does not know, and by any
+route to code it cannot see as text. It makes accidental bypass impossible and
+deliberate bypass conspicuous. It is not a sandbox. The real boundary is a
+`permissions.deny` rule in the user's own settings, which a plugin cannot ship --
+see the README.
 """
+# The hook is launched by its shebang, so it runs on whatever `python3` is first on
+# PATH -- on a stock macOS that is still 3.9. Without this, the `X | None` annotations
+# below are evaluated at definition time and raise TypeError, which Claude Code reports
+# as a hook *error* rather than a block: the gate would be silently inert and nothing
+# would be gated at all.
+from __future__ import annotations
+
 import json
 import os
 import re
 import shlex
 import sys
-from typing import NoReturn
 import time
 from pathlib import Path
+from typing import NoReturn
 
 # How much of one argument's value the approval prompt shows before eliding.
 ARG_PREVIEW_CHARS = 160
-MAX_PLAN_AGE_GRACE = 5  # seconds of clock slack when checking expiry
 
-# The digest contract is imported from the plugin's own plans module rather than
-# copied here. plans imports only stdlib (test_gate asserts it stays that way), so the
-# hook still runs with a bare system Python and no virtualenv -- and there is now one
-# definition of what a plan's integrity covers instead of two kept in step by a test.
+# The digest contract, the applicability rules, the two lines that head the approval
+# text, and the session resolver are imported from the plugin's own modules rather than
+# copied here. Both import only stdlib (test_gate asserts it stays that way), so the
+# hook still runs with a bare system Python and no virtualenv -- and there is one
+# definition of what a plan's integrity covers, one of when a plan may still be
+# applied, one of the text a person reads, and one of which folders may be resolved,
+# instead of copies kept in step by a test. The gate's own copy of the walk lacked both
+# safety rules: it would resolve the machine-wide ~/.cirro and would climb past the
+# project root. Its copy of the pre-flight checks had drifted too, allowing five
+# seconds past an expiry that the worker refuses.
+#
+# What is imported is the rule, never the answer: the gate reaches its own verdict from
+# its own reading of the plan file and refuses on it, and the worker does the same again
+# when apply runs. Neither defers to the other having said yes.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python" / "src"))
-from cirro_agent.plans import PLAN_ID_PATTERN, canonical_digest  # noqa: E402
+from cirro_agent.errors import NoSessionFolder  # noqa: E402
+from cirro_agent.plans import (DIGEST_MISMATCH, DIGEST_TAMPERED,  # noqa: E402
+                               EXPIRED, NOT_PENDING, PLAN_ID_PATTERN,
+                               approval_header, approval_warnings, preflight)
+from cirro_agent.session import find_session_dir  # noqa: E402
+
+# This layer's wording for each shared pre-flight verdict, for a human reading a
+# terminal. A verdict with no entry here raises, which the handler at the bottom turns
+# into a block: a refusal the gate cannot phrase is still a refusal.
+REFUSALS = {
+    NOT_PENDING: ("plan {plan_id} is '{status}', not pending. A plan authorizes exactly "
+                  "one change; create a new one."),
+    EXPIRED: ("plan {plan_id} has expired. Re-plan so the approval reflects current "
+              "figures."),
+    DIGEST_TAMPERED: ("plan {plan_id} does not match its own digest; it was modified "
+                      "after it was created."),
+    DIGEST_MISMATCH: ("the digest supplied for plan {plan_id} does not match the stored "
+                      "plan. The plan may have been altered."),
+}
 
 # Text that means a command is talking to the Cirro SDK.
 SDK_MARKERS = re.compile(
@@ -75,6 +112,12 @@ SHELLS = re.compile(r"^(?:sh|bash|zsh|dash|ksh|fish)$", re.I)
 WRAPPERS_WITH_ARG = {"timeout": 1, "nice": 2, "env": 0, "sudo": 0, "stdbuf": 1,
                      "ionice": 2, "setsid": 0, "nohup": 0, "time": 0}
 
+# Wrappers that hand straight through to the program named after them.
+BARE_WRAPPERS = ("command", "builtin", "exec", "xargs")
+
+# Sourcing runs the file in the current shell, so the argument is the executed code.
+SOURCING = (".", "source")
+
 # Runners that fetch and execute a package in one step, so the SDK never has to be
 # named in code for it to run: `uv run --with cirro ...`, `uvx cirro ...`.
 PACKAGE_RUNNERS = {"uv", "uvx", "pipx", "poetry", "conda", "hatch", "pdm"}
@@ -93,6 +136,23 @@ UPSTREAM_CLI_READ_ONLY = {"list-projects", "list-datasets", "list-files", "--hel
 AWS_DATA_MOVERS = {"cp", "sync", "mv", "rm", "rb"}
 
 SPLITTERS = re.compile(r"(?:\|\||&&|[;|&\n])")
+
+# A backslash before a newline continues one command onto the next line; it does not
+# separate two. Both splitters treat a bare newline as a separator, so without this a
+# continuation line beginning with a path is read as that path being EXECUTED --
+# `sed -i '' \<newline> -e 's/x/y/' \<newline> pkg/mod.py` blocked as though the .py
+# were the program. Over-blocking is not a safe direction here: it is what made this
+# repo unpleasant to work in with the plugin installed.
+CONTINUATION = re.compile(r"\\\n")
+
+# Everything but a pipe, so one pipeline stays whole and its stages can be related to
+# each other: the file an interpreter reads from stdin is named in another stage.
+PIPELINES = re.compile(r"(?:\|\||&&|[;&\n])")
+
+# shlex expands no parameter, and unlike `$(...)` there is no substitution pass for
+# one, so in `PY=python3; $PY drive.py` the program name stayed the literal `$PY`.
+ASSIGNMENT = re.compile(r"^([A-Za-z_]\w*)=(.*)$")
+PARAMETER = re.compile(r"^\$\{?([A-Za-z_]\w*)\}?$")
 
 # shlex does not expand these, so a substituted command never became a segment of its
 # own and its program name was never inspected.
@@ -132,6 +192,7 @@ def passthrough() -> NoReturn:
 
 def segments(command: str) -> list:
     """Split into independently-executed commands, including substituted ones."""
+    command = CONTINUATION.sub(" ", command)
     extra = [m.group(1) or m.group(2) for m in SUBSTITUTIONS.finditer(command)]
     flattened = SUBSTITUTIONS.sub(" ", command)
     parts = SPLITTERS.split(flattened) + extra
@@ -145,7 +206,83 @@ def tokens_of(segment: str) -> list:
         return segment.split()
 
 
-def executed_script(words: list, index: int, program: str) -> str | None:
+def assignments(command: str) -> dict:
+    """`VAR=value` bindings made anywhere in the command."""
+    found = {}
+    for segment in segments(command):
+        for token in tokens_of(segment):
+            match = ASSIGNMENT.match(token)
+            if match:
+                found[match.group(1)] = match.group(2)
+    return found
+
+
+def expand(words: list, values: dict) -> list:
+    """Substitute a whole-token `$VAR` from a binding in the same command."""
+    expanded = []
+    for word in words:
+        match = PARAMETER.match(word)
+        expanded.append(values.get(match.group(1), word) if match else word)
+    return expanded
+
+
+def program_index(words: list) -> int:
+    """Where the real program name starts, past env assignments and wrappers.
+
+    So `env FOO=1 python -c ...` and `timeout 5 python ...` are both seen. Skipping
+    only the wrapper name left it pointing at the wrapper's own argument, so
+    `timeout 5 python ...` resolved to "5" and matched nothing.
+    """
+    index = 0
+    while index < len(words):
+        token = words[index]
+        name = Path(token).name
+        if "=" in token and not token.startswith("-"):
+            index += 1
+            continue
+        if name in WRAPPERS_WITH_ARG or name in BARE_WRAPPERS:
+            index += 1
+            # Consume the wrapper's own options and their values.
+            budget = WRAPPERS_WITH_ARG.get(name, 0)
+            while index < len(words) and budget and words[index].startswith("-"):
+                index += 2 if budget > 1 else 1
+                budget = 0
+            if name == "timeout" and index < len(words) and \
+                    re.fullmatch(r"[\d.]+[smhd]?", words[index] or ""):
+                index += 1
+            continue
+        break
+    return index
+
+
+def module_file(arguments: list, cwd: str) -> str | None:
+    """The file `python -m pkg.mod` runs, when the module is one in the directory.
+
+    A module's file is the executed code and is named nowhere else in the command, so
+    without this `python3 -m sdkmod` said nothing about what it was about to run.
+    """
+    name = next((a for a in arguments if not a.startswith("-")), "")
+    if not name:
+        return None
+    stem = name.replace(".", "/")
+    root = Path(cwd or ".")
+    for candidate in (f"{stem}.py", f"{stem}/__main__.py"):
+        if (root / candidate).is_file():
+            return candidate
+    return None
+
+
+def redirected_file(arguments: list) -> str | None:
+    """The operand of a `< file` redirect, which is not a segment of its own."""
+    for offset, token in enumerate(arguments):
+        if token == "<":
+            return arguments[offset + 1] if offset + 1 < len(arguments) else None
+        if len(token) > 1 and token.startswith("<"):
+            return token[1:]
+    return None
+
+
+def executed_script(words: list, index: int, program: str, cwd: str = "") -> str | None:
     """The file this segment actually runs, if it runs one.
 
     Only the file that is executed -- never one that merely appears in the argument
@@ -154,13 +291,23 @@ def executed_script(words: list, index: int, program: str) -> str | None:
     """
     if words[index].endswith(SCRIPT_SUFFIXES):
         return words[index]
+    if program in SOURCING:
+        return next((a for a in words[index + 1:]
+                     if not a.startswith("-") and a.endswith(SCRIPT_SUFFIXES)), None)
     if not (INTERPRETERS.match(program) or SHELLS.match(program)):
         return None
-    for argument in words[index + 1:]:
-        # A module or an inline program: any path after it is that program's own
-        # argv, which is why `python -m pytest test_x.py` runs pytest, not test_x.
-        if argument in ("-m", "-c"):
+    arguments = words[index + 1:]
+    # A redirect is not part of the argument list; it only supplies the program when
+    # nothing on the command line already did.
+    cut = next((i for i, a in enumerate(arguments) if a.startswith("<")),
+               len(arguments))
+    for offset, argument in enumerate(arguments[:cut]):
+        # An inline program: any path after it is that program's own argv, which is
+        # why `python -m pytest test_x.py` runs pytest, not test_x.
+        if argument == "-c":
             return None
+        if argument == "-m":
+            return module_file(arguments[offset + 1:cut], cwd)
         if argument.startswith("-"):
             continue
         name = Path(argument).name
@@ -168,7 +315,7 @@ def executed_script(words: list, index: int, program: str) -> str | None:
                 or SHELLS.match(name):
             continue
         return argument if argument.endswith(SCRIPT_SUFFIXES) else None
-    return None
+    return redirected_file(arguments[cut:])
 
 
 def read_script(target: str, cwd: str) -> str | None:
@@ -184,6 +331,56 @@ def read_script(target: str, cwd: str) -> str | None:
         return None
 
 
+def judge_script(target: str, cwd: str, depth: int) -> None:
+    """Judge a file that is about to be executed by what is in it.
+
+    Executing a file that drives the SDK is the same act as `python -c` doing it
+    inline, so it gets the same answer. Editing that file is not, and no longer
+    prompts. A shell script is a command payload like any other, so it is judged by
+    every detector here rather than only by the SDK markers -- otherwise a one-line
+    run.sh calling the upstream CLI walks straight through.
+    """
+    body = read_script(target, cwd) if depth < MAX_NESTING else None
+    if body is None:
+        return
+    if target.endswith(SHELL_SUFFIXES):
+        inspect_bash(body, cwd, depth + 1)
+    elif SDK_MARKERS.search(body):
+        block(f"Blocked by the Cirro plugin: `{target}` drives the Cirro SDK, so "
+              "running it would bypass the approval gate on every create, update "
+              f"and delete.\n\n{USE_INSTEAD}")
+
+
+def takes_program_from_stdin(words: list, cwd: str) -> bool:
+    """An interpreter handed no program of its own reads one from stdin."""
+    index = program_index(words)
+    if index >= len(words):
+        return False
+    program = Path(words[index]).name
+    return (bool(INTERPRETERS.match(program))
+            and not any(a in ("-c", "-m") for a in words[index + 1:])
+            and executed_script(words, index, program, cwd) is None)
+
+
+def piped_scripts(command: str, values: dict, cwd: str) -> list:
+    """Scripts fed to an interpreter rather than named as its argument.
+
+    `cat drive.py | python3` and `echo drive.py | xargs python3` leave the
+    interpreter's own stage with no script argument at all, so the segment loop finds
+    nothing to read -- while the file named in another stage of the same pipeline is
+    the code that is about to run.
+    """
+    fed = []
+    for pipeline in PIPELINES.split(CONTINUATION.sub(" ", command)):
+        stages = [expand(tokens_of(s), values) for s in pipeline.split("|")]
+        if not any(takes_program_from_stdin(s, cwd) for s in stages):
+            continue
+        for words in stages:
+            if not takes_program_from_stdin(words, cwd):
+                fed += [w for w in words if w.endswith(SCRIPT_SUFFIXES)]
+    return fed
+
+
 def inspect_bash(command: str, cwd: str = "", depth: int = 0) -> None:
     # A heredoc puts the payload on later lines, which segment splitting separates
     # from the interpreter that consumes it. So an interpreter anywhere in a command
@@ -195,50 +392,23 @@ def inspect_bash(command: str, cwd: str = "", depth: int = 0) -> None:
               "or the machine-wide ~/.cirro. The plugin keeps credentials in a "
               "folder-local session and never exposes token material to the model.\n")
 
+    values = assignments(command)
+    for target in piped_scripts(command, values, cwd):
+        judge_script(target, cwd, depth)
+
     for segment in segments(command):
-        words = tokens_of(segment)
+        words = expand(tokens_of(segment), values)
         if not words:
             continue
-        # Skip wrappers so `env FOO=1 python -c ...` and `timeout 5 python ...` are
-        # both seen. Wrappers that consume an argument advance past it too.
-        index = 0
-        while index < len(words):
-            token = words[index]
-            name = Path(token).name
-            if "=" in token and not token.startswith("-"):
-                index += 1
-                continue
-            if name in WRAPPERS_WITH_ARG or name in ("command", "builtin", "exec",
-                                                     "xargs"):
-                index += 1
-                # Consume the wrapper's own options and their values.
-                budget = WRAPPERS_WITH_ARG.get(name, 0)
-                while index < len(words) and budget and words[index].startswith("-"):
-                    index += 2 if budget > 1 else 1
-                    budget = 0
-                if name == "timeout" and index < len(words) and \
-                        re.fullmatch(r"[\d.]+[smhd]?", words[index] or ""):
-                    index += 1
-                continue
-            break
+        index = program_index(words)
         if index >= len(words):
             continue
-        program = Path(words[index]).name
+        # `.` has no path name of its own, and it is a program: `. ./run.sh`.
+        program = Path(words[index]).name or words[index]
 
-        # Executing a file that drives the SDK is the same act as `python -c` doing it
-        # inline, so it gets the same answer. Editing that file is not, and no longer
-        # prompts. A shell script is a command payload like any other, so it is judged
-        # by every detector here rather than only by the SDK markers -- otherwise a
-        # one-line run.sh calling the upstream CLI walks straight through.
-        target = executed_script(words, index, program)
-        body = read_script(target, cwd) if target and depth < MAX_NESTING else None
-        if body is not None:
-            if target.endswith(SHELL_SUFFIXES):
-                inspect_bash(body, cwd, depth + 1)
-            elif SDK_MARKERS.search(body):
-                block(f"Blocked by the Cirro plugin: `{target}` drives the Cirro SDK, so "
-                      "running it would bypass the approval gate on every create, update "
-                      f"and delete.\n\n{USE_INSTEAD}")
+        target = executed_script(words, index, program, cwd)
+        if target:
+            judge_script(target, cwd, depth)
 
         # A shell's -c payload is itself a command; re-enter the parser on it.
         if SHELLS.match(program):
@@ -294,22 +464,9 @@ def inspect_bash(command: str, cwd: str = "", depth: int = 0) -> None:
                         "storage with the AWS CLI bypasses the approval gate and Cirro's "
                         "own dataset bookkeeping.\n\n"
                         "Use the plan and apply MCP tools instead.\n")
-    passthrough()
 
 
 # --------------------------------------------------------------------------- apply
-
-
-def find_session(start: Path) -> Path | None:
-    here = start.resolve()
-    home = Path.home().resolve()
-    for candidate in [here, *here.parents]:
-        if candidate == home.parent:
-            break
-        marker = candidate / ".cirro" / "session.json"
-        if marker.is_file():
-            return candidate / ".cirro"
-    return None
 
 
 def inspect_apply(tool_input: dict, cwd: str) -> None:
@@ -321,8 +478,14 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
         # The id becomes a path, so anything else is refused before touching disk.
         block(f"Blocked by the Cirro plugin: {plan_id!r} is not a valid plan id.\n")
 
-    session_dir = find_session(Path(cwd or os.getcwd()))
-    if session_dir is None:
+    # The same start the tool itself will resolve from: every MCP tool takes
+    # `directory`, and one Claude session works across several bound folders. Reading
+    # only cwd looked in the wrong .cirro and hard-blocked a plan that exists.
+    directory = tool_input.get("directory")
+    start = Path(str(directory)).expanduser() if directory else Path(cwd or os.getcwd())
+    try:
+        session_dir = find_session_dir(start)
+    except NoSessionFolder:
         # Cannot verify, so do not silently allow: make the human decide.
         respond("ask", "The Cirro plugin could not locate the session folder to verify "
                        f"plan {plan_id}. Approve only if you know what this applies.")
@@ -336,28 +499,16 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
     except (OSError, ValueError):
         block(f"Blocked by the Cirro plugin: plan {plan_id} is unreadable.\n")
 
-    if plan.get("status") != "pending":
-        block(f"Blocked by the Cirro plugin: plan {plan_id} is "
-              f"'{plan.get('status')}', not pending. A plan authorizes exactly one "
-              "change; create a new one.\n")
-    if time.time() > float(plan.get("expires_at", 0)) + MAX_PLAN_AGE_GRACE:
-        block(f"Blocked by the Cirro plugin: plan {plan_id} has expired. Re-plan so the "
-              "approval reflects current figures.\n")
-    # Recomputed from the stored record, so an edit that leaves the digest field alone
-    # is still caught. Must match cirro_agent.plans.canonical_digest exactly.
-    if canonical_digest(plan) != plan.get("digest"):
-        block(f"Blocked by the Cirro plugin: plan {plan_id} does not match its own "
-              "digest; it was modified after it was created.\n")
-    supplied = tool_input.get("digest")
-    if supplied and supplied != plan.get("digest"):
-        block(f"Blocked by the Cirro plugin: the digest supplied for plan {plan_id} does "
-              "not match the stored plan. The plan may have been altered.\n")
+    # The gate's own verdict, from its own reading of the file: status, expiry, and the
+    # digest recomputed over the stored record so an edit that left the digest field
+    # alone is still caught. The worker reaches the same verdict again when apply runs.
+    refusal = preflight(plan, supplied_digest=tool_input.get("digest"))
+    if refusal is not None:
+        block("Blocked by the Cirro plugin: "
+              + REFUSALS[refusal].format(plan_id=plan_id, status=plan.get("status"))
+              + "\n")
 
-    lines = [
-        f"Cirro {plan.get('base_url')} as {plan.get('username') or 'unknown user'}",
-        f"Operation: {plan.get('op')}  (risk: {plan.get('risk') or 'cirro_write'})",
-        "",
-    ]
+    lines = approval_header(plan) + [""]
     # Derived from op/args, not from the plan's prose. The summary is advisory text;
     # these are the values the executor will actually use.
     args = plan.get("args")
@@ -374,7 +525,6 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
         if args.get("carried"):
             lines.append(f"  reusing {len(args['carried'])} earlier step(s) unchanged")
         lines.append("")
-    args = plan.get("args")
     if isinstance(args, dict) and args:
         lines.append("Will run with:")
         for key in sorted(args):
@@ -387,9 +537,9 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
     summary = (plan.get("summary") or "").rstrip()
     if summary:
         lines += ["Summary provided by the plan:", summary, ""]
-    warnings = plan.get("warnings")
-    if isinstance(warnings, (list, tuple)) and warnings:
-        lines += ["Warnings:"] + [f"  - {w}" for w in warnings] + [""]
+    warnings = approval_warnings(plan)
+    if warnings:
+        lines += warnings + [""]
     try:
         expires = time.strftime("%H:%M:%SZ", time.gmtime(float(plan["expires_at"])))
     except (KeyError, TypeError, ValueError):

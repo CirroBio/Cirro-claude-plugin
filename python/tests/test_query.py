@@ -192,12 +192,16 @@ def test_lineage_walks_both_directions():
     assert {r["id"] for r in ancestors} == {"ds_0", "ds_1", "ds_2"}
 
 
-def test_lineage_depth_bounds_the_walk():
+@pytest.mark.parametrize("op,anchor,expected", [
+    ("descendant_of", "ds_0", {"ds_1", "ds_2"}),
+    ("ancestor_of", "ds_5", {"ds_3", "ds_4"}),
+])
+def test_lineage_depth_bounds_the_walk(op, anchor, expected):
     lineage = {f"ds_{i}": [f"ds_{i - 1}"] for i in range(1, 6)}
     data = [{"id": f"ds_{i}"} for i in range(6)]
-    node = {"field": "_lineage", "op": "descendant_of", "value": "ds_0", "depth": 2}
+    node = {"field": "_lineage", "op": op, "value": anchor, "depth": 2}
     found = Q.apply_filter(data, node, SPEC, ctx(lineage=lineage))
-    assert {r["id"] for r in found} == {"ds_1", "ds_2"}
+    assert {r["id"] for r in found} == expected
 
 
 # --- facets and shape ---
@@ -303,7 +307,7 @@ def test_no_suggestions_for_an_empty_match_set():
 
 def test_group_by_joins_labels_and_totals():
     groups, tail, totals = Q.group(
-        rows(), ["process_id"], ["count", "sum:total_size_bytes"], ctx(),
+        rows(), ["process_id"], ["count", "sum:total_size_bytes"],
         order_by="-count", labels={"process_id": {"proc_a": "rnaseq", "proc_b": "sarek"}})
     assert {g["key"]["process_id"] for g in groups} == {"proc_a", "proc_b"}
     assert all("process_name" in g["key"] for g in groups)
@@ -313,7 +317,7 @@ def test_group_by_joins_labels_and_totals():
 
 def test_group_tail_summarizes_what_it_drops():
     data = [{"id": str(i), "created_by": f"u{i}"} for i in range(30)]
-    groups, tail, totals = Q.group(data, ["created_by"], ["count"], ctx(),
+    groups, tail, totals = Q.group(data, ["created_by"], ["count"],
                                    limit_groups=5)
     assert len(groups) == 5
     assert tail["groups"] == 25 and tail["count"] == 25
@@ -328,11 +332,11 @@ def test_group_tail_summarizes_what_it_drops():
     ("status:class", lambda v: v.startswith("@")),
 ])
 def test_derived_group_bins(key, check):
-    groups, _tail, _totals = Q.group(rows(), [key], ["count"], ctx(), limit_groups=100)
+    groups, _tail, _totals = Q.group(rows(), [key], ["count"], limit_groups=100)
     assert all(check(str(g["key"][key])) for g in groups), groups[:3]
 
 
 def test_unknown_metric_is_a_typed_error():
     with pytest.raises(errors.AgentError) as caught:
-        Q.group(rows(), ["status"], ["median:total_size_bytes"], ctx())
+        Q.group(rows(), ["status"], ["median:total_size_bytes"])
     assert caught.value.code == "INVALID_QUERY"

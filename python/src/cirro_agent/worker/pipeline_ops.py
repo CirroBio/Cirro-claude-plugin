@@ -19,7 +19,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from .. import errors, formcheck, formgen
+from .. import errors, formcheck, formgen, session, workflow_spec
 from . import mutations, reads, rows as R
 from .mutations import (Draft, Op, RISK_DESTRUCTIVE, RISK_LOCAL, RISK_WRITE,
                         RISK_WRITE_LOCAL,
@@ -29,6 +29,10 @@ STORAGE = "STORAGE"
 WITH_PROCESS = "WITH_PROCESS"
 EXTERNAL = "EXTERNAL"
 CONFIG_SOURCES = (STORAGE, WITH_PROCESS, EXTERNAL)
+
+# Assumed when neither the caller nor the existing record names one. Every other
+# RepositoryType describes a repository Cirro needs extra credentials to reach.
+DEFAULT_REPOSITORY_TYPE = "GITHUB_PUBLIC"
 
 # Verified live: the API rejects other characters in a process name with HTTP 400.
 NAME_CHARSET = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .&\-@!#'()/]*$")
@@ -79,19 +83,32 @@ def _load_spec(path: str) -> dict:
     return spec
 
 
-def _validated_assets(spec: dict, preprocess: Optional[str] = None) -> tuple:
-    """Generate the assets and refuse to go further if they will not render."""
-    assets = formgen.generate(spec, preprocess=preprocess)
+def _warnings(report: dict) -> list:
+    """The warning messages of a validation report, as the approval prompt lists them."""
+    return [p["message"] for p in formcheck.warnings(report)]
+
+
+def _refuse_if_broken(assets: dict, *, subject: str, what: str, field: str,
+                      retry_with: list, given=None) -> dict:
+    """Validate the assets and refuse to go further if they will not render."""
     report = formcheck.check_assets(assets)
     if not report["ok"]:
         detail = "; ".join(f"{p['where']}: {p['message']}"
-                           for p in report["problems"] if p["level"] == "error")
+                           for p in formcheck.errors(report))
         raise errors.InvalidQuery(
-            f"The generated configuration would not render: {detail}",
-            what="Fix the design spec so the assets validate.",
-            field="design_spec",
-            retry_with=[{"note": "run `cirro-agent read check-config <dir>` after editing"}],
+            f"{subject} would not render: {detail}",
+            what=what, field=field, given=given, retry_with=retry_with,
         )
+    return report
+
+
+def _validated_assets(spec: dict, preprocess: Optional[str] = None) -> tuple:
+    """Generate the assets and refuse to go further if they will not render."""
+    assets = formgen.generate(spec, preprocess=preprocess)
+    report = _refuse_if_broken(
+        assets, subject="The generated configuration",
+        what="Fix the design spec so the assets validate.", field="design_spec",
+        retry_with=[{"note": "run `cirro-agent read check-config <dir>` after editing"}])
     return assets, report
 
 
@@ -123,16 +140,11 @@ def _authored_assets(path: str) -> tuple:
             found=sorted(p.name for p in directory.iterdir() if p.is_file()),
             retry_with=[{"note": f"name the form file {formgen.FORM}"}],
         )
-    report = formcheck.check_assets(assets)
-    if not report["ok"]:
-        detail = "; ".join(f"{p['where']}: {p['message']}"
-                           for p in report["problems"] if p["level"] == "error")
-        raise errors.InvalidQuery(
-            f"The configuration in {directory} would not render: {detail}",
-            what="Fix the files; these are defects Cirro would reject or mis-render.",
-            field="assets_dir", given=path,
-            retry_with=[{"verb": "check_config", "path": str(directory)}],
-        )
+    report = _refuse_if_broken(
+        assets, subject=f"The configuration in {directory}",
+        what="Fix the files; these are defects Cirro would reject or mis-render.",
+        field="assets_dir", given=path,
+        retry_with=[{"verb": "check_config", "path": str(directory)}])
     return assets, report
 
 
@@ -222,13 +234,6 @@ def _check_name(name: str) -> None:
         )
 
 
-def _repository_slug(url_or_slug: str) -> str:
-    text = (url_or_slug or "").strip().rstrip("/")
-    if text.startswith(("http://", "https://", "git@")):
-        return re.sub(r"^.*[:/]([^/]+/[^/]+?)(\.git)?$", r"\1", text)
-    return text
-
-
 def _file_mapping_rules(spec: dict) -> list:
     """Only ingest-style processes describe the files they accept."""
     rules = (spec.get("cirro") or {}).get("file_mapping_rules") or []
@@ -250,12 +255,8 @@ def _file_mapping_rules(spec: dict) -> list:
 # ------------------------------------------------------- register a process
 
 
-def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
-    _need(args, "create_process", "design_spec", "config_source")
-    spec = _load_spec(args["design_spec"])
-    workflow = spec["workflow"]
-    cirro = spec.get("cirro") or {}
-
+def _config_source(args: dict) -> str:
+    """One of the three patterns verified live; anything else is a typo, not a variant."""
     source = str(args["config_source"]).upper()
     if source not in CONFIG_SOURCES:
         raise errors.InvalidQuery(
@@ -265,13 +266,10 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
             field="config_source", given=args["config_source"],
             retry_with=[{"config_source": value} for value in CONFIG_SOURCES],
         )
+    return source
 
-    process_id = args.get("process_id") or cirro.get("process_id")
-    name = args.get("name") or workflow.get("name")
-    _need({"process_id": process_id, "name": name}, "create_process",
-          "process_id", "name")
-    _check_name(name)
 
+def _refuse_if_registered(reader: reads.Reader, process_id: str) -> None:
     existing = next((p for p in reader.processes(include_archived=True)
                      if p["id"] == process_id), None)
     if existing:
@@ -284,44 +282,98 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
                                                           f"{process_id}-2"}}],
         )
 
-    code_repo = _repository_slug(workflow.get("repository", ""))
-    code_repository_type = args.get("repository_type") or "GITHUB_PUBLIC"
-    settings = None
-    if source in (WITH_PROCESS, EXTERNAL):
-        repo = _repository_slug(args.get("config_repository")
-                                or (code_repo if source == WITH_PROCESS else ""))
-        if not repo:
-            raise errors.InvalidQuery(
-                "EXTERNAL needs config_repository: the repository holding the assets.",
-                what="A separate configuration repository must be named.",
-                field="config_repository",
-                retry_with=[{"config_repository": "OrgName/workflow-configs"},
-                            {"config_source": WITH_PROCESS,
-                             "note": "if the config lives in the workflow's own repo"}],
-            )
-        if source == WITH_PROCESS and repo != code_repo:
-            raise errors.InvalidQuery(
-                f"WITH_PROCESS means the config lives in the workflow's own repository, "
-                f"but {repo!r} is not {code_repo!r}.",
-                what="Use EXTERNAL for a separate configuration repository.",
-                field="config_repository", given=repo,
-                retry_with=[{"config_source": EXTERNAL, "config_repository": repo}],
-            )
-        # repository_type is required. Without it Cirro cannot tell how to reach the
-        # configuration repository and rejects the create -- as a 500 NullPointerException
-        # for some folder names, and as a 400 for others. A WITH_PROCESS config is in the
-        # workflow's own repository, so it always shares the code repository's type; an
-        # EXTERNAL one may be a repository of different visibility and can be overridden.
-        settings = {
-            "repository": repo,
-            "branch": args.get("config_branch") or R.DEFAULT_BRANCH,
-            "folder": args.get("config_folder") or R.DEFAULT_CONFIG_FOLDER,
-            "repository_type": (code_repository_type if source == WITH_PROCESS else
-                                (args.get("config_repository_type")
-                                 or code_repository_type)),
-        }
 
-    assets, report = _assets_for(args, spec)
+def _workflow_version(args: dict, workflow: dict) -> str:
+    """The ref of the workflow repository the record is pinned to.
+
+    A process is registered against one ref, and version is required on
+    PipelineCode. Stringifying a missing one registered a pipeline pinned to the
+    literal ref "None", which resolves to nothing.
+    """
+    version = workflow.get("version")
+    if not version:
+        raise errors.InvalidQuery(
+            "The design spec's workflow block names no version.",
+            what=("Cirro runs a specific ref of the workflow repository -- a tag, "
+                  "branch or commit -- and the record cannot be registered without "
+                  "one."),
+            field="design_spec", given=args["design_spec"],
+            retry_with=[{"note": "add workflow.version to the spec frontmatter, e.g. "
+                                 "the release tag the pipeline is pinned to"}],
+        )
+    return str(version)
+
+
+def _config_settings(args: dict, source: str, code_repo: str,
+                     code_repository_type: str) -> Optional[dict]:
+    """Where a repo-backed configuration lives, or None when Cirro stores it.
+
+    repository_type is required. Without it Cirro cannot tell how to reach the
+    configuration repository and rejects the create -- as a 500 NullPointerException
+    for some folder names, and as a 400 for others. A WITH_PROCESS config is in the
+    workflow's own repository, so it always shares the code repository's type; an
+    EXTERNAL one may be a repository of different visibility and can be overridden.
+    """
+    if source == STORAGE:
+        return None
+    repo = workflow_spec.repository_slug(
+        args.get("config_repository") or (code_repo if source == WITH_PROCESS else ""))
+    if not repo:
+        raise errors.InvalidQuery(
+            "EXTERNAL needs config_repository: the repository holding the assets.",
+            what="A separate configuration repository must be named.",
+            field="config_repository",
+            retry_with=[{"config_repository": "OrgName/workflow-configs"},
+                        {"config_source": WITH_PROCESS,
+                         "note": "if the config lives in the workflow's own repo"}],
+        )
+    if source == WITH_PROCESS and repo != code_repo:
+        raise errors.InvalidQuery(
+            f"WITH_PROCESS means the config lives in the workflow's own repository, "
+            f"but {repo!r} is not {code_repo!r}.",
+            what="Use EXTERNAL for a separate configuration repository.",
+            field="config_repository", given=repo,
+            retry_with=[{"config_source": EXTERNAL, "config_repository": repo}],
+        )
+    return {
+        "repository": repo,
+        "branch": args.get("config_branch") or R.DEFAULT_BRANCH,
+        "folder": args.get("config_folder") or R.DEFAULT_CONFIG_FOLDER,
+        "repository_type": (code_repository_type if source == WITH_PROCESS else
+                            (args.get("config_repository_type")
+                             or code_repository_type)),
+    }
+
+
+def _validated_registration(reader: reads.Reader, args: dict, spec: dict,
+                            source: str) -> dict:
+    """Refuse every request that cannot be registered, and resolve what remains.
+
+    Nothing is generated here, so a request naming a taken id, an unrunnable ref or
+    a configuration repository that contradicts its own pattern is refused before
+    any asset is read or built.
+    """
+    workflow = spec["workflow"]
+    process_id = args.get("process_id") or (spec.get("cirro") or {}).get("process_id")
+    name = args.get("name") or workflow.get("name")
+    _need({"process_id": process_id, "name": name}, "create_process",
+          "process_id", "name")
+    _check_name(name)
+    _refuse_if_registered(reader, process_id)
+    version = _workflow_version(args, workflow)
+    code_repo = workflow_spec.repository_slug(workflow.get("repository", ""))
+    code_repository_type = args.get("repository_type") or DEFAULT_REPOSITORY_TYPE
+    return {
+        "process_id": process_id,
+        "name": name,
+        "version": version,
+        "code_repo": code_repo,
+        "repository_type": code_repository_type,
+        "settings": _config_settings(args, source, code_repo, code_repository_type),
+    }
+
+
+def _executor(workflow: dict) -> str:
     executor = str(workflow.get("executor", "NEXTFLOW")).upper()
     if executor not in ("NEXTFLOW", "CROMWELL"):
         raise errors.NotSupported(
@@ -329,21 +381,28 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
             what="Only those two executors can be registered here.",
             user_action="Check workflow.executor in the design spec.",
         )
+    return executor
 
+
+def _registration_record(args: dict, spec: dict, source: str, checked: dict,
+                         executor: str) -> dict:
+    """The whole record: what the approval describes and what apply sends."""
+    workflow = spec["workflow"]
+    cirro = spec.get("cirro") or {}
     resolved = {
-        "process_id": process_id,
-        "name": name,
+        "process_id": checked["process_id"],
+        "name": checked["name"],
         "description": args.get("description") or spec.get("description")
         or f"{workflow.get('name')} {workflow.get('version', '')}".strip(),
         "executor": executor,
         "category": args.get("category") or cirro.get("category") or "Community",
         "config_source": source,
-        "custom_settings": settings,
-        "repository_path": code_repo,
-        "version": str(workflow.get("version")),
+        "custom_settings": checked["settings"],
+        "repository_path": checked["code_repo"],
+        "version": checked["version"],
         "entry_point": workflow.get("entrypoint") or "main.nf",
         "executor_version": workflow.get("executor_version"),
-        "repository_type": code_repository_type,
+        "repository_type": checked["repository_type"],
         "parent_process_ids": cirro.get("parent_process_ids") or [],
         "child_process_ids": cirro.get("child_process_ids") or [],
         "uses_sample_sheet": bool(args.get("uses_sample_sheet")),
@@ -353,39 +412,38 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
     }
     if args.get("assets_dir"):
         resolved["assets_dir"] = str(Path(args["assets_dir"]).expanduser().resolve())
+    return resolved
 
-    where = {
-        STORAGE: "uploaded into Cirro storage (a separate upload step after this)",
-        WITH_PROCESS: (f"read from {settings['repository']}@{settings['branch']} in "
-                       f"{settings['folder']}/ [{settings['repository_type']}] "
-                       f"(the workflow's own repository)"
-                       if settings else ""),
-        EXTERNAL: (f"read from {settings['repository']}@{settings['branch']} in "
-                   f"{settings['folder']}/ [{settings['repository_type']}] "
-                   f"(a separate configuration repository)"
-                   if settings else ""),
-    }[source]
 
+def _where_config_lives(source: str, settings: Optional[dict]) -> str:
+    """The half-sentence naming where Cirro will read the configuration from."""
+    if source == STORAGE:
+        return "uploaded into Cirro storage (a separate upload step after this)"
+    whose = ("the workflow's own repository" if source == WITH_PROCESS
+             else "a separate configuration repository")
+    return (f"read from {settings['repository']}@{settings['branch']} in "
+            f"{settings['folder']}/ [{settings['repository_type']}] ({whose})")
+
+
+def _registration_summary(reader: reads.Reader, args: dict, resolved: dict,
+                          assets: dict, report: dict) -> str:
+    source = resolved["config_source"]
     lines = [
         f"Register a new Cirro pipeline on {reader.base_url}.",
         "",
-        f"  Process id      {process_id}",
-        f"  Name            {name}",
+        f"  Process id      {resolved['process_id']}",
+        f"  Name            {resolved['name']}",
         f"  Category        {resolved['category']}",
-        f"  Workflow code   {code_repo}@{resolved['version']}:{resolved['entry_point']}"
-        f" [{executor}]",
+        f"  Workflow code   {resolved['repository_path']}@{resolved['version']}"
+        f":{resolved['entry_point']} [{resolved['executor']}]",
         f"  Engine version  {resolved['executor_version'] or 'Cirro default'}",
-        f"  Configuration   {source} — {where}",
+        f"  Configuration   {source} — "
+        f"{_where_config_lives(source, resolved['custom_settings'])}",
         "",
         f"  Form            {len(assets)} assets, validated clean"
         + (f" ({report['n_warnings']} warnings)" if report["n_warnings"] else ""),
         f"  Assets          {_asset_origin(args)}",
     ]
-    warnings = [p["message"] for p in report["problems"] if p["level"] == "warning"]
-    if resolved["executor_version"]:
-        warnings.append(
-            "executor_version is pinned. Cirro's default engine is right for most "
-            "pipelines; pin only to recover from a compilation failure.")
     if source == STORAGE:
         follow = "upload_process_config"
         if args.get("assets_dir"):
@@ -396,32 +454,92 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
         lines += ["", "Registering does not fetch the configuration. Write the assets "
                       "into the repository, commit and push them, then run "
                       "sync_process_config."]
+    return "\n".join(lines)
 
-    return Draft(args=resolved, summary="\n".join(lines), warnings=warnings,
+
+def _registration_warnings(resolved: dict, report: dict) -> list:
+    warnings = _warnings(report)
+    if resolved["executor_version"]:
+        warnings.append(
+            "executor_version is pinned. Cirro's default engine is right for most "
+            "pipelines; pin only to recover from a compilation failure.")
+    return warnings
+
+
+def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
+    _need(args, "create_process", "design_spec", "config_source")
+    spec = _load_spec(args["design_spec"])
+    source = _config_source(args)
+    # Ordered the way the refusals should arrive: the record's identity and its
+    # repositories first, so a request that cannot be registered is refused without
+    # generating anything, then the assets the pre-flight vouches for, then the
+    # executor the record will carry.
+    checked = _validated_registration(reader, args, spec, source)
+    assets, report = _assets_for(args, spec)
+    resolved = _registration_record(args, spec, source, checked,
+                                    _executor(spec["workflow"]))
+    return Draft(args=resolved,
+                 summary=_registration_summary(reader, args, resolved, assets, report),
+                 warnings=_registration_warnings(resolved, report),
                  invalidates=[_inv("processes")])
+
+
+def _process_input(*, process_id: str, name: str, description: str, executor: str,
+                   category: Optional[str], parent_process_ids: list,
+                   child_process_ids: list,
+                   uses_sample_sheet: bool, allow_multiple_sources: bool):
+    """The whole-record field set every process write has to fill.
+
+    CustomProcessInput replaces the record rather than patching it, so a field left
+    out is a field blanked. Built in one place so that a field the model gains is
+    gained by create and update together, instead of one path quietly erasing what
+    the other sets.
+    """
+    from cirro_api_client.v1.models import CustomProcessInput, Executor
+    return CustomProcessInput(
+        id=process_id, name=name, description=description,
+        executor=Executor(executor), category=category,
+        parent_process_ids=parent_process_ids, child_process_ids=child_process_ids,
+        linked_project_ids=[],
+        uses_sample_sheet=uses_sample_sheet,
+        allow_multiple_sources=allow_multiple_sources,
+    )
+
+
+def _pipeline_code(*, repository_path: str, version: str, repository_type: str,
+                   entry_point: str, executor_version: Optional[str]):
+    """Where the workflow code lives, with no engine version unless one is pinned.
+
+    PipelineCode.to_dict() omits executorVersion only when it is UNSET; passing None
+    puts an explicit `"executorVersion": null` on the wire, which is a request to have
+    no engine version rather than a request to use the platform's default.
+    """
+    from cirro_api_client.v1.models import PipelineCode, RepositoryType
+    from cirro_api_client.v1.types import UNSET
+    return PipelineCode(
+        repository_path=repository_path, version=version,
+        repository_type=RepositoryType(repository_type), entry_point=entry_point,
+        executor_version=executor_version or UNSET)
 
 
 def apply_create_process(reader: reads.Reader, args: dict) -> dict:
     from cirro_api_client.v1.models import (ConfigSource, CustomPipelineSettings,
-                                            CustomProcessInput, Executor, FileMappingRule,
-                                            FileNamePattern, PipelineCode, RepositoryType)
+                                            FileMappingRule, FileNamePattern,
+                                            RepositoryType)
     settings = args.get("custom_settings")
-    request = CustomProcessInput(
-        id=args["process_id"], name=args["name"], description=args["description"],
-        executor=Executor(args["executor"]),
-        child_process_ids=args["child_process_ids"],
-        parent_process_ids=args["parent_process_ids"],
-        linked_project_ids=[],
+    request = _process_input(
+        process_id=args["process_id"], name=args["name"],
+        description=args["description"], executor=args["executor"],
         category=args["category"],
-        pipeline_code=PipelineCode(
-            repository_path=args["repository_path"], version=args["version"],
-            repository_type=RepositoryType(args["repository_type"]),
-            entry_point=args["entry_point"],
-            executor_version=args.get("executor_version")),
+        parent_process_ids=args["parent_process_ids"],
+        child_process_ids=args["child_process_ids"],
         uses_sample_sheet=args["uses_sample_sheet"],
-        allow_multiple_sources=args["allow_multiple_sources"],
-        config_source=ConfigSource(args["config_source"]),
-    )
+        allow_multiple_sources=args["allow_multiple_sources"])
+    request.config_source = ConfigSource(args["config_source"])
+    request.pipeline_code = _pipeline_code(
+        repository_path=args["repository_path"], version=args["version"],
+        repository_type=args["repository_type"], entry_point=args["entry_point"],
+        executor_version=args.get("executor_version"))
     if settings:
         request.custom_settings = CustomPipelineSettings(
             repository=settings["repository"], branch=settings["branch"],
@@ -518,18 +636,14 @@ def plan_upload_process_config(reader: reads.Reader, args: dict) -> Draft:
     assets, report = _assets_for(args, preprocess=_read_optional(
         args.get("preprocess_path")))
 
-    token, current = None, {}
+    token = _latest_revision_token(reader, args["process_id"])
+    # Only the comparison degrades if the live slots cannot be read: the revision
+    # number is already in hand and still guards the write, so it is not discarded.
+    current, unread = {}, None
     try:
-        from cirro_api_client.v1.api.processes import get_latest_process_revision
-        response = get_latest_process_revision.sync_detailed(
-            args["process_id"], client=reader.client._api_client)
-        reader.cost.call("processes.latest_revision")
-        number = R.plain(getattr(response.parsed, "revision_number", None))
-        # The update token is the revision number as a string, not the per-slot ETag.
-        token = str(number) if number is not None else None
         current = _current_assets(reader, args["process_id"])
-    except Exception:
-        token = None
+    except Exception as exc:
+        unread = str(exc) or exc.__class__.__name__
 
     # Authored assets are already on disk where the person put them; there is nothing
     # to stage, and writing over their own source files would be a surprise.
@@ -543,6 +657,14 @@ def plan_upload_process_config(reader: reads.Reader, args: dict) -> Draft:
             added.append(name)
         elif current[slot].strip() != text.strip():
             changed.append(name)
+    # A live slot this upload has no asset for. `metadata` is the standing case: it is
+    # in the slot vocabulary but nothing generates or authors one, so an upload that
+    # leaves it out must say so rather than let the approver read New and Changed as
+    # the whole of what the revision touches.
+    absent = sorted(set(current) - {formgen.SLOTS[name] for name in assets})
+    # Reporting an unread slot as New would understate what the upload replaces, so
+    # the whole comparison is withheld rather than half of it presented as fact.
+    unknown = "unknown — the live configuration could not be read"
 
     lines = [
         f"Upload configuration to {detail['name']} ({args['process_id']}) on "
@@ -551,25 +673,47 @@ def plan_upload_process_config(reader: reads.Reader, args: dict) -> Draft:
         f"  Current revision  {token or 'none — this would be the first'}",
         f"  Assets            {len(assets)}: {', '.join(sorted(assets))}",
         f"  Source            {_asset_origin(args)}",
-        f"  New               {', '.join(added) or 'none'}",
-        f"  Changed           {', '.join(changed) or 'none'}",
+        f"  New               {unknown if unread else ', '.join(added) or 'none'}",
+        f"  Changed           {unknown if unread else ', '.join(changed) or 'none'}",
     ]
+    if absent:
+        lines.append(f"  Not uploaded      {', '.join(absent)} "
+                     f"(live now, no asset here)")
     if staging:
         lines += [f"  Staged to         {staging}",
                   f"  Replaced locally  {', '.join(replaced) or 'none'}"]
     lines += [
         "",
-        "All slots go up in one revision, so the configuration is never half-applied.",
+        # "All slots" once read as though it covered the live slots this upload carries
+        # no asset for, which sit on the `Not uploaded` line above. It means the slots
+        # being uploaded, so say that.
+        "The assets listed above go up together in one revision, so the configuration "
+        "is never half-applied.",
     ]
+    if absent:
+        lines.append(f"What becomes of the live {'slots' if len(absent) > 1 else 'slot'} "
+                     f"this upload carries no asset for ({', '.join(absent)}) is Cirro's "
+                     "to decide; this plan does not send them.")
     lines.append("The files go up exactly as written; nothing is reformatted."
                  if args.get("assets_dir") else
                  "A copy is kept in the folder above so you can read it later without "
                  "asking Cirro for it back.")
-    warnings = [p["message"] for p in report["problems"] if p["level"] == "warning"]
+    warnings = _warnings(report)
     if replaced:
         warnings.append(f"{len(replaced)} file(s) in {staging} will be overwritten: "
                         f"{', '.join(replaced)}")
-    if token and not changed and not added:
+    if absent:
+        warnings.append(
+            f"the configuration live now also holds {', '.join(absent)}, which this "
+            f"upload carries no asset for -- read it with process_config before "
+            f"approving if that slot matters")
+    if unread:
+        warnings.append(
+            f"Cirro did not return the configuration {args['process_id']} is serving "
+            f"now ({unread}), so this plan cannot say which slots the upload would "
+            f"replace. The write is still guarded: it carries the revision above and "
+            f"Cirro rejects it if that has moved.")
+    elif token and not changed and not added:
         warnings.append("Nothing differs from the current revision; this would be a "
                         "no-op revision.")
     source = args.get("design_spec") or args["assets_dir"]
@@ -598,21 +742,51 @@ def _read_optional(path: Optional[str]) -> Optional[str]:
     return source.read_text()
 
 
+def _latest_revision_token(reader: reads.Reader, process_id: str) -> Optional[str]:
+    """The revision number to send as if_match, or None when there is no revision yet.
+
+    The two outcomes must not be confused. A 404 is the API's answer for a process
+    with no configuration in tenant storage, so it really is a first upload. Anything
+    else means the current revision is unknown -- and an unknown revision reported as
+    "none" both understates what the approval is agreeing to replace and sends the
+    write with no if_match, dropping the guard that stops it overwriting a revision
+    nobody looked at.
+    """
+    revision, failure = reads.process_revision(reader, process_id)
+    if failure:
+        raise errors.UpstreamError(
+            f"Could not read the current configuration revision of {process_id}: "
+            f"{failure['reason']}",
+            what=("The upload replaces whatever revision is live, and the revision "
+                  "number is what stops it replacing one nobody has seen. Without it "
+                  "the plan cannot describe the write honestly."),
+            retry_with=[{"op": "upload_process_config",
+                         "args": {"process_id": process_id},
+                         "note": "plan again once the tenant answers"}],
+            status_code=failure["status_code"],
+        )
+    return revision["token"] if revision else None
+
+
 def _current_assets(reader: reads.Reader, process_id: str) -> dict:
-    from cirro_api_client.v1.api.processes import get_process_resource
-    from cirro_api_client.v1.models import ProcessResource
-    out = {}
-    for slot in set(formgen.SLOTS.values()):
-        try:
-            response = get_process_resource.sync_detailed(
-                process_id, ProcessResource(slot), client=reader.client._api_client)
-            reader.cost.call("processes.get_resource")
-            content = R.plain(getattr(response.parsed, "content", None))
-            if content:
-                out[slot] = content
-        except Exception:
-            continue
-    return out
+    """The configuration Cirro is serving now, by slot.
+
+    An unreadable slot is raised rather than left out of the map. The planner catches
+    that and withholds the whole comparison; a slot merely absent here reads as empty,
+    and the plan would then call the asset New and understate what the upload replaces.
+    """
+    content, unreadable = reads.process_assets(reader, process_id)
+    if unreadable:
+        slot, failure = sorted(unreadable.items())[0]
+        raise errors.UpstreamError(
+            f"Cirro would not return the {slot} slot of {process_id} "
+            f"({failure['reason']}).",
+            what="The live configuration cannot be compared against the new one.",
+            retry_with=[{"op": "upload_process_config",
+                         "args": {"process_id": process_id}}],
+            status_code=failure["status_code"],
+        )
+    return content
 
 
 def apply_upload_process_config(reader: reads.Reader, args: dict) -> dict:
@@ -750,10 +924,16 @@ def plan_update_process(reader: reads.Reader, args: dict) -> Draft:
             changes[key] = args[key]
 
     config_repo = args.get("config_repository")
-    if config_repo and _repository_slug(config_repo) != settings.get("repository"):
-        changes["config_repository"] = _repository_slug(config_repo)
+    if config_repo and workflow_spec.repository_slug(config_repo) != \
+            settings.get("repository"):
+        changes["config_repository"] = workflow_spec.repository_slug(config_repo)
+    # config_repository_type is recorded here, not only read at apply: a change that
+    # never reaches `changes` is absent from the diff the person approves, and the
+    # apply-side read of it can then never fire. It is the one field this path exists
+    # to protect -- dropping it leaves Cirro unable to reach the configuration at all.
     for key, current in (("config_branch", settings.get("branch")),
-                         ("config_folder", settings.get("folder"))):
+                         ("config_folder", settings.get("folder")),
+                         ("config_repository_type", settings.get("repository_type"))):
         if args.get(key) is not None and args[key] != current:
             changes[key] = args[key]
 
@@ -772,7 +952,9 @@ def plan_update_process(reader: reads.Reader, args: dict) -> Draft:
                "executor_version": code.get("executor_version"),
                "config_repository": settings.get("repository"),
                "config_branch": settings.get("branch"),
-               "config_folder": settings.get("folder")}.get(key, detail.get(key))
+               "config_folder": settings.get("folder"),
+               "config_repository_type": settings.get("repository_type"),
+               }.get(key, detail.get(key))
         lines += [f"  {key}", f"    from  {was!r}", f"    to    {value!r}"]
 
     warnings = []
@@ -801,7 +983,6 @@ def plan_update_process(reader: reads.Reader, args: dict) -> Draft:
 
 def apply_update_process(reader: reads.Reader, args: dict) -> dict:
     from cirro_api_client.v1.models import (ConfigSource, CustomPipelineSettings,
-                                            CustomProcessInput, Executor, PipelineCode,
                                             RepositoryType)
     current, changes = args["current"], args["changes"]
     code = current["code"] or {}
@@ -809,26 +990,23 @@ def apply_update_process(reader: reads.Reader, args: dict) -> dict:
 
     # CustomProcessInput replaces the record, so every field is resolved from the
     # current one and only the requested changes applied.
-    request = CustomProcessInput(
-        id=args["process_id"],
+    request = _process_input(
+        process_id=args["process_id"],
         name=changes.get("name", current["name"]),
         description=changes.get("description", current["description"]) or "",
-        executor=Executor(current["executor"]),
-        child_process_ids=current["child_process_ids"],
-        parent_process_ids=current["parent_process_ids"],
-        linked_project_ids=[],
+        executor=current["executor"],
         category=changes.get("category", current["category"]),
+        parent_process_ids=current["parent_process_ids"],
+        child_process_ids=current["child_process_ids"],
         uses_sample_sheet=current["uses_sample_sheet"],
-        allow_multiple_sources=current["allow_multiple_sources"],
-    )
+        allow_multiple_sources=current["allow_multiple_sources"])
     if current.get("config_source"):
         request.config_source = ConfigSource(current["config_source"])
     if code.get("repository_path"):
-        request.pipeline_code = PipelineCode(
+        request.pipeline_code = _pipeline_code(
             repository_path=code["repository_path"],
             version=changes.get("version", code.get("version")),
-            repository_type=RepositoryType(code.get("repository_type")
-                                           or "GITHUB_PUBLIC"),
+            repository_type=code.get("repository_type") or DEFAULT_REPOSITORY_TYPE,
             entry_point=changes.get("entry_point", code.get("entry_point")),
             executor_version=changes.get("executor_version",
                                          code.get("executor_version")))
@@ -846,7 +1024,7 @@ def apply_update_process(reader: reads.Reader, args: dict) -> dict:
                 changes.get("config_repository_type")
                 or settings.get("repository_type")
                 or code.get("repository_type")
-                or "GITHUB_PUBLIC"))
+                or DEFAULT_REPOSITORY_TYPE))
 
     reader.client.processes.update_custom_process(process_id=args["process_id"],
                                                   process=request)
@@ -881,16 +1059,15 @@ def apply_archive_process(reader: reads.Reader, args: dict) -> dict:
 
 
 def _git(repo: Path, *arguments: str) -> subprocess.CompletedProcess:
+    """For the calls whose failure this module has to report.
+
+    `session.git_output` answers questions and returns None for every kind of "no
+    answer", which is right for reads. `add` and `commit` are not questions: their
+    returncode and stderr are what the apply path tells the person went wrong, so
+    those callers need the CompletedProcess itself.
+    """
     return subprocess.run(["git", "-C", str(repo), *arguments],
                           capture_output=True, text=True, timeout=60)
-
-
-def _repo_root(path: Path) -> Optional[Path]:
-    try:
-        top = _git(path, "rev-parse", "--show-toplevel")
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return Path(top.stdout.strip()) if top.returncode == 0 and top.stdout.strip() else None
 
 
 def plan_write_process_config(reader: reads.Reader, args: dict) -> Draft:
@@ -906,7 +1083,8 @@ def plan_write_process_config(reader: reads.Reader, args: dict) -> Draft:
         args.get("preprocess_path")))
 
     destination = Path(args["destination"]).expanduser().resolve()
-    root = _repo_root(destination if destination.exists() else destination.parent)
+    root = session.git_root(destination if destination.exists()
+                            else destination.parent)
     if root is None and not args.get("allow_outside_repo"):
         raise errors.InvalidQuery(
             f"{destination} is not inside a git repository.",
@@ -941,7 +1119,7 @@ def plan_write_process_config(reader: reads.Reader, args: dict) -> Draft:
         "This writes to your local disk only. Nothing reaches Cirro or git until you "
         "commit, push and sync.",
     ]
-    warnings = [p["message"] for p in report["problems"] if p["level"] == "warning"]
+    warnings = _warnings(report)
     if overwritten:
         warnings.append(f"{len(overwritten)} existing file(s) will be replaced: "
                         f"{', '.join(overwritten)}")
@@ -967,7 +1145,7 @@ def plan_commit_process_config(reader: reads.Reader, args: dict) -> Draft:
     """
     _need(args, "commit_process_config", "destination")
     destination = Path(args["destination"]).expanduser().resolve()
-    root = _repo_root(destination)
+    root = session.git_root(destination)
     if root is None:
         raise errors.InvalidQuery(
             f"{destination} is not inside a git repository.",
@@ -997,7 +1175,7 @@ def plan_commit_process_config(reader: reads.Reader, args: dict) -> Draft:
     ]
     lines += [f"    {line}" for line in entries[:ENTRY_PREVIEW]]
     if len(entries) > ENTRY_PREVIEW:
-        lines.append(f"    ... {len(entries) - 20} more")
+        lines.append(f"    ... {len(entries) - ENTRY_PREVIEW} more")
     lines += ["", "This commits locally only. Nothing is pushed; the remote is "
                   "untouched until you push it yourself."]
 

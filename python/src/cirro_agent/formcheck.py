@@ -44,6 +44,15 @@ PROVEN_EXTENSIONS = {
 NAME_BEARING = ("properties", "dependencies")
 OPAQUE = ("mm",)
 
+# Keys whose contents are fields of the object that owns them rather than fields of a
+# new nesting level. `iter_fields` treats each as transparent.
+WRAPPERS = ("dependencies", "oneOf", "allOf", "anyOf", "then", "else")
+
+# The two levels a Problem carries. Callers outside this module read them through
+# `errors()` and `warnings()` rather than comparing the strings themselves.
+ERROR = "error"
+WARNING = "warning"
+
 # Documented by Cirro-pipelines but used by none of the 213 production forms, and a
 # `folder` picker was rejected by the portal in a real incident.
 UNPROVEN_EXTENSIONS = {
@@ -72,6 +81,16 @@ class Problem:
         if self.fix:
             out["fix"] = self.fix
         return out
+
+
+def errors(report: dict) -> list:
+    """The problems of a report that stop the assets working, as problem dicts."""
+    return [p for p in report["problems"] if p["level"] == ERROR]
+
+
+def warnings(report: dict) -> list:
+    """The problems of a report worth saying out loud but not worth refusing over."""
+    return [p for p in report["problems"] if p["level"] == WARNING]
 
 
 def check_form(document: dict) -> list:
@@ -141,7 +160,9 @@ def check_form(document: dict) -> list:
 
     walk(form, "form")
 
-    for where, field in _iter_fields(form):
+    for where, field in iter_fields(form):
+        if not isinstance(field, dict):
+            continue  # draft-07 allows a bare `true`/`false` schema; it declares nothing
         path_type = field.get("pathType")
         if path_type is not None:
             if path_type not in PATH_TYPES:
@@ -171,30 +192,140 @@ def check_form(document: dict) -> list:
             problems.append(Problem(
                 "error", f"{where}.enumNames",
                 "enumNames must be parallel to enum"))
+    return problems + check_branch_overlap(form)
+
+
+def iter_dependency_branches(form: dict, prefix: str = "form") -> list:
+    """Every `dependencies.<selector>.oneOf` in the form, as (where, selector, branches).
+
+    A second traversal, and deliberately so. `iter_fields` is the one walk over a
+    form's *fields*, and it makes a conditional wrapper transparent -- which is
+    precisely the information a branch-level check needs. This one walks the
+    wrappers and yields no fields at all, so the two cannot drift into disagreeing
+    about what a field is.
+    """
+    found = []
+
+    def descend(node, path: str) -> None:
+        if isinstance(node, list):
+            for index, item in enumerate(node):
+                descend(item, f"{path}[{index}]")
+            return
+        if not isinstance(node, dict):
+            return
+        for selector, clause in (node.get("dependencies") or {}).items():
+            branches = clause.get("oneOf") if isinstance(clause, dict) else None
+            if isinstance(branches, list):
+                found.append((f"{path}.dependencies.{selector}.oneOf", selector,
+                              branches))
+        for key, value in node.items():
+            descend(value, f"{path}.{key}")
+
+    descend(form, prefix)
+    return found
+
+
+def _branch_selector_values(branch, selector: str) -> Optional[list]:
+    """The selector values one `oneOf` branch accepts, or None if it constrains none.
+
+    A branch that says nothing about the selector matches every value, but so does
+    a branch constrained some other way this check cannot read, so `None` means
+    "not comparable" and takes the whole selector out of the comparison.
+    """
+    if not isinstance(branch, dict):
+        return None
+    field = (branch.get("properties") or {}).get(selector)
+    if not isinstance(field, dict):
+        return None
+    if isinstance(field.get("enum"), list):
+        return field["enum"]
+    if "const" in field:
+        return [field["const"]]
+    return None
+
+
+def check_branch_overlap(form: dict, prefix: str = "form") -> list:
+    """Flag a selector value that satisfies more than one of its `oneOf` branches.
+
+    `oneOf` means exactly one branch may match, so a value two branches accept
+    fails validation in the portal and the conditional fields behind it never
+    render. Generation can no longer produce such a form; a hand-authored one can,
+    and used to validate clean here.
+
+    Warning, not error, for two reasons. A branch pair sharing a selector value can
+    be told apart by another field constrained inside those branches -- a second
+    selector, which is one of the reasons authored assets exist at all -- and this
+    check cannot tell whether the portal resolves that. And it is new since the
+    213-form calibration, which cannot be re-measured from this repository, so it
+    says its piece without refusing an upload.
+    """
+    problems = []
+    for where, selector, branches in iter_dependency_branches(form, prefix):
+        accepted = [_branch_selector_values(branch, selector) for branch in branches]
+        if any(values is None for values in accepted):
+            continue
+        # Serialized because an enum member need not be hashable, and because it
+        # keeps `true` and `1` apart where a set would not.
+        seen = {}
+        for values in accepted:
+            for value in values:
+                key = json.dumps(value, sort_keys=True)
+                seen[key] = seen.get(key, 0) + 1
+        for key, count in seen.items():
+            if count > 1:
+                problems.append(Problem(
+                    WARNING, where,
+                    f"selecting {json.loads(key)!r} satisfies {count} of the "
+                    f"{len(branches)} branches; `oneOf` allows exactly one, so the "
+                    "form fails validation in the portal unless another field "
+                    "constrained inside those branches tells them apart",
+                    fix=f"give each branch a distinct set of `{selector}` values"))
     return problems
 
 
-def _iter_fields(form: dict):
-    """Every leaf field, including inside dependencies/oneOf branches."""
-    def descend(node, where: str):
+def iter_fields(form: dict, prefix: str = "form") -> list:
+    """Every field the form declares, as (path, field) pairs in declaration order.
+
+    This is the one walk over a form's structure. A form's fields are not just its
+    `properties`: conditional fields live inside `dependencies.<selector>.oneOf[]`
+    and inside `then`/`else`, and any analysis that walks `properties` alone reports
+    live, correctly-mapped fields as dangling.
+
+    Conditional wrappers -- `dependencies`, `oneOf`, `allOf`, `anyOf`, `then`, `else`
+    -- are transparent: a field inside one keeps the path of the object that owns the
+    wrapper, because that is where the portal renders it and where an input map
+    addresses it. `dependencies` keys are the names of the *selector* fields depended
+    upon, not a nesting level, so they are skipped rather than appended.
+
+    Two consequences for callers: a path can repeat, because a selector is normally
+    restated inside each of its own branches, and `field` can be a bare `true`/`false`
+    as draft-07 permits rather than a dict. `if` is not walked -- its `properties`
+    state conditions on fields declared elsewhere, so it declares nothing of its own.
+    """
+    def descend(node, path: str):
         if isinstance(node, list):
-            for index, item in enumerate(node):
-                descend(item, f"{where}[{index}]")
+            for item in node:
+                descend(item, path)
             return
         if not isinstance(node, dict):
             return
         for name, field in (node.get("properties") or {}).items():
-            if isinstance(field, dict):
-                yielded.append((f"{where}.{name}", field))
-                descend(field, f"{where}.{name}")
-        for name, branch in (node.get("dependencies") or {}).items():
-            descend(branch, f"{where}.{name}")
-        for key in ("oneOf", "allOf", "anyOf"):
-            if key in node:
-                descend(node[key], f"{where}.{key}")
-    yielded = []
-    descend(form, "form")
-    return yielded
+            here = f"{path}.{name}"
+            fields.append((here, field))
+            descend(field, here)
+        for wrapper in WRAPPERS:
+            branch = node.get(wrapper)
+            if branch is None:
+                continue
+            if wrapper == "dependencies" and isinstance(branch, dict):
+                for sub in branch.values():
+                    descend(sub, path)
+            else:
+                descend(branch, path)
+
+    fields = []
+    descend(form, prefix)
+    return fields
 
 
 def form_paths(document: dict) -> set:
@@ -203,36 +334,10 @@ def form_paths(document: dict) -> set:
     The JSONPath mirrors the form's `properties` nesting exactly, at whatever depth --
     an ungrouped form yields `$.dataset.params.<field>`, a grouped one
     `$.dataset.params.<group>.<field>`, and nested groups go deeper. Conditional
-    wrappers (`dependencies`, `oneOf`, ...) are transparent: fields inside them keep
-    the path of the object that owns the wrapper.
+    wrappers are transparent; `iter_fields` documents that rule and implements it.
     """
-    paths = set()
-
-    def walk(node, prefix: str) -> None:
-        if isinstance(node, list):
-            for item in node:
-                walk(item, prefix)
-            return
-        if not isinstance(node, dict):
-            return
-        for name, field in (node.get("properties") or {}).items():
-            here = f"{prefix}.{name}"
-            paths.add(here)
-            if isinstance(field, dict):
-                walk(field, here)
-        for wrapper in ("dependencies", "oneOf", "allOf", "anyOf", "then", "else"):
-            branch = node.get(wrapper)
-            if branch is None:
-                continue
-            if wrapper == "dependencies" and isinstance(branch, dict):
-                # Keys here are the fields depended upon, not new nesting levels.
-                for sub in branch.values():
-                    walk(sub, prefix)
-            else:
-                walk(branch, prefix)
-
-    walk((document or {}).get("form") or {}, "$.dataset.params")
-    return paths
+    form = (document or {}).get("form") or {}
+    return {path for path, _field in iter_fields(form, "$.dataset.params")}
 
 
 def check_input_map(document: dict, form: Optional[dict] = None) -> list:
@@ -308,11 +413,11 @@ def check_assets(assets: dict) -> dict:
                 "uses Python's (?P<name>...) named group; the Cirro API's regex engine "
                 "wants (?<name>...) and rejects the Python form with a 400"))
 
-    errors = [p for p in problems if p.level == "error"]
+    blocking = [p for p in problems if p.level == ERROR]
     return {
-        "ok": not errors,
-        "n_errors": len(errors),
-        "n_warnings": len(problems) - len(errors),
+        "ok": not blocking,
+        "n_errors": len(blocking),
+        "n_warnings": len(problems) - len(blocking),
         "problems": [p.to_dict() for p in problems],
         "checked": sorted(assets),
     }

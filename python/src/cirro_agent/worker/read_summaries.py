@@ -1,12 +1,13 @@
 """Summaries of the things that would otherwise flood the context:
 files, logs, tasks, samples, parameters, trace.
 """
-from typing import Optional
+from typing import Optional, Tuple
 
 from .. import errors, summarize as S
 from ..envelope import DEFAULT_MAX_TOKENS, estimate_tokens, wrap
 from .reads import (MANIFEST_LIST_LIMIT, Reader, dataset_detail, dataset_manifest,
-                    dataset_tasks, is_terminal, portal_dataset, spec_shape)
+                    dataset_tasks, declared_schema_keys, is_terminal, portal_dataset,
+                    project_schema_document, spec_shape)
 
 
 def do_summarize(request: dict) -> dict:
@@ -19,8 +20,11 @@ def do_summarize(request: dict) -> dict:
         )
     reader = Reader(request)
     scope = request.get("scope") or {}
-    project_ids = reader.scope_project_ids(scope)
-    project_id = project_ids[0]
+    named_project_ids = reader.scope_project_ids(scope)
+    # A summary describes one project, so the echo, the builders and their follow-up
+    # calls all carry the project actually summarized rather than everything named.
+    project_id = named_project_ids[0]
+    project_ids = [project_id]
     dataset_id = request.get("dataset_id") or scope.get("dataset_id")
     max_tokens = int(request.get("max_tokens") or DEFAULT_MAX_TOKENS["summarize"])
 
@@ -29,7 +33,7 @@ def do_summarize(request: dict) -> dict:
             f"summarize {of} needs a dataset_id.",
             what="Name the dataset to summarize.", field="dataset_id",
             retry_with=[{"verb": "query", "entity": "dataset",
-                         "scope": {"project_ids": project_ids}}],
+                         "scope": {"project_ids": named_project_ids}}],
         )
     scope_echo = {"project_ids": project_ids}
     if dataset_id:
@@ -37,22 +41,15 @@ def do_summarize(request: dict) -> dict:
     build = _BUILDERS[of]
     body, complete, next_calls = build(reader, request, project_ids, project_id, dataset_id)
     return _summary_envelope(reader, request, of, body, complete, scope_echo,
-                             max_tokens, next_calls=next_calls)
+                             max_tokens, next_calls=next_calls,
+                             omitted=_projects_left_out(of, named_project_ids, dataset_id))
 
 
-def _samples_body(reader, request, project_ids, project_id, dataset_id) -> tuple:
+def _samples_body(reader, request, project_ids, project_id,
+                  dataset_id) -> Tuple[dict, bool, list]:
     sample_rows, complete = reader.samples(project_id)
-    schema_keys = None
-    try:
-        form = reader.client.metadata.get_project_schema(project_id=project_id)
-        reader.cost.call("metadata.schema")
-        spec_json = getattr(form, "form_spec_json", None) or {}
-        props = ((spec_json.get("properties")
-                  if isinstance(spec_json, dict) else None) or {})
-        schema_keys = list(props)
-    except Exception:
-        pass
-    body = S.samples(sample_rows, schema_keys=schema_keys)
+    body = S.samples(sample_rows,
+                     schema_keys=_declared_metadata_keys(reader, project_id))
     reader.cost.strategy = "snapshot"
     group_keys = [f"metadata.{key}" for key in body.get("candidate_group_keys", [])[:1]]
     return body, complete, [{
@@ -65,7 +62,8 @@ def _samples_body(reader, request, project_ids, project_id, dataset_id) -> tuple
     }]
 
 
-def _files_body(reader, request, project_ids, project_id, dataset_id) -> tuple:
+def _files_body(reader, request, project_ids, project_id,
+                dataset_id) -> Tuple[dict, bool, list]:
     limit = int(request.get("file_limit") or MANIFEST_LIST_LIMIT)
     entries, total, artifacts = dataset_manifest(
         reader, project_id, dataset_id, file_limit=limit,
@@ -91,7 +89,8 @@ def _files_body(reader, request, project_ids, project_id, dataset_id) -> tuple:
                  "glob": (body.get("suggested_globs") or [{"glob": "*"}])[0]["glob"]}}]
 
 
-def _logs_body(reader, request, project_ids, project_id, dataset_id) -> tuple:
+def _logs_body(reader, request, project_ids, project_id,
+               dataset_id) -> Tuple[dict, bool, list]:
     text = reader.client.execution.get_execution_logs(project_id=project_id,
                                                       dataset_id=dataset_id) or ""
     reader.cost.call("execution.logs")
@@ -108,7 +107,8 @@ def _logs_body(reader, request, project_ids, project_id, dataset_id) -> tuple:
     }]
 
 
-def _tasks_body(reader, request, project_ids, project_id, dataset_id) -> tuple:
+def _tasks_body(reader, request, project_ids, project_id,
+                dataset_id) -> Tuple[dict, bool, list]:
     task_rows = dataset_tasks(reader, project_id, dataset_id)
     primary = _primary_failed_index(reader, project_id, dataset_id, task_rows)
     body = S.tasks(task_rows, primary_failed_index=primary)
@@ -129,7 +129,8 @@ def _tasks_body(reader, request, project_ids, project_id, dataset_id) -> tuple:
     return body, True, next_calls
 
 
-def _params_body(reader, request, project_ids, project_id, dataset_id) -> tuple:
+def _params_body(reader, request, project_ids, project_id,
+                 dataset_id) -> Tuple[dict, bool, list]:
     row = dataset_detail(reader, project_id, dataset_id)
     defaults, declared, required = spec_shape(reader, row.get("process_id"))
     body = S.params(row.get("params") or {}, defaults=defaults, declared=declared,
@@ -144,16 +145,74 @@ def _params_body(reader, request, project_ids, project_id, dataset_id) -> tuple:
     }]
 
 
-def _trace_summary(reader, request, project_ids, project_id, dataset_id) -> tuple:
-    body = _trace_body(reader, project_id, dataset_id)
+def _trace_body(reader, request, project_ids, project_id,
+                dataset_id) -> Tuple[dict, bool, list]:
+    body = _read_trace(reader, project_id, dataset_id)
     reader.cost.strategy = "artifact_read"
     return body, True, []
 
 
-# One builder per summary kind, all with the same signature, so do_summarize is the
-# validation and the envelope and nothing else.
+# One builder per summary kind, all named _<kind>_body and all with the same
+# signature, so do_summarize is the validation and the envelope and nothing else.
 _BUILDERS = {"samples": _samples_body, "files": _files_body, "logs": _logs_body,
-             "tasks": _tasks_body, "params": _params_body, "trace": _trace_summary}
+             "tasks": _tasks_body, "params": _params_body, "trace": _trace_body}
+
+
+def _projects_left_out(of: str, named: list, dataset_id) -> list:
+    """What a narrowed scope did not cover.
+
+    A summary reads `named[0]`; echoing every project_id the caller gave reported one
+    project's figures as though they covered all of them.
+
+    A dataset-scoped summary is reported too, and that is deliberate. It looks like
+    nothing is omitted -- the dataset lives in exactly one project -- but if it lives
+    in one of the projects that were not consulted, the read comes back EMPTY and the
+    caller has no way to tell that from a dataset with no samples. Same rule and same
+    key as `read_query._projects_left_out`, so `summarize files` and `query file`
+    answer the same way for the same scope.
+    """
+    if len(named) < 2:
+        return []
+    skipped = named[1:]
+    if dataset_id:
+        detail = (f"{len(named)} projects were named. Dataset {dataset_id} was read "
+                  f"from {named[0]} only; a dataset belongs to one project, so if it "
+                  "lives in one of the others this answer is empty rather than wrong.")
+        fix = {"note": "Name the project that owns the dataset.",
+               "retry_with": [{"verb": "summarize", "of": of, "dataset_id": dataset_id,
+                               "scope": {"project_ids": [pid]}} for pid in skipped[:3]]}
+    else:
+        detail = (f"{len(named)} projects were named. Every figure here describes "
+                  f"{named[0]} only; one summary covers one project.")
+        fix = {"note": "Summarize one project at a time.",
+               "retry_with": [{"verb": "summarize", "of": of,
+                               "scope": {"project_ids": [pid]}} for pid in skipped[:3]]}
+    return [{"code": "SCOPE_NARROWED", "projects_not_read": skipped,
+             "detail": detail, "fix": fix}]
+
+
+def _declared_metadata_keys(reader: Reader, project_id: str) -> Optional[list]:
+    """The metadata keys the project's schema declares, or None if it cannot be read.
+
+    `get_project_schema` returns the generated FormSchema -- form / ui /
+    metadataRequirements, with any unrecognised top-level key kept in
+    additional_properties. It has no `form_spec_json`; reading that absent attribute
+    declared no keys at all, so every observed key was reported as drift. Both halves
+    are read because which one a tenant populates is not fixed, and an unreadable
+    schema stays None: S.samples then omits schema_drift instead of reporting the
+    whole match set as undeclared.
+    """
+    try:
+        document = project_schema_document(reader, project_id)
+    except Exception:
+        return None
+    if document is None:
+        return None
+    keys = declared_schema_keys(document)
+    # An empty document declares nothing; one in an unrecognised shape is unknown.
+    if keys is not None:
+        return keys
+    return [] if not document else None
 
 
 def _primary_failed_index(reader: Reader, project_id: str, dataset_id: str,
@@ -171,7 +230,7 @@ def _primary_failed_index(reader: Reader, project_id: str, dataset_id: str,
     return failed[0]["task_id"] if failed else None
 
 
-def _trace_body(reader: Reader, project_id: str, dataset_id: str) -> dict:
+def _read_trace(reader: Reader, project_id: str, dataset_id: str) -> dict:
     try:
         wrapped = portal_dataset(reader, project_id, dataset_id)
         frame = wrapped.get_trace()
@@ -269,13 +328,16 @@ def _raw_slice(text: str, request: dict) -> dict:
 
 def _summary_envelope(reader: Reader, request: dict, of: str, body: dict,
                       complete: bool, scope_echo: dict, max_tokens: int,
-                      next_calls: list) -> dict:
+                      next_calls: list, omitted: Optional[list] = None) -> dict:
     envelope = wrap(
         query={"verb": "summarize", "of": of, "scope": scope_echo,
                "dataset_id": request.get("dataset_id")},
         result={"summary_of": of, "scan_complete": complete, of: body,
                 "next_calls": next_calls},
         cost=reader.cost.to_dict(), max_tokens=max_tokens)
+    # Set before the ladder measures, so what the omission costs is inside the budget.
+    if omitted:
+        envelope["omitted"] = list(omitted)
     # Summaries are already collapsed; if one still overruns, drop the most verbose
     # sections in a fixed order rather than cutting a structure open.
     shrinkable = {
@@ -286,11 +348,57 @@ def _summary_envelope(reader: Reader, request: dict, of: str, body: dict,
         "params": ["defaulted_keys"],
         "trace": ["processes"],
     }.get(of, [])
+    dropped = []
+    fix = _retry_bigger(request, of, scope_echo, max_tokens)
     for key in shrinkable:
         if estimate_tokens(envelope) <= max_tokens:
             break
         if key in body:
             body.pop(key)
             envelope["budget"]["degraded"].append({"what": f"{of}.{key}", "to": "dropped"})
+            dropped.append(key)
+            # Declared inside the loop, so what the declaration costs is inside the
+            # budget it explains -- as in envelope.shrink_to_fit.
+            _declare_dropped(envelope, body, of, dropped, fix, max_tokens)
     envelope["budget"]["used_est"] = estimate_tokens(envelope)
     return envelope
+
+
+def _declare_dropped(envelope: dict, body: dict, of: str, dropped: list, fix: dict,
+                     max_tokens: int) -> None:
+    """Name the sections the ladder popped, in `omitted` and in the body itself.
+
+    `budget.degraded` records that a step happened, but the channel the skills tell an
+    agent to read is `omitted`: a summary that lost its `error_blocks` has to say so
+    there, with a call that gets them back, and the surviving body has to carry a
+    marker naming what is gone. One entry, rewritten as the ladder goes.
+    """
+    body["sections_dropped"] = list(dropped)
+    entry = next((o for o in envelope.get("omitted", [])
+                  if o.get("code") == "SECTIONS_DROPPED"), None)
+    if entry is None:
+        entry = {"code": "SECTIONS_DROPPED", "fix": fix}
+        envelope.setdefault("omitted", []).append(entry)
+    entry["sections"] = [f"{of}.{key}" for key in dropped]
+    entry["detail"] = (
+        f"{len(dropped)} section(s) of this {of} summary were dropped whole to fit "
+        f"max_tokens={max_tokens}: {', '.join(dropped)}. What remains still describes "
+        f"the whole {of}; the dropped sections were its detail, not its counts.")
+
+
+def _retry_bigger(request: dict, of: str, scope_echo: dict, max_tokens: int) -> dict:
+    """The same read again with room for what the budget cost.
+
+    Built from the request rather than the echoed query because `task_logs` is its own
+    verb, addressed by dataset_id and task_id, and offering it back as `summarize logs`
+    would not run.
+    """
+    verb = request.get("verb") or "summarize"
+    fix = {"verb": verb, "scope": {"project_ids": list(scope_echo["project_ids"])},
+           "max_tokens": max_tokens * 2}
+    if verb == "summarize":
+        fix["of"] = of
+    for key in ("dataset_id", "task_id"):
+        if scope_echo.get(key) is not None:
+            fix[key] = scope_echo[key]
+    return fix

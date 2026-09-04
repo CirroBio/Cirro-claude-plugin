@@ -199,19 +199,19 @@ def parse_shorthand(text: str) -> dict:
     return {"and": clauses} if len(clauses) != 1 else clauses[0]
 
 
-def parse_filter(spec: Any) -> Optional[dict]:
-    if spec is None or spec == {} or spec == "":
+def parse_filter(filter_spec: Any) -> Optional[dict]:
+    if filter_spec is None or filter_spec == {} or filter_spec == "":
         return None
-    if isinstance(spec, str):
-        return parse_shorthand(spec)
-    if not isinstance(spec, dict):
+    if isinstance(filter_spec, str):
+        return parse_shorthand(filter_spec)
+    if not isinstance(filter_spec, dict):
         raise errors.InvalidQuery(
             "A filter must be an object or a shorthand string.",
             what="Pass a filter tree, or a shorthand string.",
-            given=spec,
+            given=filter_spec,
             retry_with=[{"filter": "status:FAILED created:last-7d"}],
         )
-    return spec
+    return filter_spec
 
 
 def resolve_filter(node: Optional[dict], spec: EntitySpec, ctx: Ctx) -> Optional[dict]:
@@ -389,37 +389,31 @@ def matches(row: dict, node: Optional[dict], spec: EntitySpec, ctx: Ctx) -> bool
     return False
 
 
-def _lineage_matches(row: dict, op: str, target: str, depth: int, ctx: Ctx) -> bool:
-    row_id = row.get("id")
-    if not row_id:
-        return False
-    limit = depth or 64
-    if op == "descendant_of":
-        seen, frontier, hops = set(), [row_id], 0
-        while frontier and hops < limit:
-            parents = []
-            for node in frontier:
-                for parent in ctx.lineage.get(node, []):
-                    if parent == target:
-                        return True
-                    if parent not in seen:
-                        seen.add(parent)
-                        parents.append(parent)
-            frontier, hops = parents, hops + 1
-        return False
-    # ancestor_of: is `row` an ancestor of `target`?
-    seen, frontier, hops = set(), [target], 0
+def _reaches(start: str, target: str, ctx: Ctx, limit: int) -> bool:
+    """Is `target` among `start`'s ancestors, within `limit` hops upwards?"""
+    seen, frontier, hops = set(), [start], 0
     while frontier and hops < limit:
         parents = []
         for node in frontier:
             for parent in ctx.lineage.get(node, []):
-                if parent == row_id:
+                if parent == target:
                     return True
                 if parent not in seen:
                     seen.add(parent)
                     parents.append(parent)
         frontier, hops = parents, hops + 1
     return False
+
+
+def _lineage_matches(row: dict, op: str, target: str, depth: int, ctx: Ctx) -> bool:
+    row_id = row.get("id")
+    if not row_id:
+        return False
+    limit = depth or 64
+    if op == "descendant_of":
+        return _reaches(row_id, target, ctx, limit)
+    # ancestor_of: is `row` an ancestor of `target`? Same walk, started at `target`.
+    return _reaches(target, row_id, ctx, limit)
 
 
 def apply_filter(rows: list, node: Optional[dict], spec: EntitySpec, ctx: Ctx) -> list:
@@ -814,7 +808,7 @@ def suggest(rows: list, base_query: dict, spec: EntitySpec, facets: dict, ctx: C
 
 # --------------------------------------------------------------------------- group_by
 
-def _group_key(row: dict, key: str, ctx: Ctx) -> Any:
+def _group_key(row: dict, key: str) -> Any:
     if ":" in key:
         field, _, unit = key.partition(":")
         raw = row.get(field)
@@ -843,7 +837,7 @@ def _group_key(row: dict, key: str, ctx: Ctx) -> Any:
     return _field_value(row, key)
 
 
-def group(rows: list, group_by: list, metrics: list, ctx: Ctx, *,
+def group(rows: list, group_by: list, metrics: list, *,
           order_by: Optional[str] = None, limit_groups: int = 20,
           labels: Optional[dict] = None) -> tuple:
     """Aggregate only. Callers must omit `rows` from the response entirely."""
@@ -864,7 +858,7 @@ def group(rows: list, group_by: list, metrics: list, ctx: Ctx, *,
 
     buckets: dict = {}
     for row in rows:
-        key = tuple(_group_key(row, part, ctx) for part in group_by)
+        key = tuple(_group_key(row, part) for part in group_by)
         buckets.setdefault(key, []).append(row)
 
     def metric(name: str, members: list) -> Any:
@@ -878,15 +872,9 @@ def group(rows: list, group_by: list, metrics: list, ctx: Ctx, *,
             return max((str(v) for v in values), default=None)
         if agg == "min":
             return min((str(v) for v in values), default=None)
-        if agg == "avg":
-            numbers = [v for v in values if isinstance(v, (int, float))]
-            return round(sum(numbers) / len(numbers), 2) if numbers else None
-        raise errors.InvalidQuery(
-            f"Unknown metric {name!r}.",
-            what="Use count, or agg:field with sum/avg/min/max.",
-            field="metrics", given=name,
-            retry_with=[{"metrics": ["count"]}, {"metrics": ["sum:total_size_bytes"]}],
-        )
+        # avg is the only name left -- the up-front pass rejected every other one.
+        numbers = [v for v in values if isinstance(v, (int, float))]
+        return round(sum(numbers) / len(numbers), 2) if numbers else None
 
     groups = []
     for key, members in buckets.items():

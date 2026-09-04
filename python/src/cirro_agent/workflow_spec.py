@@ -14,10 +14,22 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from . import errors
+from . import errors, session
 
 NEXTFLOW = "NEXTFLOW"
 CROMWELL = "CROMWELL"
+
+# How long to wait on git for a fact about a clone. Longer than session resolution's
+# bound: `describe --tags` on a large history is not instant.
+GIT_TIMEOUT = 30
+
+# The spellings of a git remote a slug can be recovered from. Anything else is
+# already a slug, or a bare pipeline name.
+REMOTE_PREFIXES = ("http://", "https://", "git@")
+
+# `owner/name` out of https://host/owner/name.git and git@host:owner/name.git alike:
+# the last colon-or-slash separated pair, with any .git suffix dropped.
+REPOSITORY_SLUG = re.compile(r"^.*[:/]([^/]+/[^/]+?)(\.git)?$")
 
 # nf-core / epi2me schema keys this parser understands. Anything else on a property is
 # reported under `unknown_keys` rather than dropped silently.
@@ -78,11 +90,24 @@ def resolve_source(target: str, ref: Optional[str], cache_root: Path) -> dict:
             "url": url, **_git_identity(into)}
 
 
+def repository_slug(url_or_slug: str) -> str:
+    """`owner/name` from a git remote URL; an already-bare slug passes through.
+
+    One implementation, shared with the pipeline planner, because the two callers
+    have to agree: `create_process` records the slug for a repository the spec
+    reader identified, and a parse that disagreed would register a pipeline
+    against a repository nobody named.
+    """
+    text = (url_or_slug or "").strip().rstrip("/")
+    if text.startswith(REMOTE_PREFIXES):
+        return REPOSITORY_SLUG.sub(r"\1", text)
+    return text
+
+
 def _normalize_repo(target: str) -> tuple:
     text = target.strip().rstrip("/")
-    if text.startswith(("http://", "https://", "git@")):
-        slug = re.sub(r"^.*[:/]([^/]+/[^/]+?)(\.git)?$", r"\1", text)
-        return text, slug
+    if text.startswith(REMOTE_PREFIXES):
+        return text, repository_slug(text)
     if "/" in text:
         return f"https://github.com/{text}.git", text
     # A bare name is an nf-core pipeline by convention.
@@ -91,22 +116,15 @@ def _normalize_repo(target: str) -> tuple:
 
 def _git_identity(path: Path) -> dict:
     out = {}
-    for key, args in (("version", ["describe", "--tags", "--always"]),
-                      ("commit", ["rev-parse", "HEAD"])):
-        try:
-            done = subprocess.run(["git", "-C", str(path)] + args,
-                                  capture_output=True, text=True, timeout=30)
-            if done.returncode == 0:
-                out[key] = done.stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            pass
-    try:
-        done = subprocess.run(["git", "-C", str(path), "remote", "get-url", "origin"],
-                              capture_output=True, text=True, timeout=30)
-        if done.returncode == 0 and done.stdout.strip():
-            out["repository"] = _normalize_repo(done.stdout.strip())[1]
-    except (OSError, subprocess.SubprocessError):
-        pass
+    for key, arguments in (("version", ["describe", "--tags", "--always"]),
+                           ("commit", ["rev-parse", "HEAD"])):
+        found = session.git_output(path, *arguments, timeout=GIT_TIMEOUT)
+        if found:
+            out[key] = found
+    origin = session.git_output(path, "remote", "get-url", "origin",
+                                timeout=GIT_TIMEOUT)
+    if origin:
+        out["repository"] = _normalize_repo(origin)[1]
     return out
 
 
@@ -260,15 +278,23 @@ def _params_from_config(root: Path, flags: list) -> tuple:
         flags.append({"code": "NO_PARAMS_BLOCK",
                       "detail": "nextflow.config declares no params block."})
         return params, []
-    depth = 0
+    depth, close = 0, None
     for index in range(match.end() - 1, len(text)):
         if text[index] == "{":
             depth += 1
         elif text[index] == "}":
             depth -= 1
             if depth == 0:
+                close = index
                 break
-    body = text[match.end():index]
+    if close is None:
+        flags.append({
+            "code": "PARAMS_BLOCK_UNTERMINATED",
+            "detail": ("The params block in nextflow.config has no closing brace, so no "
+                       "parameters could be read from it. The file is probably truncated."),
+        })
+        return params, []
+    body = text[match.end():close]
     for line in body.splitlines():
         line = line.split("//")[0].strip()
         assignment = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$", line)

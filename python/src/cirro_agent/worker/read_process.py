@@ -2,11 +2,13 @@
 assets, workflow sources, and the validator.
 """
 import json
+from typing import Optional
 
-from .. import errors
-from ..envelope import DEFAULT_MAX_TOKENS, estimate_tokens, wrap
+from .. import errors, formgen
+from ..envelope import DEFAULT_MAX_TOKENS, estimate_tokens, shrink_to_fit, wrap
 from . import rows as R
-from .reads import Reader, near_misses, process_detail, spec_shape
+from .reads import (Reader, near_misses, process_assets, process_detail,
+                    process_revision, spec_shape)
 
 
 def do_process_params(request: dict) -> dict:
@@ -53,11 +55,9 @@ def do_process_params(request: dict) -> dict:
                 },
         cost=reader.cost.to_dict(),
         max_tokens=max_tokens)
-    result = envelope["result"]
-    while estimate_tokens(envelope) > max_tokens and len(result["parameters"]) > 5:
-        keep = max(5, len(result["parameters"]) // 2)
-        result["parameters"] = result["parameters"][:keep]
-        result["parameters_truncated_to"] = keep
+    shrink_to_fit(envelope, "parameters", floor=5, max_tokens=max_tokens,
+                  fix={"verb": "process_params", "id": match["id"],
+                       "max_tokens": max_tokens * 2})
     envelope["budget"]["used_est"] = estimate_tokens(envelope)
     return envelope
 
@@ -116,47 +116,37 @@ def do_process_config(request: dict) -> dict:
 
 
 def _storage_config(reader: Reader, process_id: str, request: dict) -> dict:
-    from cirro_api_client.v1.api.processes import (get_latest_process_revision,
-                                                   get_process_resource)
-    from cirro_api_client.v1.models import ProcessResource
+    revision, failure = process_revision(reader, process_id)
+    if failure:
+        return {"revision": None,
+                "note": ("Cirro would not say which configuration revision this "
+                         f"process is serving ({failure['reason']}), so nothing here "
+                         "describes its configuration -- which is not the same as it "
+                         "having none"),
+                "omitted": [{"what": "the configuration revision and its assets",
+                             "why": failure["reason"],
+                             "fix": {"verb": "process_config", "id": process_id}}]}
+    if revision is None:
+        return {"revision": None,
+                "note": ("no configuration revisions exist yet; the process is "
+                         "registered but unconfigured")}
 
-    out: dict = {}
-    try:
-        response = get_latest_process_revision.sync_detailed(
-            process_id, client=reader.client._api_client)
-        reader.cost.call("processes.latest_revision")
-        revision = response.parsed
-        out["revision"] = {
-            "number": R.plain(getattr(revision, "revision_number", None)),
-            "committed_at": R.plain(getattr(revision, "created_at", None)),
-            "commit_message": R.plain(getattr(revision, "commit_message", None)),
-        }
-        # The token an update must pass as if_match is the revision number as a string,
-        # not the per-slot content hash.
-        out["update_token"] = str(out["revision"]["number"])
-    except Exception as exc:
-        out["revision"] = None
-        out["note"] = (f"no configuration revisions exist yet ({type(exc).__name__}); "
-                       "the process is registered but unconfigured")
-        return out
-
-    wanted = [request["slot"]] if request.get("slot") else list(CONFIG_SLOTS)
+    out = {"revision": {key: revision[key] for key in
+                        ("number", "committed_at", "commit_message")},
+           "update_token": revision["token"]}
     raw = bool(request.get("raw"))
-    assets = {}
-    for slot in wanted:
-        try:
-            response = get_process_resource.sync_detailed(
-                process_id, ProcessResource(slot), client=reader.client._api_client)
-            reader.cost.call("processes.get_resource")
-            content = R.plain(getattr(response.parsed, "content", None))
-        except Exception:
-            content = None
-        if not content:
-            continue
-        assets[slot] = _describe_asset(slot, content, raw)
-    out["assets"] = assets
-    out["slots_present"] = sorted(assets)
-    if not raw and assets:
+    wanted = [request["slot"]] if request.get("slot") else None
+    content, unreadable = process_assets(reader, process_id, wanted)
+    out["assets"] = {slot: _describe_asset(slot, text, raw)
+                     for slot, text in content.items()}
+    out["slots_present"] = sorted(out["assets"])
+    if unreadable:
+        # slots_present would otherwise understate what the process holds.
+        out["omitted"] = [{"what": f"the {slot} slot", "why": why["reason"],
+                           "fix": {"verb": "process_config", "id": process_id,
+                                   "slot": slot}}
+                          for slot, why in sorted(unreadable.items())]
+    if not raw and out["assets"]:
         out["how_to_read_contents"] = (
             "add --raw (optionally with --slot <name>) to get the verbatim file text")
     return out
@@ -170,7 +160,7 @@ def _describe_asset(slot: str, content: str, raw: bool) -> dict:
         "lines": content.count("\n") + 1,
         "sha256": hashlib.sha256(content.encode()).hexdigest()[:16],
     }
-    if slot in ("form", "input", "output", "metadata"):
+    if slot in formgen.JSON_SLOTS:
         try:
             parsed = json.loads(content)
             entry["valid_json"] = True
@@ -206,26 +196,42 @@ def _repo_config(row: dict) -> dict:
     repo = settings.get("repository")
     branch = settings.get("branch") or R.DEFAULT_BRANCH
     folder = settings.get("folder") or R.DEFAULT_CONFIG_FOLDER
+    repository_type = settings.get("repository_type")
     out = {
         "repo": {"repository": repo, "branch": branch, "folder": folder,
-                 "repository_type": settings.get("repository_type")},
+                 "repository_type": repository_type},
         "sync": {"status": settings.get("sync_status"),
                  "last_sync": settings.get("last_sync"),
                  "commit_hash": settings.get("commit_hash"),
                  "is_authorized": settings.get("is_authorized")},
-        "browse": (f"https://github.com/{repo}/tree/{branch}/{folder}"
-                   if repo else None),
+        "browse": _browse_url(repo, branch, folder, repository_type),
         "note": ("the configuration lives in git, not in Cirro -- read it from a "
                  "checkout of that repo, folder and branch"),
     }
+    if repo and out["browse"] is None:
+        out["note"] += (f"; no browse link because repository_type {repository_type!r} "
+                        "does not say which host serves this repository")
+    # Both, not the later one: a repo can have failed its last sync AND have had its
+    # authorization revoked, and reporting only the second hid the stale configuration.
+    warnings = []
     if settings.get("sync_status") == "FAILED":
-        out["warning"] = ("the last sync from this repo FAILED, so the configuration "
-                          "Cirro is running may be older than what the repo contains")
+        warnings.append("the last sync from this repo FAILED, so the configuration "
+                        "Cirro is running may be older than what the repo contains")
     if settings.get("is_authorized") is False:
-        out["warning"] = ("Cirro is not authorized to read this repository, so it cannot "
-                          "sync the configuration at all")
+        warnings.append("Cirro is not authorized to read this repository, so it cannot "
+                        "sync the configuration at all")
+    if warnings:
+        out["warnings"] = warnings
     return out
 
 
-CONFIG_SLOTS = ("form", "input", "output", "compute", "preprocess", "documentation",
-                "metadata")
+def _browse_url(repo, branch: str, folder: str, repository_type) -> Optional[str]:
+    """A link only where the repository type says which host to link to.
+
+    RepositoryType is GITHUB_PUBLIC | GITHUB_PRIVATE | AWS | NONE | UNKNOWN. Only the
+    GitHub pair names a host; a CodeCommit or self-hosted repo was being handed a
+    github.com URL that points at someone else's repository, or at nothing.
+    """
+    if not repo or not str(repository_type or "").startswith("GITHUB"):
+        return None
+    return f"https://github.com/{repo}/tree/{branch}/{folder}"

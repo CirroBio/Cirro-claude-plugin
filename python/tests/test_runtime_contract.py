@@ -5,10 +5,33 @@ configuration is impossible without the >=1.6.0 routes. That override is only sa
 while cirro itself still works against 1.6.0, so assert both halves here: a future
 cirro release that breaks the pairing fails the build instead of silently removing
 the ability to configure pipelines.
+
+Also the plugin's own version, which is declared in three manifests that have to agree.
 """
 import importlib
+import json
+import re
+from pathlib import Path
 
 import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_the_three_manifests_declare_one_version():
+    """`plugin.json` is what a marketplace installs and what the user sees, so it is
+    the source of truth; the two pyprojects are what gets built into the venvs. They
+    had drifted to 0.3.0 against a released 0.4.2, so the installed wheel reported a
+    version the plugin had not been for two releases.
+    """
+    declared = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())["version"]
+    for manifest in (ROOT / "python" / "pyproject.toml",
+                     ROOT / "runtime" / "pyproject.toml"):
+        found = re.search(r'^version = "([^"]+)"', manifest.read_text(), re.M)
+        assert found, f"{manifest.relative_to(ROOT)} declares no version"
+        assert found.group(1) == declared, (
+            f"{manifest.relative_to(ROOT)} says {found.group(1)} but "
+            f".claude-plugin/plugin.json says {declared} -- bump them together")
 
 
 def test_client_is_at_least_1_6():

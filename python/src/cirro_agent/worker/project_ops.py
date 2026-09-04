@@ -249,24 +249,42 @@ def apply_update_sample(reader: reads.Reader, args: dict) -> dict:
     return {"updated_sample": args["sample_id"]}
 
 
+def _current_schema_keys(reader: reads.Reader, project_id: str) -> tuple:
+    """The metadata keys a project declares today, or why they are unknown.
+
+    Reading the absent `form_spec_json` left old_keys empty for every project, which
+    rendered as "keys removed []" and suppressed the removal warning -- so a schema
+    replacement that dropped keys was approved as though it dropped none. A document
+    that cannot be read is an unknown baseline, never an empty one; only a document
+    with nothing in it declares no keys.
+    """
+    try:
+        document = reads.project_schema_document(reader, project_id)
+    except Exception as exc:
+        # The exception TYPE, never its text. This reason is rendered into the approval
+        # and `_same_disclosure` compares it verbatim at apply, so an upstream body
+        # carrying a request id would make every affected plan PLAN_STALE.
+        return [], f"the schema request failed ({type(exc).__name__})"
+    if document is None:
+        return [], "the schema did not come back as a document"
+    keys = reads.declared_schema_keys(document)
+    if keys is None:
+        if document:
+            return [], (f"the schema document {sorted(document)} declares no properties "
+                        "under form, metadataRequirements or its root")
+        return [], None
+    return keys, None
+
+
 def plan_update_project_schema(reader: reads.Reader, args: dict) -> Draft:
     _need(args, "update_project_schema", "schema")
     project = _project(reader, args)
     schema_payload = args["schema"]
-    new_keys = sorted((schema_payload.get("properties") or {}).keys()) \
+    # Both sides of the diff are read the same way, so a payload that declares its
+    # fields under `form` is not reported as removing every key it keeps.
+    new_keys = (reads.declared_schema_keys(schema_payload) or []) \
         if isinstance(schema_payload, dict) else []
-    old_keys, baseline_error = [], None
-    try:
-        current = reader.client.metadata.get_project_schema(project_id=project["id"])
-        reader.cost.call("metadata.schema")
-        spec = getattr(current, "form_spec_json", None) or {}
-        old_keys = sorted((spec.get("properties") or {}).keys()) \
-            if isinstance(spec, dict) else []
-    except Exception as exc:
-        # Swallowing this used to leave old_keys empty, which rendered as "keys
-        # removed []" and suppressed the removal warning -- so a schema replacement
-        # that dropped keys was approved as though it dropped none.
-        baseline_error = str(exc)
+    old_keys, baseline_error = _current_schema_keys(reader, project["id"])
 
     lines = [f"Replace the sample-metadata schema of {project['name']} "
              f"({project['id']}).", ""]

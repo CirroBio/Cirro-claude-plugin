@@ -1,6 +1,7 @@
 """The PreToolUse gate. Table-driven over a bypass corpus."""
 import ast
 import json
+import os
 import re
 import subprocess
 import sys
@@ -14,20 +15,32 @@ GATE = Path(__file__).resolve().parents[2] / "scripts" / "gate.py"
 ALLOW, ASK, DENY = "allow", "ask", "deny"
 
 
-def run(event: dict) -> str:
+def decide(event: dict, env: dict | None = None) -> tuple:
+    """The gate's decision and the text the human would be shown."""
+    child = dict(os.environ)
+    # It bounds the session resolver's upward walk, so a test that cares sets it.
+    child.pop("CLAUDE_PROJECT_DIR", None)
+    child.update(env or {})
     done = subprocess.run([sys.executable, str(GATE)], input=json.dumps(event),
-                          capture_output=True, text=True, timeout=30)
+                          capture_output=True, text=True, timeout=30, env=child)
     if done.returncode == 2:
-        return DENY
+        return DENY, done.stderr
     assert done.returncode == 0, done.stderr
     if not done.stdout.strip():
-        return ALLOW
-    decision = json.loads(done.stdout)["hookSpecificOutput"]["permissionDecision"]
-    return decision
+        return ALLOW, ""
+    output = json.loads(done.stdout)["hookSpecificOutput"]
+    return output["permissionDecision"], output["permissionDecisionReason"]
 
 
-def bash(command: str) -> dict:
-    return {"tool_name": "Bash", "tool_input": {"command": command}}
+def run(event: dict) -> str:
+    return decide(event)[0]
+
+
+def bash(command: str, cwd: Path | None = None) -> dict:
+    event = {"tool_name": "Bash", "tool_input": {"command": command}}
+    if cwd is not None:
+        event["cwd"] = str(cwd)
+    return event
 
 
 BYPASS_ATTEMPTS = [
@@ -115,16 +128,59 @@ SDK_SCRIPT = "from cirro import DataPortal\nDataPortal().list_projects()\n"
     "env FOO=1 python3 {path}",
     "ls && python3 {path}",
     'bash -c "python3 {path}"',
+    # An interpreter fed the file instead of given it as an argument: the segment has
+    # no script in its argv at all, and the file is named in the pipeline's other
+    # stage or in a redirect that is not a segment of its own.
+    "cat {path} | python3",
+    "python3 - < {path}",
+    "python3 <{path}",
+    "echo {path} | xargs python3",
+    # shlex expands no parameter, so the program name stayed the literal `$PY`.
+    "PY=python3; $PY {path}",
 ])
 def test_running_a_script_that_drives_the_sdk_is_denied(tmp_path, template):
     path = _script(tmp_path, "analyse.py", SDK_SCRIPT)
     assert run(bash(template.format(path=path))) == DENY
 
 
+def test_a_module_is_the_code_that_runs(tmp_path):
+    """`python -m mod` names no file; the module's own file is what executes."""
+    _script(tmp_path, "sdkmod.py", SDK_SCRIPT)
+    (tmp_path / "pkg").mkdir()
+    _script(tmp_path, "pkg/__main__.py", SDK_SCRIPT)
+    assert run(bash("python3 -m sdkmod", cwd=tmp_path)) == DENY
+    assert run(bash("python3 -m pkg", cwd=tmp_path)) == DENY
+    # A module that is not a file in the directory is somebody else's program, and
+    # the paths after it are its argv rather than the code being run.
+    assert run(bash("python3 -m pytest sdkmod.py -q", cwd=tmp_path)) == ALLOW
+
+
 def test_running_a_shell_script_that_drives_the_cli_is_denied(tmp_path):
     path = _script(tmp_path, "run.sh", "#!/bin/sh\ncirro upload -p X -n Y\n")
     assert run(bash(f"bash {path}")) == DENY
     assert run(bash(str(path))) == DENY
+    # Sourcing it runs it in the current shell, which is the same act.
+    assert run(bash(f"source {path}")) == DENY
+    assert run(bash(f". {path}")) == DENY
+    assert run(bash(f"zsh -c 'source {path}'")) == DENY
+
+
+@pytest.mark.parametrize("tail", [
+    'python3 -c "import cirro"',
+    "cirro upload --project X --name Y",
+    "cirro-agent apply --plan p1",
+    "aws s3 cp s3://cirro-project-data/x .",
+])
+def test_a_shell_wrapper_does_not_disable_the_rest_of_the_command(tmp_path, tail):
+    """inspect_bash used to exit the process with "allow" at the end of its own body.
+
+    Called recursively on a shell script's body or a `-c` payload, that nested call
+    ended the whole hook, so every segment after the first shell wrapper went
+    uninspected: one benign wrapper turned off every detector below it.
+    """
+    benign = _script(tmp_path, "benign.sh", "#!/bin/sh\ntrue\n")
+    assert run(bash(f"bash {benign} && {tail}")) == DENY
+    assert run(bash(f'bash -c "true" && {tail}')) == DENY
 
 
 def test_a_script_naming_no_sdk_is_allowed(tmp_path):
@@ -243,6 +299,62 @@ def test_the_gate_finds_the_session_from_a_subdirectory(workdir):
     assert run(event) == ASK
 
 
+def test_the_gate_reads_the_session_from_the_directory_argument(workdir, tmp_path):
+    """Every MCP tool takes `directory`, and one Claude session works across several
+    bound folders. Resolving from cwd alone looked in the wrong .cirro: an apply whose
+    directory names the folder holding the plan was hard-blocked as nonexistent."""
+    plan = make_plan(workdir)
+    unbound = tmp_path / "unbound"
+    unbound.mkdir()
+    for cwd in (unbound, tmp_path):
+        decision, reason = decide(
+            {"tool_name": "mcp__cirro__apply", "cwd": str(cwd),
+             "tool_input": {"plan_id": plan.plan_id, "digest": plan.digest,
+                            "directory": str(workdir.path.parent)}})
+        assert decision == ASK
+        assert "delete_dataset" in reason, "the plan itself must have been read"
+
+
+def _global_credential(home: Path):
+    """A session folder at ~/.cirro, holding a plan, as the SDK's default would be."""
+    from cirro_agent import plans, session as session_mod
+    home.mkdir(parents=True)
+    session = session_mod.init(home, "app.cirro.bio")
+    plan = plans.create(session, op="delete_dataset", args={"dataset_id": "ds_9"},
+                        summary="DELETE ds_9", username="sminot")
+    return plan
+
+
+def test_the_gate_refuses_the_machine_wide_credential_folder(tmp_path):
+    """The gate carried its own weaker copy of the resolver, with neither safety rule:
+    from any directory under $HOME it resolved the machine-wide ~/.cirro and read plans
+    out of the credential every tool on the machine shares."""
+    home = tmp_path / "home"
+    plan = _global_credential(home)
+    work = home / "work"
+    work.mkdir()
+    decision, reason = decide(
+        {"tool_name": "mcp__cirro__apply", "cwd": str(work),
+         "tool_input": {"plan_id": plan.plan_id, "digest": plan.digest}},
+        {"HOME": str(home)})
+    assert decision == ASK
+    assert "could not locate the session folder" in reason
+    assert "delete_dataset" not in reason
+
+
+def test_the_gate_does_not_climb_past_the_project_root(tmp_path):
+    """The other rule the gate's copy lacked: the walk stops at the project root."""
+    plan = _global_credential(tmp_path / "above")
+    repo = tmp_path / "above" / "repo"
+    repo.mkdir()
+    decision, reason = decide(
+        {"tool_name": "mcp__cirro__apply", "cwd": str(repo),
+         "tool_input": {"plan_id": plan.plan_id, "digest": plan.digest}},
+        {"CLAUDE_PROJECT_DIR": str(repo)})
+    assert decision == ASK
+    assert "could not locate the session folder" in reason
+
+
 def test_a_malformed_plan_id_is_refused_before_touching_disk(tmp_path):
     """The id becomes a path, so it is validated by shape first."""
     event = {"tool_name": "mcp__cirro__apply", "cwd": str(tmp_path),
@@ -301,18 +413,46 @@ def test_the_gate_catches_a_plan_edited_on_disk(workdir):
     assert run(apply_event(workdir, plan_id=plan.plan_id, digest=plan.digest)) == DENY
 
 
+def test_a_line_continuation_is_one_command_not_two(tmp_path):
+    """A backslash before a newline continues a command; it does not separate two.
+    Both splitters treated a bare newline as a separator, so a continuation line
+    starting with a path made that path look like the program being executed --
+    `sed -i '' \\<nl> -e 's/a/b/' \\<nl> pkg/mod.py` was denied as though the .py file
+    were being run. Editing a file is not executing it."""
+    driver = tmp_path / "mod.py"
+    driver.write_text("from cirro import DataPortal\n")
+
+    edit = f"sed -i '' \\\n -e 's/a/b/' \\\n {driver.name}"
+    assert decide(bash(edit, cwd=str(tmp_path)))[0] == ALLOW
+    assert decide(bash(f"{edit} && sed -n '1p' {driver.name}",
+                       cwd=str(tmp_path)))[0] == ALLOW
+
+    # The same continuation must not become a way to hide a real execution.
+    hidden = f"echo one \\\n && python3 {driver.name}"
+    assert decide(bash(hidden, cwd=str(tmp_path)))[0] == DENY
+    assert decide(bash(f"echo one \\\n && bash -c 'python3 {driver.name}'",
+                       cwd=str(tmp_path)))[0] == DENY
+
+
 def test_the_gate_uses_the_one_digest_implementation(workdir):
     """The gate used to carry its own copy of DIGEST_FIELDS and the sha256 over them,
-    held in step with plans.py by a test. It now imports canonical_digest, so there is
-    nothing left to agree: the check is that it really does import it, computes nothing
-    of its own, and -- run as the hook is run, with a bare interpreter -- still asks."""
+    held in step with plans.py by a test. It now delegates the whole applicability
+    question to `plans.preflight`, so it names no digest primitive at all: the checks
+    are that it imports the shared predicate, computes nothing of its own, and -- run
+    as the hook is run, with a bare interpreter -- still asks on a good plan.
+
+    `test_a_tampered_digest_is_denied` and `test_an_expired_plan_is_denied` are the
+    teeth; this test only stops a second implementation growing back beside them."""
     plan = make_plan(workdir)
     assert run(apply_event(workdir, plan_id=plan.plan_id, digest=plan.digest)) == ASK
     source = GATE.read_text()
     assert "from cirro_agent.plans import" in source
-    assert "canonical_digest" in source
+    assert "preflight" in source, "the gate must ask the shared predicate, not its own"
     assert "hashlib" not in source, "a second digest implementation crept back in"
     assert "DIGEST_FIELDS = (" not in source, "a second copy of the field list crept back in"
+    assert "canonical_digest(" not in source, (
+        "the gate should reach the digest only through plans.preflight, so there is "
+        "one place that decides what a plan's integrity covers")
 
 
 def test_the_approval_text_shows_the_real_operation_and_arguments(workdir):
@@ -330,10 +470,11 @@ def test_the_approval_text_shows_the_real_operation_and_arguments(workdir):
     assert "D-VICTIM" in reason, "the real target must be visible, not just the prose"
 
 
-def test_the_plans_module_the_gate_imports_is_stdlib_only():
-    """Importing it under a system Python with no cirro installed must load nothing but
-    the plugin's own pure modules -- that is what lets the gate run with no venv."""
+def test_the_modules_the_gate_imports_are_stdlib_only():
+    """Importing them under a system Python with no cirro installed must load nothing
+    but the plugin's own pure modules -- that is what lets the gate run with no venv."""
     code = ("import sys; sys.path.insert(0, 'python/src'); import cirro_agent.plans; "
+            "import cirro_agent.session; "
             "bad = [m for m in sys.modules if m.startswith('cirro') and "
             "not m.startswith('cirro_agent')]; assert not bad, bad; "
             "print(sorted(m for m in sys.modules if m.startswith('cirro_agent')))")
@@ -341,6 +482,31 @@ def test_the_plans_module_the_gate_imports_is_stdlib_only():
                           cwd=GATE.parents[1])
     assert done.returncode == 0, done.stderr[-600:]
     assert "cirro_agent.plans" in done.stdout
+    assert "cirro_agent.session" in done.stdout
+
+
+def test_the_gate_defines_itself_on_the_oldest_python_it_can_be_launched_with():
+    """hooks.json launches the gate by its shebang, so it runs on whatever `python3`
+    is first on PATH -- 3.9.6 on a stock macOS. PEP 604 annotations are evaluated at
+    definition time, so without `from __future__ import annotations` the file raises
+    TypeError before main() runs. Claude Code reports that as a hook *error*, not a
+    block, so the gate would be silently inert and nothing would be gated."""
+    source = GATE.read_text()
+    body = source.split('"""', 2)[2]
+    assert "from __future__ import annotations" in body, (
+        "the gate uses `X | None` annotations and must defer their evaluation")
+    compile(source, str(GATE), "exec")
+
+    oldest = Path("/usr/bin/python3")
+    if not oldest.exists():
+        return
+    done = subprocess.run([str(oldest), str(GATE)],
+                          input=json.dumps({"tool_name": "Bash",
+                                            "tool_input": {"command": "echo hi"},
+                                            "cwd": "/tmp"}),
+                          capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr[-600:]
+    assert "TypeError" not in done.stderr
 
 
 def test_a_chain_approval_names_every_step_before_the_argument_dump(workdir):

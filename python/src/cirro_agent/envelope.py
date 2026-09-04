@@ -37,6 +37,13 @@ DEFAULT_MAX_TOKENS = {
     "check_config": 6000,
 }
 
+# `include` on a detail-or-worse tier costs one call per row, so it is gated. Here
+# rather than in a read verb because the session-free local reads quote it too, and
+# importing it from `worker.read_query` pulled five worker modules into the parent
+# process to read one integer -- inverting the layering that keeps those reads free of
+# the worker package.
+DETAIL_BUDGET = 25
+
 ROWS_PAGE = "page"
 ROWS_PREVIEW = "preview_not_page"
 ROWS_SAMPLE = "sample"
@@ -176,6 +183,212 @@ def _project(rows: list, keys: list) -> list:
     return [{k: r[k] for k in keys if k in r} for r in rows]
 
 
+def _row_steps(rows: list, exemplars: Optional[list], projections: dict,
+               is_full_page: bool) -> list:
+    """The rows ladder, worst case last.
+
+    page/standard -> page/compact -> preview/standard -> preview/compact -> ids only
+    -> nothing. Whole rows and whole objects only; a structure is never cut in half.
+
+    Each step's renderer stays a closure: the ladder usually stops on its first or
+    second rung, and a step that is never reached is never paid for.
+    """
+    standard = projections.get("standard") or (list(rows[0]) if rows else [])
+    compact_keys = projections.get("compact") or standard
+    steps = []
+    if is_full_page:
+        steps.append(("page/standard", ROWS_PAGE, lambda: _project(rows, standard)))
+        if compact_keys != standard:
+            steps.append(("page/compact", ROWS_PAGE,
+                          lambda: _project(rows, compact_keys)))
+    preview = exemplars if exemplars is not None else rows[:5]
+    steps.append(("preview/standard", ROWS_PREVIEW,
+                  lambda: _project(preview, ["_why"] + standard)))
+    steps.append(("preview/compact", ROWS_PREVIEW,
+                  lambda: _project(preview, ["_why"] + compact_keys)))
+    steps.append((
+        "ids_only", ROWS_SAMPLE,
+        lambda: [{k: r[k] for k in ("id", "name", "path") if k in r} for r in preview]))
+    steps.append(("none", ROWS_SAMPLE, lambda: []))
+    return steps
+
+
+@dataclass
+class _Assembly:
+    """A response mid-assembly, and how far down the ladder it has come.
+
+    No stage of the ladder can judge its own step without re-rendering the whole
+    envelope and measuring it, so every stage needs the same inputs plus the three
+    pieces of degradation state -- `row_step`, `top_k` and `dropped`. Holding them
+    here is what lets a stage be read on its own; as closures over `build()`'s frame
+    they shared fifteen captured names and nothing could be understood in isolation.
+
+    A stage takes the last measured envelope and returns the one it settled on, so
+    a stage with nothing to do returns what it was given untouched.
+    """
+    entity: str
+    query: dict
+    counts: Counts
+    cost: Cost
+    rows: Optional[list]
+    groups: Optional[list]
+    group_extras: Optional[dict]
+    facets: dict
+    shape: Optional[dict]
+    next_calls: list
+    facet_priority: list
+    omitted: list
+    notes: list
+    max_tokens: int
+    row_steps: list
+    degraded: list = field(default_factory=list)
+    row_step: int = 0
+    top_k: int = 10
+    dropped: list = field(default_factory=list)
+
+    def assemble(self) -> dict:
+        result: dict = {"entity": self.entity, "counts": self.counts.to_dict()}
+        if self.groups is not None:
+            result["groups"] = self.groups
+            for key, value in (self.group_extras or {}).items():
+                result[key] = value
+        if self.rows is not None:
+            _, rows_are, render = self.row_steps[self.row_step]
+            body = render()
+            self.counts.returned = len(body)
+            self.counts.rows_are = rows_are
+            result["counts"] = self.counts.to_dict()
+            result["rows"] = body
+        rendered = {}
+        for name in self.facet_priority:
+            if name in self.dropped or name not in self.facets:
+                continue
+            rendered[name] = self.facets[name].render(self.top_k)
+        if rendered:
+            result["facets"] = rendered
+        if self.shape:
+            result["shape"] = self.shape
+        result["next_calls"] = self.next_calls
+        envelope = {
+            "ok": True,
+            "api": {"contract": CONTRACT},
+            "query": self.query,
+            "result": result,
+            "cost": self.cost.to_dict(),
+            "budget": {"max_tokens": self.max_tokens, "degraded": self.degraded},
+        }
+        all_omitted = self.omitted + self.budget_omissions()
+        if all_omitted:
+            envelope["omitted"] = all_omitted
+        if self.notes:
+            envelope["notes"] = self.notes
+        return envelope
+
+    def budget_omissions(self) -> list:
+        """What the budget cost, computed from current state.
+
+        Derived inside assemble() rather than appended afterwards, so that every
+        measurement the ladder takes already includes its own bookkeeping. Adding
+        these at the end would let a response that just fit tip back over.
+        """
+        out = []
+        if self.rows is not None and self.counts.rows_are == ROWS_PREVIEW:
+            out.append({
+                "code": "ROWS_PREVIEWED",
+                "detail": (
+                    f"{self.counts.returned} labeled exemplars returned instead of a "
+                    f"page. All counts and facets above are computed over the full "
+                    f"{self.counts.matched} matches, not over these exemplars -- do not "
+                    "treat them as a sample."
+                ),
+                "fix": {"note": "Narrow the filter (see next_calls) so the match set fits."},
+            })
+        if self.dropped:
+            out.append({
+                "code": "FACETS_DROPPED",
+                "fields": list(self.dropped),
+                "detail": ("Dropped to fit the budget; the counts they"
+                           " summarize are unchanged."),
+                "fix": {"note": "Re-run with a higher max_tokens, or a narrower filter."},
+            })
+        truncated = {
+            name: {"shown": self.top_k, "cardinality": self.facets[name].cardinality}
+            for name in self.facets
+            if self.facets[name].kind == "terms"
+            and name not in self.dropped
+            and self.facets[name].cardinality > self.top_k
+        }
+        if truncated:
+            out.append({"code": "FACET_TRUNCATED", "fields": truncated})
+        return out
+
+    def fits(self, envelope: dict) -> bool:
+        return estimate_tokens(envelope) <= self.max_tokens
+
+    def shorter_rows(self, envelope: dict) -> dict:
+        while self.row_step < len(self.row_steps) - 1:
+            before = self.row_steps[self.row_step][0]
+            self.row_step += 1
+            self.degraded.append({"what": "rows", "from": before,
+                                  "to": self.row_steps[self.row_step][0]})
+            envelope = self.assemble()
+            if self.fits(envelope):
+                break
+        return envelope
+
+    def shallower_facets(self, envelope: dict) -> dict:
+        for top_k in (5, 3):
+            self.top_k = top_k
+            self.degraded.append({"what": "facets", "to": f"top{top_k}"})
+            envelope = self.assemble()
+            if self.fits(envelope):
+                break
+        return envelope
+
+    def fewer_facets(self, envelope: dict) -> dict:
+        # Drop from the least informative end of the entity's declared priority. The
+        # first facet is never dropped; a response keeps the shape of the match set.
+        for name in reversed(self.facet_priority[1:]):
+            if name not in self.facets:
+                continue
+            self.dropped.append(name)
+            self.degraded.append({"what": f"facets.{name}", "to": "dropped"})
+            envelope = self.assemble()
+            if self.fits(envelope):
+                break
+        return envelope
+
+    def fewer_next_calls(self, envelope: dict) -> dict:
+        # Never to zero -- a response must always offer a way forward.
+        for keep in (3, 1):
+            if len(self.next_calls) <= keep:
+                continue
+            del self.next_calls[keep:]
+            self.degraded.append({"what": "next_calls", "to": f"{keep}"})
+            envelope = self.assemble()
+            if self.fits(envelope):
+                break
+        return envelope
+
+    def finalize(self) -> dict:
+        final = self.assemble()
+        used = estimate_tokens(final)
+        if used > self.max_tokens:
+            # Every degradation step is exhausted and the skeleton still exceeds the
+            # cap. Say so rather than cutting a structure in half. Added before the
+            # figure is recorded, so the note counts toward the total it explains.
+            final.setdefault("notes", []).append(
+                f"BUDGET_FLOOR: every degradation step is exhausted and this response "
+                f"still exceeds max_tokens={self.max_tokens}. Nothing was truncated "
+                f"mid-structure."
+            )
+            used = estimate_tokens(final)
+        # used_est is part of the payload it measures, so it under-reports by the width
+        # of the number itself -- a handful of tokens. Accurate, not exact.
+        final["budget"]["used_est"] = used
+        return final
+
+
 def build(
     *,
     entity: str,
@@ -195,15 +408,16 @@ def build(
     notes: Optional[list] = None,
     max_tokens: int = 6000,
 ) -> dict:
-    """Assemble a response, shrinking it to fit `max_tokens`."""
+    """Assemble a response, shrinking it to fit `max_tokens`.
+
+    The ladder runs in one order and stops as soon as the envelope fits: rows, then
+    facets (shallower, then narrower), then next_calls. Rows go first because facets
+    are lossy but complete while rows are complete but lossy -- see the module
+    docstring. Each stage is a method on `_Assembly`.
+    """
     max_tokens = max(int(max_tokens), MIN_TOKENS)
-    omitted = list(omitted or [])
-    notes = list(notes or [])
     facets = dict(facets or {})
-    next_calls = list(next_calls or [])
-    projections = projections or {}
-    facet_priority = list(facet_priority or list(facets))
-    degraded = []
+    omitted = list(omitted or [])
 
     if not counts.scan_complete:
         omitted.append({
@@ -216,189 +430,63 @@ def build(
             "fix": {"note": "Narrow the scope, or raise scan_limit, then re-run."},
         })
 
-    facet_state = {"top_k": 10, "dropped": []}
-    rows_state = {"step": 0}
+    assembly = _Assembly(
+        entity=entity, query=query, counts=counts, cost=cost, rows=rows,
+        groups=groups, group_extras=group_extras, facets=facets, shape=shape,
+        next_calls=list(next_calls or []),
+        facet_priority=list(facet_priority or list(facets)),
+        omitted=omitted, notes=list(notes or []), max_tokens=max_tokens,
+        row_steps=[] if rows is None else _row_steps(
+            rows, exemplars, projections or {}, counts.matched == len(rows)),
+    )
 
-    # rows: page/standard -> page/compact -> exemplars/standard -> exemplars/compact
-    #       -> ids only -> nothing. Whole rows and whole objects only; a structure
-    #       is never cut in half.
-    is_full_page = rows is not None and counts.matched == len(rows)
-    row_steps = []
-    if rows is not None:
-        std = projections.get("standard") or (list(rows[0]) if rows else [])
-        cmp_ = projections.get("compact") or std
-        if is_full_page:
-            row_steps.append(("page/standard", ROWS_PAGE, lambda: _project(rows, std)))
-            if cmp_ != std:
-                row_steps.append(("page/compact", ROWS_PAGE, lambda: _project(rows, cmp_)))
-        ex = exemplars if exemplars is not None else rows[:5]
-        row_steps.append(("preview/standard", ROWS_PREVIEW,
-                          lambda: _project(ex, ["_why"] + std)))
-        row_steps.append(("preview/compact", ROWS_PREVIEW,
-                          lambda: _project(ex, ["_why"] + cmp_)))
-        row_steps.append((
-            "ids_only", ROWS_SAMPLE,
-            lambda: [{k: r[k] for k in ("id", "name", "path") if k in r} for r in ex]))
-        row_steps.append(("none", ROWS_SAMPLE, lambda: []))
-
-    def assemble() -> dict:
-        result: dict = {"entity": entity, "counts": counts.to_dict()}
-        if groups is not None:
-            result["groups"] = groups
-            for key, value in (group_extras or {}).items():
-                result[key] = value
-        if rows is not None:
-            label, rows_are, make = row_steps[rows_state["step"]]
-            body = make()
-            counts.returned = len(body)
-            counts.rows_are = rows_are
-            result["counts"] = counts.to_dict()
-            result["rows"] = body
-        rendered = {}
-        for name in facet_priority:
-            if name in facet_state["dropped"] or name not in facets:
-                continue
-            rendered[name] = facets[name].render(facet_state["top_k"])
-        if rendered:
-            result["facets"] = rendered
-        if shape:
-            result["shape"] = shape
-        result["next_calls"] = next_calls
-        envelope = {
-            "ok": True,
-            "api": {"contract": CONTRACT},
-            "query": query,
-            "result": result,
-            "cost": cost.to_dict(),
-            "budget": {"max_tokens": max_tokens, "degraded": degraded},
-        }
-        all_omitted = omitted + budget_omissions()
-        if all_omitted:
-            envelope["omitted"] = all_omitted
-        if notes:
-            envelope["notes"] = notes
-        return envelope
-
-    def budget_omissions() -> list:
-        """What the budget cost, computed from current state.
-
-        Derived inside assemble() rather than appended afterwards, so that every
-        measurement the ladder takes already includes its own bookkeeping. Adding
-        these at the end would let a response that just fit tip back over.
-        """
-        out = []
-        if rows is not None and counts.rows_are == ROWS_PREVIEW:
-            out.append({
-                "code": "ROWS_PREVIEWED",
-                "detail": (
-                    f"{counts.returned} labeled exemplars returned instead of a page. All "
-                    f"counts and facets above are computed over the full {counts.matched} "
-                    "matches, not over these exemplars -- do not treat them as a sample."
-                ),
-                "fix": {"note": "Narrow the filter (see next_calls) so the match set fits."},
-            })
-        if facet_state["dropped"]:
-            out.append({
-                "code": "FACETS_DROPPED",
-                "fields": list(facet_state["dropped"]),
-                "detail": ("Dropped to fit the budget; the counts they"
-                           " summarize are unchanged."),
-                "fix": {"note": "Re-run with a higher max_tokens, or a narrower filter."},
-            })
-        truncated = {
-            name: {"shown": facet_state["top_k"], "cardinality": facets[name].cardinality}
-            for name in facets
-            if facets[name].kind == "terms"
-            and name not in facet_state["dropped"]
-            and facets[name].cardinality > facet_state["top_k"]
-        }
-        if truncated:
-            out.append({"code": "FACET_TRUNCATED", "fields": truncated})
-        return out
-
-    def fits(env: dict) -> bool:
-        return estimate_tokens(env) <= max_tokens
-
-    def finalize() -> dict:
-        final = assemble()
-        used = estimate_tokens(final)
-        if used > max_tokens:
-            # Every degradation step is exhausted and the skeleton still exceeds the
-            # cap. Say so rather than cutting a structure in half. Added before the
-            # figure is recorded, so the note counts toward the total it explains.
-            final.setdefault("notes", []).append(
-                f"BUDGET_FLOOR: every degradation step is exhausted and this response "
-                f"still exceeds max_tokens={max_tokens}. Nothing was truncated "
-                f"mid-structure."
-            )
-            used = estimate_tokens(final)
-        # used_est is part of the payload it measures, so it under-reports by the width
-        # of the number itself -- a handful of tokens. Accurate, not exact.
-        final["budget"]["used_est"] = used
-        return final
-
-    env = assemble()
-    if fits(env):
-        return finalize()
-
-    # 1. Rows.
-    while rows is not None and rows_state["step"] < len(row_steps) - 1:
-        before = row_steps[rows_state["step"]][0]
-        rows_state["step"] += 1
-        degraded.append({"what": "rows", "from": before,
-                         "to": row_steps[rows_state["step"]][0]})
-        env = assemble()
-        if fits(env):
+    envelope = assembly.assemble()
+    for stage in (assembly.shorter_rows, assembly.shallower_facets,
+                  assembly.fewer_facets, assembly.fewer_next_calls):
+        if assembly.fits(envelope):
             break
-
-    # 2. Facets: shallower, then narrower.
-    if not fits(env):
-        for top_k in (5, 3):
-            facet_state["top_k"] = top_k
-            degraded.append({"what": "facets", "to": f"top{top_k}"})
-            env = assemble()
-            if fits(env):
-                break
-
-    if not fits(env):
-        # Drop from the least informative end of the entity's declared priority.
-        for name in reversed(facet_priority[1:]):
-            if name not in facets:
-                continue
-            facet_state["dropped"].append(name)
-            degraded.append({"what": f"facets.{name}", "to": "dropped"})
-            env = assemble()
-            if fits(env):
-                break
-
-    # 3. next_calls, never to zero -- a response must always offer a way forward.
-    if not fits(env):
-        for keep in (3, 1):
-            if len(next_calls) <= keep:
-                continue
-            del next_calls[keep:]
-            degraded.append({"what": "next_calls", "to": f"{keep}"})
-            env = assemble()
-            if fits(env):
-                break
-
-    return finalize()
+        envelope = stage(envelope)
+    return assembly.finalize()
 
 
-def shrink_to_fit(container: dict, key: str, *, floor: int, max_tokens: int,
-                  degraded: list) -> None:
-    """Halve a list inside `container` until the container fits the budget.
+def shrink_to_fit(envelope: dict, key: str, *, floor: int, max_tokens: int,
+                  fix: dict) -> None:
+    """Halve `envelope["result"][key]` until the whole envelope fits `max_tokens`.
 
-    Records what was done in `degraded` and leaves `<key>_truncated_to` beside the
-    list, so the caller's envelope says what it dropped. Three verbs implemented this
-    ladder by hand with different floors; this is the one implementation.
+    Three verbs implemented this loop by hand -- list, process_params and
+    workflow_spec -- with three markers for the same event (`truncated_to`,
+    `parameters_truncated_to`, `params_truncated_to`) and, in process_params, no record
+    of the loss at all. A fourth, check_config, had no loop and simply overran its
+    budget. This is the one implementation.
+
+    The marker is `<key>_truncated_to` beside the list rather than a fixed key on the
+    result, so a result that shrinks two lists says which one was cut.
+
+    Declaring the loss is not left to the caller: each pass records a `degraded` step
+    and keeps one `LIST_TRUNCATED` entry in `omitted` carrying the caller's `fix`, and
+    that entry is in place before the next measurement, so what the declaration costs
+    is inside the budget it explains.
+
+    Whole items only -- the list gets shorter, an element is never cut open. `floor` is
+    the length shrinking stops at, so a truncated response still shows the shape of
+    what it dropped. `summarize` degrades by dropping whole named sections in a fixed
+    priority order instead; that is a different ladder and is not folded in here.
     """
-    while estimate_tokens(container) > max_tokens and len(container.get(key) or []) > floor:
-        items = container[key]
-        keep = max(floor, len(items) // 2)
-        container[key] = items[:keep]
-        container["truncated_to"] = keep
-        degraded.append({"what": key, "to": str(keep)})
+    result = envelope["result"]
+    total = len(result.get(key) or [])
+    entry = None
+    while estimate_tokens(envelope) > max_tokens and len(result.get(key) or []) > floor:
+        keep = max(floor, len(result[key]) // 2)
+        result[key] = result[key][:keep]
+        result[f"{key}_truncated_to"] = keep
+        envelope["budget"]["degraded"].append({"what": key, "to": str(keep)})
+        if entry is None:
+            entry = {"code": "LIST_TRUNCATED", "field": key, "fix": fix}
+            envelope.setdefault("omitted", []).append(entry)
+        entry["detail"] = (
+            f"{total - keep} of {total} {key} were dropped to fit "
+            f"max_tokens={max_tokens}; the first {keep} remain, in the order they "
+            f"were already in. `{key}_truncated_to` records the cut.")
 
 
 NO_API_COST = {"api_calls": 0, "by_kind": {}, "note": "local computation only"}
@@ -411,10 +499,32 @@ def wrap(*, query: dict, result: dict, cost: dict, max_tokens: int,
     CLAUDE.md's response discipline -- contract, echoed query, cost, budget with
     `used_est` -- was hand-spelled in seven verbs. `build()` covers the faceted query
     shape; this covers everything else, so the contract is kept true in one place.
+
+    Like `build`, it declares when it has overshot. `build` had the BUDGET_FLOOR note
+    and this did not, so a verb wrapped here could exceed `max_tokens` in silence --
+    either after its own list ladder bottomed out, or entirely, for the verbs that
+    have no ladder at all. An oversized response is sometimes unavoidable; an
+    undeclared one leaves the caller believing it asked for a budget and got it.
     """
     envelope = {
         "ok": True, "api": {"contract": CONTRACT}, "query": query, "result": result,
         "cost": cost, "budget": {"max_tokens": max_tokens, "degraded": list(degraded or [])},
     }
-    envelope["budget"]["used_est"] = estimate_tokens(envelope)
+    used = estimate_tokens(envelope)
+    if used > max_tokens:
+        # Added before used_est is recorded, so the note counts toward the total it
+        # explains -- the same ordering build() relies on.
+        envelope.setdefault("notes", []).append(
+            f"BUDGET_FLOOR: this response is {used} estimated tokens against "
+            f"max_tokens={max_tokens} and could not be reduced further. Nothing was "
+            f"truncated mid-structure.")
+        envelope.setdefault("omitted", []).append({
+            "code": "BUDGET_EXCEEDED",
+            "detail": (f"the response did not fit max_tokens={max_tokens}; it is "
+                       "returned whole rather than cut mid-structure"),
+            "fix": {"note": "ask for a larger budget, or narrow what was requested",
+                    "retry_with": [{**query, "max_tokens": max_tokens * 2}]},
+        })
+        used = estimate_tokens(envelope)
+    envelope["budget"]["used_est"] = used
     return envelope

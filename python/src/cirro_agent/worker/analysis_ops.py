@@ -2,6 +2,9 @@
 
 Registers its operations into `mutations.OPS` on import; see mutations.py for
 why the registration lives on this side.
+
+A launch notifies the account the session is authenticated as unless the caller
+says otherwise, which is what the web UI does; `_notify` explains the mechanics.
 """
 
 
@@ -47,6 +50,9 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
     params = args.get("params") or {}
     warnings = _validate_params(reader, process["id"], params)
 
+    notify, notify_shown, notify_warnings = _notify(reader, args)
+    warnings += notify_warnings
+
     compute = args.get("compute_environment")
     compute_label = "Cirro default (AWS Batch)"
     if compute:
@@ -69,7 +75,7 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
         "name": args["name"], "description": args.get("description", ""),
         "source_dataset_ids": [i["id"] for i in inputs],
         "params": params,
-        "notification_emails": args.get("notification_emails") or [],
+        "notification_emails": notify,
         "compute_environment_id": compute,
         "resume_dataset_id": args.get("resume_dataset_id"),
         "source_sample_ids": args.get("source_sample_ids") or [],
@@ -94,12 +100,14 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
                      f"{item['file_count']} files, {item['size_human']})")
     if resolved["resume_dataset_id"]:
         lines.append(f"  Resume from  {resolved['resume_dataset_id']}")
-    if resolved["notification_emails"]:
-        lines.append(f"  Notify       {', '.join(resolved['notification_emails'])}")
+    # Printed unconditionally: mail is sent by default now, and a default nobody reads
+    # is a surprise. "(nobody)" is stated rather than left blank.
+    lines.append(f"  Notify       {notify_shown}")
     lines += ["", f"  Parameters ({len(params)}):"]
     lines += [f"    {k} = {v!r}" for k, v in sorted(params.items())] or ["    (none)"]
-    lines += ["", "This creates a new dataset and consumes compute. Cirro's SDK exposes no "
-                  "pricing API, so no cost estimate is possible here."]
+    lines += ["", "This creates a new dataset and consumes compute. Nothing prices a run "
+                  "before it happens, so there is no cost estimate here; the `spend` read "
+                  "reports the dollars once they are incurred."]
 
     return Draft(args=resolved, summary="\n".join(lines), warnings=warnings,
                  invalidates=[_inv("datasets", project["id"])])
@@ -112,6 +120,8 @@ def apply_run_analysis(reader: reads.Reader, args: dict) -> dict:
         source_dataset_ids=args["source_dataset_ids"],
         params=RunAnalysisRequestParams.from_dict(args.get("params") or {}),
         description=args.get("description") or "",
+        # Already resolved and disclosed by the planner -- apply sends what was
+        # approved and never defaults an address of its own.
         notification_emails=args.get("notification_emails") or [],
     )
     for optional in ("compute_environment_id", "resume_dataset_id",
@@ -187,11 +197,69 @@ def apply_stop_analysis(reader: reads.Reader, args: dict) -> dict:
 ANALYSIS_OPS = [
     Op("run_analysis", RISK_WRITE, plan_run_analysis, apply_run_analysis,
        outputs=("created_dataset_id",)),
-    Op("resume_analysis", RISK_WRITE, plan_resume_analysis, apply_run_analysis),
+    # Shares run_analysis's executor, so a resume records a created dataset too.
+    Op("resume_analysis", RISK_WRITE, plan_resume_analysis, apply_run_analysis,
+       outputs=("created_dataset_id",)),
     Op("stop_analysis", RISK_WRITE, plan_stop_analysis, apply_stop_analysis),
 ]
 
 mutations.OPS.update({op.name: op for op in ANALYSIS_OPS})
+
+
+NOTIFY_HINT = "Pass notification_emails explicitly to choose who is told."
+
+
+def _notify(reader: reads.Reader, args: dict):
+    """Who gets mail about this run, and the line the approval shows for it.
+
+    The web UI mails whoever launched a run and the plugin mailed nobody, so the same
+    launch behaved differently depending on where it was made from. The session's
+    identity is a Cognito-style username rather than an address, so the address has to
+    be looked up; that happens here, in the planner, because the approval must state
+    who will be mailed before anything is sent and apply's re-plan has to render the
+    same text.
+
+    An explicit list is used as given, and an explicit empty list is a genuine "tell
+    nobody" -- `args.get(...) or []` could not tell that apart from silence, which is
+    why the default could not be expressed before. A lookup that fails costs the
+    notification, never the launch.
+
+    Returns (emails, what the summary shows for them, warnings).
+    """
+    given = args.get("notification_emails")
+    if given is not None:
+        addresses = [str(a) for a in given]
+        return addresses, (", ".join(addresses) or
+                           "(nobody -- notification_emails was given as empty)"), []
+
+    username = reader.username
+    if not username:
+        return [], "(nobody -- this session's identity could not be read)", [
+            "Could not read the authenticated username, so this run notifies "
+            f"nobody. {NOTIFY_HINT}"]
+    try:
+        detail = reader.client.users.get(username)
+        reader.cost.call("users.get", detail=True)
+    except Exception as exc:
+        # Deliberately without the exception's text: apply re-plans and refuses on any
+        # change to the rendered warnings, and an upstream message carrying a request
+        # id would make every such plan PLAN_STALE.
+        return [], "(nobody -- your email address could not be looked up)", [
+            f"Could not look up the email address for {username!r} "
+            f"({type(exc).__name__}), so this run notifies nobody. {NOTIFY_HINT}"]
+
+    email = R.plain(getattr(detail, "email", None))
+    if not email:
+        return [], "(nobody -- no email address on your Cirro account)", [
+            f"The Cirro account {username!r} has no email address on record, so this "
+            f"run notifies nobody. {NOTIFY_HINT}"]
+    # The account's own "analysis update notifications" preference. Defaulting someone
+    # into mail they have turned off in their profile is not what the UI does.
+    settings = getattr(detail, "settings", None)
+    if getattr(settings, "analysis_update_notifications_enabled", True) is False:
+        return [], (f"(nobody -- {email} has analysis notifications turned off in "
+                    "their Cirro profile)"), []
+    return [email], f"{email} (default: the account this session is logged in as)", []
 
 
 def _validate_params(reader: reads.Reader, process_id: str, params: dict) -> list:
@@ -206,7 +274,12 @@ def _validate_params(reader: reads.Reader, process_id: str, params: dict) -> lis
         spec = reader.client.processes.get_parameter_spec(process_id=process_id)
         reader.cost.call("processes.parameter_spec")
     except Exception as exc:
-        return [f"Could not load the parameter spec for validation: {exc}"]
+        # The exception TYPE, never its text: this warning is part of the approved
+        # disclosure, and `_same_disclosure` compares it verbatim at apply. An upstream
+        # body carrying a request id or a timestamp would differ between the plan and
+        # its re-plan and make every affected plan PLAN_STALE.
+        return [f"Could not load the parameter spec for validation "
+                f"({type(exc).__name__}), so the parameters below were not checked."]
     try:
         spec.validate_params(params or {})
     except Exception as exc:
@@ -218,7 +291,7 @@ def _validate_params(reader: reads.Reader, process_id: str, params: dict) -> lis
                         {"verb": "summarize", "of": "params",
                          "note": "inspect a previous run's params for a working shape"}],
         )
-    defaults, declared, required = reads.spec_shape(reader, process_id)
+    _, declared, required = reads.spec_shape(reader, process_id)
     if declared is not None:
         unknown = [k for k in (params or {}) if k not in set(declared)]
         if unknown:

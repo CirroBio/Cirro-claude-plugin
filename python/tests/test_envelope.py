@@ -161,3 +161,105 @@ def test_cost_reports_cache_use():
 def test_minimum_budget_is_enforced():
     result = build(1200, 10)
     assert result["budget"]["max_tokens"] == E.MIN_TOKENS
+
+
+# --- shrink_to_fit: the one ladder for a list inside a wrapped result -------
+
+def wrapped(max_tokens=600, **lists):
+    return E.wrap(query={"verb": "list"}, result={"of": "things", **lists},
+                  cost={"api_calls": 0}, max_tokens=max_tokens)
+
+
+def bulky(n):
+    return [{"id": f"i_{i}", "blurb": "detail " * 8} for i in range(n)]
+
+
+def test_a_shrunk_list_is_marked_by_its_own_key():
+    """The marker used to be a fixed `truncated_to` on the result, which could not say
+    which of two lists had been cut."""
+    envelope = wrapped(items=bulky(80))
+    E.shrink_to_fit(envelope, "items", floor=3, max_tokens=600,
+                    fix={"verb": "list", "max_tokens": 1200})
+    result = envelope["result"]
+    assert 3 <= len(result["items"]) < 80
+    assert result["items_truncated_to"] == len(result["items"])
+    assert "truncated_to" not in result, "the marker names the list it cut"
+
+
+def test_a_truncated_list_declares_the_loss_and_offers_a_fix():
+    envelope = wrapped(items=bulky(80))
+    E.shrink_to_fit(envelope, "items", floor=3, max_tokens=600,
+                    fix={"verb": "list", "max_tokens": 1200})
+    entries = [o for o in envelope["omitted"] if o["code"] == "LIST_TRUNCATED"]
+    assert len(entries) == 1, "several halving passes are one omission, not several"
+    assert entries[0]["field"] == "items"
+    assert entries[0]["fix"] == {"verb": "list", "max_tokens": 1200}
+    assert "of 80 items" in entries[0]["detail"]
+    steps = envelope["budget"]["degraded"]
+    assert steps and {s["what"] for s in steps} == {"items"}
+    assert steps[-1]["to"] == str(len(envelope["result"]["items"]))
+
+
+def test_the_declaration_is_inside_the_budget_it_explains():
+    """Appended after the last measurement, the omitted entry would tip a response
+    that had just been made to fit back over its own cap."""
+    envelope = wrapped(items=bulky(80))
+    E.shrink_to_fit(envelope, "items", floor=3, max_tokens=600,
+                    fix={"verb": "list", "max_tokens": 1200})
+    envelope["budget"]["used_est"] = E.estimate_tokens(envelope)
+    assert envelope["budget"]["used_est"] <= 600
+
+
+def test_a_result_shrinking_two_lists_says_which_one_was_cut():
+    envelope = wrapped(max_tokens=300, items=bulky(100), problems=bulky(100))
+    E.shrink_to_fit(envelope, "items", floor=3, max_tokens=300,
+                    fix={"verb": "list", "max_tokens": 600})
+    E.shrink_to_fit(envelope, "problems", floor=3, max_tokens=300,
+                    fix={"verb": "check_config", "max_tokens": 600})
+    result = envelope["result"]
+    assert result["items_truncated_to"] == len(result["items"]) == 3
+    assert result["problems_truncated_to"] == len(result["problems"])
+    truncations = [o for o in envelope["omitted"] if o["code"] == "LIST_TRUNCATED"]
+    assert {o["field"] for o in truncations} == {"items", "problems"}
+    # Both lists are at their floor and the response still does not fit, which `wrap`
+    # now declares rather than overshooting in silence.
+    assert any(o["code"] == "BUDGET_EXCEEDED" for o in envelope["omitted"])
+
+
+def test_a_wrapped_response_that_cannot_fit_says_so():
+    """`build` had a BUDGET_FLOOR note and `wrap` had nothing, so the five verbs that
+    wrap -- get, summarize, process_config, describe, chain_status -- could exceed
+    max_tokens in silence. An oversized response is sometimes unavoidable; an
+    undeclared one leaves the caller believing it asked for a budget and got it."""
+    envelope = E.wrap(query={"verb": "get", "id": "ds_1"}, result={"rows": bulky(200)},
+                      cost={"api_calls": 1}, max_tokens=200)
+    assert envelope["budget"]["used_est"] > 200
+    note, = [n for n in envelope["notes"] if n.startswith("BUDGET_FLOOR")]
+    assert "max_tokens=200" in note
+    entry, = [o for o in envelope["omitted"] if o["code"] == "BUDGET_EXCEEDED"]
+    assert entry["fix"]["retry_with"][0]["max_tokens"] == 400
+    assert entry["fix"]["retry_with"][0]["id"] == "ds_1", "the fix must be runnable"
+
+
+def test_a_wrapped_response_within_budget_declares_nothing():
+    envelope = E.wrap(query={"verb": "get"}, result={"rows": bulky(2)},
+                      cost={"api_calls": 1}, max_tokens=6000)
+    assert "notes" not in envelope
+    assert "omitted" not in envelope
+
+
+def test_a_list_that_already_fits_is_left_alone():
+    envelope = wrapped(items=bulky(3))
+    E.shrink_to_fit(envelope, "items", floor=3, max_tokens=6000, fix={"verb": "list"})
+    assert len(envelope["result"]["items"]) == 3
+    assert "items_truncated_to" not in envelope["result"]
+    assert "omitted" not in envelope and envelope["budget"]["degraded"] == []
+
+
+def test_shrinking_stops_at_the_floor_rather_than_emptying_the_list():
+    """A budget nothing can satisfy: the list bottoms out at the floor, and the
+    response still shows the shape of what it dropped."""
+    envelope = wrapped(max_tokens=50, items=bulky(200))
+    E.shrink_to_fit(envelope, "items", floor=5, max_tokens=50, fix={"verb": "list"})
+    assert len(envelope["result"]["items"]) == 5
+    assert envelope["result"]["items_truncated_to"] == 5

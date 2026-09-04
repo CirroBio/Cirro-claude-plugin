@@ -63,6 +63,28 @@ def test_every_gated_operation_is_named():
         f"table is the user-facing statement of what the plugin can change: {missing}")
 
 
+def test_the_plan_tool_lists_every_operation_it_accepts():
+    """The MCP server deliberately cannot import the worker, so the `plan` tool's
+    "Operations:" list is hand-maintained -- and it is the only place an agent learns
+    what `plan` accepts. Nothing else checks it, so a new op family would ship
+    invisible to every caller while passing the whole suite.
+    """
+    import asyncio
+    from cirro_agent import mcp_server
+    from cirro_agent.worker import mutations
+    tools = asyncio.run(mcp_server.server.list_tools())
+    described = next(t.description for t in tools if t.name == "plan")
+    # Named anywhere in the description is enough -- `chain` earns its own paragraph
+    # rather than a slot in the comma list.
+    missing = [op for op in sorted(mutations.OPS) if op not in described]
+    assert not missing, (
+        f"the plan tool's description does not name these operations: {missing}")
+    listed = described.split("Operations:", 1)[1].split(".\n", 1)[0]
+    stale = [name.strip().rstrip(".") for name in listed.replace("\n", " ").split(",")]
+    gone = [name for name in stale if name and name not in mutations.OPS]
+    assert not gone, f"the plan tool names operations that no longer exist: {gone}"
+
+
 def test_every_mcp_tool_is_named():
     missing = [t for t in _mcp_tools()
                if t not in README and f"mcp__cirro__{t}" not in README]

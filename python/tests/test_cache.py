@@ -92,7 +92,18 @@ def test_invalidate_kinds_drops_every_scope_of_a_kind(store):
 def test_ttls_follow_entity_lifecycle():
     assert C.TTL["processes"] > C.TTL["projects"] > C.TTL["datasets"]
     assert C.manifest_ttl(True) > C.manifest_ttl(False)
-    assert C.execution_ttl(True) > C.execution_ttl(False)
+
+
+def test_the_snapshot_label_is_readable_not_the_storage_key(store):
+    """Cost accounting shows this string to a person, so it must not be the hash."""
+    snapshot = store.put("datasets", [{"id": "a"}], project="proj_a")
+    assert snapshot.label == "datasets@project=proj_a"
+    assert snapshot.label != store.key("datasets", project="proj_a")
+    assert store.get("datasets", project="proj_a").label == snapshot.label
+
+
+def test_an_unlisted_kind_falls_back_to_the_default_ttl(store):
+    assert store.put("gizmos", []).ttl_s == C.DEFAULT_TTL_S
 
 
 def test_eviction_bounds_the_store(store, monkeypatch):

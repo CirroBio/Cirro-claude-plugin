@@ -4,7 +4,7 @@ fully fetched match set, and single-entity reads.
 from typing import Tuple
 
 from .. import errors, query as Q, schema
-from ..envelope import Counts, DEFAULT_MAX_TOKENS, ROWS_ABSENT, build
+from ..envelope import Counts, DEFAULT_MAX_TOKENS, DETAIL_BUDGET, ROWS_ABSENT, build
 from .reads import (Reader, dataset_detail, dataset_manifest, dataset_tasks, file_count,
                     is_terminal, process_detail, project_metrics, resolve_named)
 
@@ -36,6 +36,20 @@ def _projections_with(spec: schema.EntitySpec, granted: set) -> dict:
     return projections
 
 
+def _visible_facets(matched: list, spec: schema.EntitySpec, labels: dict,
+                    granted: set) -> dict:
+    """Facets over the whole match set, minus the fields nothing has fetched.
+
+    A gated field can sit in facet_priority -- `config_source` does -- and unless
+    `include` granted it every row's value is null, so the facet was one all-null
+    bucket while `shape.unavailable` in the same response reported the field as
+    unavailable. The response contradicted itself and spent budget doing it.
+    """
+    facets = Q.compute_facets(matched, spec, labels=labels)
+    return {name: facet for name, facet in facets.items()
+            if name in granted or spec.tier_of(name) not in schema.GATED_TIERS}
+
+
 def _labels(reader: Reader, entity: str) -> dict:
     if entity != "dataset":
         return {}
@@ -45,33 +59,67 @@ def _labels(reader: Reader, entity: str) -> dict:
     }
 
 
-def _collect(reader: Reader, entity: str, request: dict) -> Tuple[list, bool, dict]:
-    """Fetch the scanned collection for an entity, plus its scope echo."""
+def _within_dataset(reader: Reader, entity: str, request: dict,
+                    scope: dict) -> Tuple[list, bool, dict, list]:
+    """Files and tasks: one dataset, which lives in exactly one project.
+
+    `scope_project_ids` can name several projects, so only the first is read. Echoing
+    every named project back reported one project's manifest as though it covered all
+    of them; the echo carries the project actually read and `omitted` names the rest.
+    """
+    named_project_ids = reader.scope_project_ids(scope)
+    dataset_id = request.get("dataset_id") or scope.get("dataset_id")
+    if not dataset_id:
+        raise errors.ScopeRequired(
+            f"{entity} requires a dataset_id.",
+            what=f"{entity.capitalize()}s belong to one dataset.",
+            field="dataset_id",
+            retry_with=[{"entity": "dataset",
+                         "scope": {"project_ids": named_project_ids}}],
+        )
+    project_id = named_project_ids[0]
+    echo = {"project_ids": [project_id], "dataset_id": dataset_id}
+    omitted = _projects_left_out(entity, named_project_ids, dataset_id)
+    if entity == "file":
+        entries, total, _artifacts = dataset_manifest(
+            reader, project_id, dataset_id,
+            is_terminal=is_terminal(reader, project_id, dataset_id))
+        return entries, len(entries) >= (total or 0), echo, omitted
+    return dataset_tasks(reader, project_id, dataset_id), True, echo, omitted
+
+
+def _projects_left_out(entity: str, named: list, dataset_id: str) -> list:
+    """The named projects this read never looked at.
+
+    Same shape as `read_summaries._projects_left_out`: one read answers from one
+    project, so a scope naming several has to say which one it answered from.
+    """
+    if len(named) < 2:
+        return []
+    skipped = named[1:]
+    return [{
+        "code": "SCOPE_NARROWED",
+        "projects_not_read": skipped,
+        "detail": (f"{len(named)} projects were named. Dataset {dataset_id} was read "
+                   f"from {named[0]} only; a dataset belongs to one project, so if it "
+                   "lives in one of the others this answer is empty rather than wrong."),
+        "fix": {"note": "Name the project that owns the dataset.",
+                "retry_with": [{"entity": entity, "dataset_id": dataset_id,
+                                "scope": {"project_ids": [pid]}}
+                               for pid in skipped[:3]]},
+    }]
+
+
+def _collect(reader: Reader, entity: str, request: dict) -> Tuple[list, bool, dict, list]:
+    """Fetch the scanned collection for an entity, plus its scope echo and omissions."""
     scope = request.get("scope") or {}
     if entity == "project":
-        return reader.projects(), True, {}
+        return reader.projects(), True, {}, []
     if entity == "process":
         archived = bool(request.get("include_archived"))
-        return reader.processes(include_archived=archived), True, {}
-
+        return reader.processes(include_archived=archived), True, {}, []
     if entity in ("file", "task"):
-        project_ids = reader.scope_project_ids(scope)
-        dataset_id = request.get("dataset_id") or scope.get("dataset_id")
-        if not dataset_id:
-            raise errors.ScopeRequired(
-                f"{entity} requires a dataset_id.",
-                what=f"{entity.capitalize()}s belong to one dataset.",
-                field="dataset_id",
-                retry_with=[{"entity": "dataset", "scope": {"project_ids": project_ids}}],
-            )
-        if entity == "file":
-            entries, total, _artifacts = dataset_manifest(
-                reader, project_ids[0], dataset_id,
-                is_terminal=is_terminal(reader, project_ids[0], dataset_id))
-            return entries, len(entries) >= (total or 0), {"project_ids": project_ids,
-                                                           "dataset_id": dataset_id}
-        task_rows = dataset_tasks(reader, project_ids[0], dataset_id)
-        return task_rows, True, {"project_ids": project_ids, "dataset_id": dataset_id}
+        return _within_dataset(reader, entity, request, scope)
 
     project_ids = reader.scope_project_ids(scope)
     collected, complete = [], True
@@ -92,7 +140,37 @@ def _collect(reader: Reader, entity: str, request: dict) -> Tuple[list, bool, di
             item.setdefault("project_id", project_id)
         collected.extend(items)
         complete = complete and ok
-    return collected, complete, {"project_ids": project_ids}
+    return collected, complete, {"project_ids": project_ids}, []
+
+
+def _per_row_fields(include: list, spec: schema.EntitySpec) -> list:
+    """The requested fields that cost one API call per matched row."""
+    return [f for f in include
+            if spec.tier_of(f) in schema.GATED_TIERS
+            or (spec.name == "process" and f in _PROCESS_DETAIL_DERIVED)]
+
+
+def _refuse_detail_cost(include: list, per_row: list, n_matched: int) -> None:
+    """The one cost gate over `include`.
+
+    Symmetric with scope.confirm_fanout: a deliberate survey across many rows is
+    legitimate, so the gate offers an explicit way to accept the cost rather than
+    only telling the caller to narrow.
+    """
+    raise errors.CostGate(
+        f"include={per_row} costs one API call per row and {n_matched} rows match.",
+        what=(f"Narrow the filter to at most {DETAIL_BUDGET} rows, or accept the cost "
+              "explicitly."),
+        field="include", given=include,
+        estimated_cost={"api_calls": n_matched}, limit=DETAIL_BUDGET,
+        retry_with=[
+            {"note": f"add a filter so matched <= {DETAIL_BUDGET}, then re-send include"},
+            {"confirm_detail_cost": True,
+             "note": f"accept {n_matched} API calls for a deliberate full survey"},
+            {"note": "sampling is not offered for size figures: they are heavy-tailed, "
+                     "so a small-sample estimate would mislead"},
+        ],
+    )
 
 
 def _apply_include(reader: Reader, entity: str, matched: list, include: list,
@@ -109,45 +187,22 @@ def _apply_include(reader: Reader, entity: str, matched: list, include: list,
             field="include", given=include,
             retry_with=[{"verb": "describe", "entity": entity}],
         )
-    expensive = [f for f in include if spec.tier_of(f) in schema.GATED_TIERS]
-    if expensive and len(matched) > DETAIL_BUDGET and not confirm_cost:
-        # Symmetric with scope.confirm_fanout: a deliberate survey across many rows is
-        # legitimate, so the gate offers an explicit way to accept the cost rather than
-        # only telling the caller to narrow.
-        raise errors.CostGate(
-            f"include={expensive} costs one API call per row and {len(matched)} rows match.",
-            what=(f"Narrow the filter to at most {DETAIL_BUDGET} rows, or accept the cost "
-                  "explicitly."),
-            field="include", given=include,
-            estimated_cost={"api_calls": len(matched)}, limit=DETAIL_BUDGET,
-            retry_with=[
-                {"note": f"add a filter so matched <= {DETAIL_BUDGET}, then re-send include"},
-                {"confirm_detail_cost": True,
-                 "note": f"accept {len(matched)} API calls for a deliberate full survey"},
-                {"note": "sampling is not offered for size figures: they are heavy-tailed, "
-                         "so a small-sample estimate would mislead"},
-            ],
-        )
+    per_row = _per_row_fields(include, spec)
+    if per_row and len(matched) > DETAIL_BUDGET and not confirm_cost:
+        _refuse_detail_cost(include, per_row, len(matched))
+
     granted, notes = set(include), []
-    if expensive:
+    if any(spec.tier_of(f) in schema.GATED_TIERS for f in include):
         reader.cost.tier_ceiling = max(
             (spec.tier_of(f) for f in include), key=schema.tier_rank, default="list")
 
     if entity == "process":
-        # config_location and code_location read as DERIVED but are only produced by the
-        # detail fetch, so they must count toward the cost gate like any per-row call.
-        if len(matched) > DETAIL_BUDGET and not confirm_cost:
-            raise errors.CostGate(
-                f"include={include} needs one API call per process and {len(matched)} "
-                "processes match.",
-                what=(f"Narrow the filter to at most {DETAIL_BUDGET}, or accept the cost "
-                      "explicitly."),
-                field="include", given=include,
-                estimated_cost={"api_calls": len(matched)}, limit=DETAIL_BUDGET,
-                retry_with=[{"confirm_detail_cost": True}],
-            )
-        for row in matched:
-            row.update(process_detail(reader, row["id"], row))
+        # Gated the same way as the dataset branch below: an `include` of list-tier
+        # fields alone asks for nothing the listing has not already got, and used to
+        # buy one processes.get per matched row for it.
+        if per_row:
+            for row in matched:
+                row.update(process_detail(reader, row["id"], row))
         return granted, notes
 
     if entity != "dataset":
@@ -173,7 +228,7 @@ def do_query(request: dict) -> dict:
     reader = Reader(request)
     max_tokens = int(request.get("max_tokens") or DEFAULT_MAX_TOKENS["query"])
 
-    scanned, complete, scope_echo = _collect(reader, entity, request)
+    scanned, complete, scope_echo, omitted = _collect(reader, entity, request)
     lineage = _lineage(scanned) if entity == "dataset" else {}
     ctx = reader.ctx(lineage)
 
@@ -193,7 +248,7 @@ def do_query(request: dict) -> dict:
 
     projections = _projections_with(spec, granted)
     labels = _labels(reader, entity)
-    facets = Q.compute_facets(matched, spec, labels=labels)
+    facets = _visible_facets(matched, spec, labels, granted)
 
     echoed = {
         "entity": entity,
@@ -210,7 +265,7 @@ def do_query(request: dict) -> dict:
     if request.get("group_by"):
         metrics = request.get("metrics") or ["count"]
         groups, tail, totals = Q.group(
-            matched, request["group_by"], metrics, ctx,
+            matched, request["group_by"], metrics,
             order_by=request.get("order_by"), labels=labels,
             limit_groups=int(request.get("limit_groups") or 20))
         echoed.update({"group_by": request["group_by"], "metrics": metrics,
@@ -224,7 +279,7 @@ def do_query(request: dict) -> dict:
             extras["group_tail"] = tail
         return build(entity=entity, query=echoed, counts=counts, cost=reader.cost,
                      groups=groups, group_extras=extras, facets=facets,
-                     facet_priority=spec.facet_priority, notes=notes,
+                     facet_priority=spec.facet_priority, omitted=omitted, notes=notes,
                      max_tokens=max_tokens)
 
     shape = Q.compute_shape(matched, spec, ctx, granted=granted)
@@ -236,7 +291,8 @@ def do_query(request: dict) -> dict:
     return build(entity=entity, query=echoed, counts=counts, cost=reader.cost,
                  rows=matched, facets=facets, shape=shape, next_calls=next_calls,
                  exemplars=exemplars, projections=projections,
-                 facet_priority=spec.facet_priority, notes=notes, max_tokens=max_tokens)
+                 facet_priority=spec.facet_priority, omitted=omitted, notes=notes,
+                 max_tokens=max_tokens)
 
 
 def do_get(request: dict) -> dict:
@@ -272,8 +328,8 @@ def do_get(request: dict) -> dict:
 
     # A get names one entity explicitly, so it must not hide archived ones the way a
     # listing does -- otherwise a valid ID reports NOT_FOUND.
-    scanned, complete, scope_echo = _collect(reader, entity,
-                                             {**request, "include_archived": True})
+    scanned, complete, scope_echo, omitted = _collect(
+        reader, entity, {**request, "include_archived": True})
     ctx = reader.ctx(_lineage(scanned) if entity == "dataset" else {})
     row = _resolve_one(entity, given, scanned, spec, scope_echo)
 
@@ -309,7 +365,7 @@ def do_get(request: dict) -> dict:
                                        "resolved": ctx.resolved},
                  counts=counts, cost=reader.cost, rows=[row],
                  projections={"standard": list(row)}, next_calls=next_calls,
-                 notes=notes,
+                 omitted=omitted, notes=notes,
                  max_tokens=int(request.get("max_tokens") or DEFAULT_MAX_TOKENS["get"]))
 
 
@@ -367,22 +423,25 @@ def _resolve_one(entity: str, given: str, scanned: list, spec: schema.EntitySpec
 # travel with it rather than being requested separately.
 _DERIVED_COMPANIONS = {"total_size_bytes": ["total_size_human"]}
 
-
-# `include` on a detail-or-worse tier costs one call per row, so it is gated.
-DETAIL_BUDGET = 25
+# These read as DERIVED because they are computed, but only from the process detail
+# payload, so they cost one call per row like any DETAIL field and are gated as such.
+_PROCESS_DETAIL_DERIVED = ("config_location", "code_location")
 
 
 def _sorted(rows: list, sort: list, spec: schema.EntitySpec) -> list:
-    """Sort numerics numerically.
+    """Sort numerics numerically, and rows missing the field last in either direction.
 
     Stringifying every key made `total_size_bytes`, `file_count`, `exit_code` and
-    `task_id` sort lexicographically, so 9000 came before 10000.
+    `task_id` sort lexicographically, so 9000 came before 10000. And `reverse`
+    inverts the whole key, so a fixed missing-last rank came out missing-FIRST on any
+    descending sort of a partly-populated field -- `-file_count` led with the rows
+    that have no file_count. The rank therefore flips with the direction.
     """
-    def ordering(field: str):
+    def ordering(field: str, absent: int):
         def key(row):
             value = row.get(field)
             if value is None:
-                return (2, 0.0, "")
+                return (absent, 0.0, "")
             if isinstance(value, bool):
                 return (1, float(value), "")
             if isinstance(value, (int, float)):
@@ -392,5 +451,6 @@ def _sorted(rows: list, sort: list, spec: schema.EntitySpec) -> list:
 
     for entry in reversed(sort or spec.default_sort):
         descending = entry.startswith("-")
-        rows = sorted(rows, key=ordering(entry.lstrip("-")), reverse=descending)
+        rows = sorted(rows, key=ordering(entry.lstrip("-"), -1 if descending else 2),
+                      reverse=descending)
     return rows

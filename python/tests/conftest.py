@@ -71,6 +71,21 @@ def _project_payload(pid, name, description, organization="Cirro", tags=()):
     ).to_dict()
 
 
+def _user_payload(username="sminot", email="sminot@cirro.test", notifications=True):
+    """The authenticated account's own record, which is where its email lives.
+
+    A launch defaults its notification address to this, so a tenant that does not serve
+    it puts every run_analysis plan on the lookup-failure path -- passing, but
+    exercising the degraded branch rather than the one people will hit.
+    """
+    from cirro_api_client.v1.models import UserDetail, UserSettings
+    return UserDetail(
+        username=username, name="Sam Minot", email=email, organization="Cirro",
+        project_assignments=[], global_roles=[],
+        settings=UserSettings(analysis_update_notifications_enabled=notifications),
+    ).to_dict()
+
+
 def _process_payload(pid, name, executor, category, pipeline_type, description=""):
     from cirro_api_client.v1.models import Process, Executor
     return Process(
@@ -227,6 +242,9 @@ def fake_tenant(monkeypatch):
                        ).respond(json=_detail_payload(datasets[0]))
             router.get(url__regex=rf"{API}/projects/[^/]+/datasets/[^/]+/files"
                        ).respond(json=_manifest_payload())
+            # Registered under the exact path a test's own serve_user() uses, so
+            # re-registering replaces this default rather than losing to a wider regex.
+            router.get(f"{API}/users/sminot").respond(json=_user_payload())
             yield {"base_url": BASE_URL, "n_datasets": n_datasets,
                    "datasets": datasets, "projects": projects,
                    "processes": processes, "router": router}

@@ -4,6 +4,11 @@ One registry drives four things that must not drift apart: the field projections
 the envelope shrinks through, the facets computed over a match set, the cost tier
 an `include` request is gated against, and the `describe` verb's output.
 
+A field belongs here only if a row projection in `worker/rows.py` actually produces it,
+or an `include` can fetch it. `describe` advertises everything listed, and a DETAIL-tier
+entry also lands in `shape.unavailable` with `include:["<field>"]` as the way to get it --
+so a declaration nothing can deliver is a documented promise the code breaks.
+
 Tiers are about API calls, not about how interesting a field is:
   list      already in the paged listing payload -- free
   probe     one small call per row (get_dataset_manifest(file_limit=1))
@@ -122,14 +127,14 @@ PROJECT = EntitySpec(
         "organization": (LIST, "owning organization"),
         "classification_ids": (LIST, "data classifications applied to the project"),
         "billing_account_id": (LIST, "billing account"),
-        "created_by": (DETAIL, "username"),
-        "created_at": (DETAIL, "ISO-8601 UTC"),
-        "contacts": (DETAIL, "named contacts"),
-        "settings": (DETAIL, "project settings blob"),
+        # created_by, created_at, contacts, settings and dataset_count were declared
+        # DETAIL and produced by nothing: the project row comes from the listing, and
+        # `include` fetches extras for dataset and process only. They reached `describe`
+        # as real fields and `shape.unavailable` as `include:["contacts"]`, which does
+        # nothing for a project. Declaring them again means producing them.
         "storage_bytes": (PROBE, "current storage from the metrics API; one call per "
                                  "project, and brings the per-tier split, the unit and "
                                  "the record's date with it"),
-        "dataset_count": (DETAIL, "requires listing the project's datasets"),
     },
     projections={
         "standard": ["id", "name", "status", "description", "organization", "tags"],
@@ -200,7 +205,8 @@ SAMPLE = EntitySpec(
         "dataset_ids": (LIST, "datasets this sample appears in"),
         "created_at": (LIST, "ISO-8601 UTC"),
         "updated_at": (LIST, "ISO-8601 UTC"),
-        "files": (LIST, "files attached to the sample"),
+        # `files` was declared LIST and produced by nothing. A sample's files are read
+        # through the dataset that holds them (`summarize files`), not from here.
     },
     projections={
         "standard": ["id", "name", "metadata", "dataset_ids"],
@@ -221,7 +227,10 @@ REFERENCE = EntitySpec(
         "description": (LIST, "free text"),
         "created_by": (LIST, "username"),
         "created_at": (LIST, "ISO-8601 UTC"),
-        "absolute_path": (LIST, "S3 URI of the first file"),
+        # `absolute_path` was declared LIST and produced by nothing; the row carries the
+        # file count instead, and no read fetches a reference's file paths.
+        "n_files": (DERIVED, "how many files the reference holds; the file list itself"
+                             " is not carried"),
     },
     projections={
         "standard": ["name", "type", "description", "created_at", "created_by"],

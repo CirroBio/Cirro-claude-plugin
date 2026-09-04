@@ -58,14 +58,22 @@ plan(op="run_analysis", args={
   "source_dataset_ids": ["ds_..."],
   "params": {...},
   "folder": "Analyses/RNAseq",                        # optional Cirro folder
-  "notification_emails": ["someone@example.org"]      # optional
+  "notification_emails": ["someone@example.org"]      # optional; see below
 })
 ```
 
 `plan` changes nothing. It resolves names to IDs, validates the parameters against the
-spec, counts the input files and bytes, resolves the compute environment, and returns
-a `rendered` summary plus a single-use `plan_id`. It is good for an hour, and
-`apply` re-checks the figures first, refusing if anything you read has changed.
+spec, counts the input files and bytes, resolves the notification address, resolves
+the compute environment, and returns a `rendered` summary plus a single-use `plan_id`.
+It is good for an hour, and `apply` re-checks the figures first, refusing if anything
+you read has changed.
+
+**Who gets emailed.** Leave `notification_emails` out and the run notifies the account
+the session is signed in as, which is what launching from the web UI does. The plan's
+`Notify` line always states the outcome, so read it out with the rest of the summary.
+Pass a list to notify other people instead, or `[]` to notify nobody — only the person
+can decide that, so do not pass either unless they asked. If the address cannot be
+looked up the plan warns and notifies nobody; the launch still goes ahead.
 
 If `plan` returns an error, fix the cause and plan again. Do not attempt `apply`.
 
@@ -127,7 +135,8 @@ plan(op="resume_analysis", args={"project_id": "...", "resume_dataset_id": "ds_f
 ```
 
 This inherits the original pipeline, inputs and parameters, so you only need to
-override what should change. Diagnose the failure first with
+override what should change. It notifies the signed-in account by default, the same
+way a fresh launch does. Diagnose the failure first with
 **cirro-monitor-analysis** — resuming an out-of-memory failure without changing
 anything just fails again more slowly.
 

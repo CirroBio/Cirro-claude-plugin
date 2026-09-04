@@ -198,8 +198,8 @@ def _retry_policy(args: dict, steps: list) -> Optional[dict]:
     if not isinstance(attempts, int) or not 2 <= attempts <= RETRY_MAX_ATTEMPTS:
         raise errors.InvalidQuery(
             f"retry.max_attempts must be between 2 and {RETRY_MAX_ATTEMPTS}.",
-            what=("Each attempt consumes compute, and Cirro exposes no pricing API, so "
-                  "an unbounded loop cannot be priced or approved."),
+            what=("Each attempt consumes compute, and nothing prices a run before it "
+                  "happens, so an unbounded loop cannot be priced or approved."),
             field="retry.max_attempts", given=attempts,
             retry_with=[{"retry": {"max_attempts": 3}}],
         )
@@ -293,8 +293,8 @@ def plan_chain(reader: reads.Reader, args: dict) -> Draft:
         lines.append("")
         warnings.append(
             f"Each attempt launches again and consumes compute. Up to "
-            f"{retry['max_attempts']} attempts are authorized here; Cirro exposes no "
-            "pricing API, so this is a count and not a cost.")
+            f"{retry['max_attempts']} attempts are authorized here; nothing prices a "
+            "run before it happens, so this is a count and not a cost.")
 
     lines.append("Steps run in order. If one fails the chain stops there, and every "
                  "step's outcome is reported.")
@@ -325,9 +325,11 @@ def _restart_request(args: dict) -> dict:
 def _lineage(session: Session, plan_id: str) -> tuple:
     """The root chain and every finished attempt on it, oldest first.
 
-    Every restart plan records its root, so any plan in the lineage identifies the
-    whole of it. Only claimed-and-finished plans count: a pending plan has been shown
-    to nobody, and a restart view is a diff against something the person approved.
+    The walk, the root/retry grouping and the ordering are `plans.lineage`; the
+    refusals are this layer's, because only a restart cares that the plan named is a
+    chain and that its root actually ran. Only claimed-and-finished plans count: a
+    pending plan has been shown to nobody, and a restart view is a diff against
+    something the person approved.
     """
     given = plans.load(session, plan_id)
     if given.op != "chain":
@@ -337,10 +339,8 @@ def _lineage(session: Session, plan_id: str) -> tuple:
             field="restart_from", given=given.op,
             retry_with=[{"op": "chain", "note": "plan a fresh chain instead"}],
         )
-    root_id = given.args.get("root") or given.plan_id
-    root = given if root_id == given.plan_id else plans.load(session, root_id)
-    finished = (plans.DONE, plans.FAILED)
-    if root.status not in finished:
+    root, attempts = plans.lineage(session, plan_id, finished_only=True)
+    if root.status not in plans.FINISHED:
         raise errors.InvalidQuery(
             f"Chain {root.plan_id} was never approved and applied (status "
             f"{root.status}), so there is nothing to resume.",
@@ -348,18 +348,6 @@ def _lineage(session: Session, plan_id: str) -> tuple:
             field="restart_from", given=plan_id,
             retry_with=[{"op": "chain", "note": "plan it fresh and approve it"}],
         )
-    attempts = [root]
-    for path in sorted((session.path / "plans").glob("plan_*.json")):
-        if path.stem == root.plan_id:
-            continue
-        try:
-            candidate = plans.load(session, path.stem)
-        except errors.AgentError:
-            continue
-        if (candidate.op == "chain" and candidate.args.get("root") == root.plan_id
-                and candidate.status in finished):
-            attempts.append(candidate)
-    attempts.sort(key=lambda plan: plan.created_at)
     return root, attempts
 
 
@@ -459,14 +447,46 @@ def _replace_tail(tail: list, completed: list, replacements: list) -> list:
     return tail
 
 
-def _attempt_diff(previous: list, tail: list, may_change: list) -> list:
-    """What differs from the attempt already approved, field by field."""
+def _attempt_baseline(root_steps: list, attempt_steps: list, offset: int) -> list:
+    """What each step of the tail was last approved as, one entry per re-run step.
+
+    A label's baseline is the most recent attempt that re-ran it, and the root chain's
+    own step for one no attempt has touched. Diffing against the previous attempt alone
+    left a step that attempt did not re-run with nothing to compare against: a second
+    restart at an earlier label puts such steps back in the tail, where `_replace_tail`
+    accepts edited args for them, so no field of theirs was ever checked against
+    `may_change`. A pinned field cannot differ between the root and any attempt -- an
+    attempt that changed one was refused -- so preferring the later record narrows
+    nothing.
+    """
+    last_approved = {}
+    for steps in attempt_steps:
+        for step in steps:
+            if step.get("label"):
+                last_approved[step["label"]] = step
+    return [last_approved.get(step.get("label"), step) for step in root_steps[offset:]]
+
+
+def _attempt_diff(baseline: list, tail: list, may_change: list) -> list:
+    """What differs from what each step was last approved as, field by field.
+
+    Every step of the tail is compared. One the baseline cannot account for is refused
+    rather than skipped: the allowlist is enforced by refusing a diff outside it, and a
+    step nothing is compared against has no diff to refuse.
+    """
     lines = []
-    before_by_label = {s.get("label"): s for s in previous if s.get("label")}
-    for step in tail:
-        earlier = before_by_label.get(step.get("label"))
-        if earlier is None:
-            continue
+    if len(baseline) != len(tail) or any(
+            earlier.get("label") != step.get("label")
+            for earlier, step in zip(baseline, tail)):
+        raise errors.InvalidQuery(
+            "The steps being re-run do not line up with the approved chain.",
+            what=("Each re-run step is checked field by field against what was approved "
+                  "for it, so one that cannot be paired is refused rather than passed "
+                  "through unchecked."),
+            field="steps", given=[step.get("label") for step in tail],
+            retry_with=[{"op": "chain", "note": "plan a fresh chain instead"}],
+        )
+    for earlier, step in zip(baseline, tail):
         before, after = earlier.get("args") or {}, step.get("args") or {}
         for key in sorted(set(before) | set(after)):
             if before.get(key) == after.get(key):
@@ -492,7 +512,8 @@ def _plan_restart(reader: reads.Reader, args: dict) -> Draft:
     The person already approved the chain and the policy governing its retries.
     What they read here is everything this attempt will do -- each operation by name,
     every value carried over from the approved run, and exactly which fields differ
-    from the attempt before -- checked against the same rules as a fresh chain.
+    from what each re-run step was last approved as -- checked against the same rules
+    as a fresh chain.
     """
     request = _restart_request(args)
     session = reader.session
@@ -547,7 +568,9 @@ def _plan_restart(reader: reads.Reader, args: dict) -> Draft:
     tail = _replace_tail(tail, root.args["steps"][:offset], args.get("steps") or [])
     assembled = [dict(step) for step in root.args["steps"][:offset]] + tail
     _chain_steps({"steps": assembled})
-    diff = _attempt_diff(previous.args["steps"], tail, policy["may_change"])
+    baseline = _attempt_baseline(
+        root.args["steps"], [plan.args.get("steps") or [] for plan in attempts], offset)
+    diff = _attempt_diff(baseline, tail, policy["may_change"])
 
     lines = [f"Attempt {attempt} of {policy['max_attempts']} on the chain approved as "
              f"{root.plan_id}.", ""]

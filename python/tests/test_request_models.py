@@ -26,8 +26,20 @@ APPLY_CASES = {
     "run_analysis": {
         "project_id": "proj_a", "process_id": "proc_1", "name": "run",
         "source_dataset_ids": ["ds_1"], "params": {"genome": "GRCh38"},
-        "description": "", "notification_emails": [],
+        # The planner resolves this to the session's own address unless the caller
+        # asked otherwise, so a resolved launch normally carries one.
+        "description": "", "notification_emails": ["sminot@cirro.test"],
         "compute_environment_id": None, "resume_dataset_id": None,
+        "source_sample_ids": []},
+    # Shares apply_run_analysis, so its request construction was only ever covered
+    # transitively -- and the chain guard that checks a declared output is really
+    # returned skips any op absent from here, so resume_analysis' `created_dataset_id`
+    # went unchecked while being declared.
+    "resume_analysis": {
+        "project_id": "proj_a", "process_id": "proc_1", "name": "run",
+        "source_dataset_ids": ["ds_1"], "params": {"genome": "GRCh38"},
+        "description": "", "notification_emails": ["sminot@cirro.test"],
+        "compute_environment_id": None, "resume_dataset_id": "ds_prior",
         "source_sample_ids": []},
     "stop_analysis": {"project_id": "proj_a", "dataset_id": "ds_1"},
     "import_public": {"project_id": "proj_a", "name": "n",
@@ -111,7 +123,6 @@ def test_every_registered_op_is_covered_here():
     """So a new op cannot be added without exercising its request construction."""
     covered = set(APPLY_CASES) | {"upload_dataset", "upload_reference", "download_files",
                                   "unarchive_project", "update_project_schema",
-                                  "resume_analysis",
                                   # Local writes: they touch the filesystem and git, not
                                   # the SDK, so there is no request object to build.
                                   "write_process_config", "commit_process_config",
@@ -140,6 +151,20 @@ def test_update_dataset_sends_every_required_field():
     values = [t.value for t in request.tags]
     assert "folder://Immuno" in values, "folder membership must survive a tag write"
     assert "qc-pass" in values
+
+
+def test_run_analysis_sends_the_notification_address():
+    """The address the approval disclosed is the one on the wire.
+
+    `notificationEmails` is a required field of RunAnalysisRequest, and the plugin
+    always sent [] -- so no launch made through it ever notified anyone, which is the
+    divergence from the web UI this default fixes.
+    """
+    reader = _reader()
+    mutations.OPS["run_analysis"].apply(reader, dict(APPLY_CASES["run_analysis"]))
+    request = reader.client.execution.run_analysis.call_args.kwargs["request"]
+    assert request.notification_emails == ["sminot@cirro.test"]
+    assert request.to_dict()["notificationEmails"] == ["sminot@cirro.test"]
 
 
 def test_create_project_sends_the_budget():
@@ -183,6 +208,43 @@ def test_create_process_sends_config_source_and_settings():
     assert request.custom_settings.branch == "dev"
     assert request.custom_settings.folder == "config"
     assert request.pipeline_code.version == "v1.0.0"
+
+
+def test_no_pinned_engine_version_omits_the_key_instead_of_sending_null():
+    """PipelineCode.to_dict() drops executorVersion only when it is UNSET.
+
+    Passing None put an explicit `"executorVersion": null` on the wire, which asks for
+    no engine version rather than for the platform default. The default is to leave it
+    unpinned, so the key has to be absent -- both where a create resolves it from the
+    design spec and where an update carries it forward from the record.
+    """
+    reader = _reader()
+    args = dict(APPLY_CASES["create_process"])
+    assert args["executor_version"] is None, "the planner resolves it to None by default"
+    mutations.OPS["create_process"].apply(reader, args)
+    created = reader.client.processes.create_custom_process.call_args.kwargs["process"]
+    assert "executorVersion" not in created.pipeline_code.to_dict()
+
+    reader = _reader()
+    mutations.OPS["update_process"].apply(reader, dict(APPLY_CASES["update_process"]))
+    updated = reader.client.processes.update_custom_process.call_args.kwargs["process"]
+    assert "executorVersion" not in updated.pipeline_code.to_dict()
+
+
+def test_a_pinned_engine_version_is_still_sent():
+    """Pinning is a recovery from a compilation failure, and must reach the wire."""
+    reader = _reader()
+    mutations.OPS["create_process"].apply(
+        reader, dict(APPLY_CASES["create_process"], executor_version="24.10.5"))
+    request = reader.client.processes.create_custom_process.call_args.kwargs["process"]
+    assert request.pipeline_code.to_dict()["executorVersion"] == "24.10.5"
+
+    reader = _reader()
+    mutations.OPS["update_process"].apply(reader, dict(
+        APPLY_CASES["update_process"],
+        changes={"executor_version": "24.10.5"}))
+    request = reader.client.processes.update_custom_process.call_args.kwargs["process"]
+    assert request.pipeline_code.to_dict()["executorVersion"] == "24.10.5"
 
 
 def test_update_process_resolves_every_field_from_the_current_record():

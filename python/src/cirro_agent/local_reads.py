@@ -5,12 +5,10 @@ check_config validates a configuration folder. They run in the parent process, s
 they live outside worker/ -- the boundary that says only the child imports cirro.
 """
 from pathlib import Path
-from . import errors
-from . import formcheck, schema
-from .worker.read_query import DETAIL_BUDGET
-from . import query as Q
-from . import formgen
-from .envelope import DEFAULT_MAX_TOKENS, estimate_tokens, wrap
+
+from . import errors, formcheck, formgen, query as Q, schema
+from .envelope import (DEFAULT_MAX_TOKENS, DETAIL_BUDGET, NO_API_COST, estimate_tokens,
+                       shrink_to_fit, wrap)
 
 
 def do_describe(request: dict) -> dict:
@@ -54,9 +52,8 @@ def do_describe(request: dict) -> dict:
                     "group_by_bins": ["created_at:day|week|month|quarter|year",
                                       "total_size_bytes:log2", "status:class"],
                 },
-        cost={"api_calls": 0, "by_kind": {}, "note": "static catalog"},
+        cost={**NO_API_COST, "note": "static catalog"},
         max_tokens=max_tokens)
-    envelope["budget"]["used_est"] = estimate_tokens(envelope)
     return envelope
 
 
@@ -124,29 +121,36 @@ def do_workflow_spec(request: dict) -> dict:
         query={"verb": "workflow_spec", "target": target,
                "ref": request.get("ref"), "group": wanted_group},
         result=result,
-        cost={"api_calls": 0, "by_kind": {}, "note": "local parse only"},
+        cost={**NO_API_COST, "note": "local parse only"},
         max_tokens=max_tokens)
     degraded = envelope["budget"]["degraded"]
     # Enum lists dominate the payload for pipelines like this one (a 34-value basecaller
     # list); summarize them before dropping anything a caller cannot recover.
     if estimate_tokens(envelope) > max_tokens:
+        capped = 0
         for entry in result["params"]:
             values = entry.get("enum")
             if values and len(values) > 8:
                 entry["enum"] = list(values[:8])
                 entry["enum_truncated_to"] = 8
                 entry["enum_total"] = len(values)
-        degraded.append({"what": "params.enum", "to": "first 8 values"})
+                capped += 1
+        # Only when a step actually changed something: a recorded degradation that did
+        # nothing reads as data lost that is still there.
+        if capped:
+            degraded.append({"what": "params.enum", "to": "first 8 values"})
     if estimate_tokens(envelope) > max_tokens:
-        for entry in result["params"]:
-            entry.pop("help_text", None)
-        degraded.append({"what": "params.help_text", "to": "dropped"})
-    if estimate_tokens(envelope) > max_tokens:
-        keep = max(10, len(result["params"]) // 2)
-        result["params"] = result["params"][:keep]
-        result["params_truncated_to"] = keep
-        result["how_to_see_the_rest"] = "re-run with --group <key> to page by group"
-        degraded.append({"what": "params", "to": str(keep)})
+        carrying = [e for e in result["params"] if "help_text" in e]
+        for entry in carrying:
+            entry.pop("help_text")
+        if carrying:
+            degraded.append({"what": "params.help_text", "to": "dropped"})
+    # Paging by group is the only way to see the rest of a workflow that declares
+    # groups; a larger budget is the fallback for one that declares none.
+    fix = {"verb": "workflow_spec", "target": target, "max_tokens": max_tokens * 2}
+    if result["groups"] and not wanted_group:
+        fix["group"] = result["groups"][0]["key"]
+    shrink_to_fit(envelope, "params", floor=10, max_tokens=max_tokens, fix=fix)
     envelope["budget"]["used_est"] = estimate_tokens(envelope)
     return envelope
 
@@ -213,7 +217,52 @@ def do_check_config(request: dict) -> dict:
         query={"verb": "check_config", "path": str(folder)},
         result={"folder": str(folder), "assets": sorted(assets),
                 "other_files": extra, **report},
-        cost={"api_calls": 0, "by_kind": {}, "note": "local validation only"},
+        cost={**NO_API_COST, "note": "local validation only"},
         max_tokens=max_tokens)
+    # One dangling mapping per parameter is a real report, and 300 of them ran to
+    # 20,000 tokens against a 6,000 budget with nothing said. `ok`, `n_errors` and
+    # `n_warnings` are counted over every problem, so a shortened list still states
+    # how much it is not showing.
+    _shrink_problems(envelope, folder, max_tokens)
     envelope["budget"]["used_est"] = estimate_tokens(envelope)
     return envelope
+
+
+# Ascending severity, for choosing what survives a cut. Anything else sorts last.
+_LEVEL_RANK = {"error": 0, "warning": 1}
+
+
+def _shrink_problems(envelope: dict, folder: Path, max_tokens: int) -> None:
+    """Cut the problem list by severity, and show what survives in the report's order.
+
+    `shrink_to_fit` keeps a prefix, and formcheck groups its problems by asset rather
+    than by level -- so a truncated report could show warnings while dropping errors.
+    Errors go to the front for the cut and the survivors are put back where they were,
+    which leaves an untruncated report byte-identical to an unsorted one.
+    """
+    result = envelope["result"]
+    ranked = sorted(enumerate(result["problems"]),
+                    key=lambda item: _LEVEL_RANK.get(item[1].get("level"),
+                                                     len(_LEVEL_RANK)))
+    result["problems"] = [problem for _, problem in ranked]
+    shrink_to_fit(envelope, "problems", floor=10, max_tokens=max_tokens,
+                  fix={"verb": "check_config", "path": str(folder),
+                       "max_tokens": max_tokens * 2})
+    kept = len(result["problems"])
+    result["problems"] = [problem for _, problem
+                          in sorted(ranked[:kept], key=lambda item: item[0])]
+    if kept < len(ranked):
+        _restate_the_cut(envelope, kept, len(ranked), max_tokens)
+
+
+def _restate_the_cut(envelope: dict, kept: int, total: int, max_tokens: int) -> None:
+    """Say which problems survived, since it is no longer "the first `kept`"."""
+    entry = next((o for o in envelope.get("omitted", [])
+                  if o.get("code") == "LIST_TRUNCATED"), None)
+    if entry is None:
+        return
+    entry["detail"] = (
+        f"{total - kept} of {total} problems were dropped to fit max_tokens="
+        f"{max_tokens}. Errors were kept in preference to warnings, and what remains "
+        "is in the report's own order; `n_errors` and `n_warnings` count every problem, "
+        "shown or not. `problems_truncated_to` records the cut.")

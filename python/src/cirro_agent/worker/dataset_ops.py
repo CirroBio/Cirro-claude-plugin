@@ -4,6 +4,7 @@ Registers its operations into `mutations.OPS` on import; see mutations.py for
 why the registration lives on this side.
 """
 
+import math
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -14,10 +15,12 @@ from .mutations import (Draft, Op, RISK_DESTRUCTIVE, RISK_LOCAL, RISK_WRITE, _da
                         _need, _project, _tag_models, _target_folders, _wire_tags)
 
 
-# How much of a samplesheet diff the approval quotes before pointing at the file.
-DIFF_PREVIEW_CHARS = 60
-# A download that would fill the disk to the last 10% is refused; that margin is what
-# the operating system and the transfer itself need.
+# How many lines of a samplesheet diff the approval quotes before saying how many
+# more there are.
+DIFF_PREVIEW_LINES = 60
+# A download that would fill the disk past this fraction is warned about, not refused --
+# the person approving it knows things about their own disk that this does not. The
+# margin is what the operating system and the transfer itself need.
 FREE_SPACE_HEADROOM = 0.9
 
 
@@ -264,11 +267,8 @@ def plan_update_samplesheet(reader: reads.Reader, args: dict) -> Draft:
 
     before = ""
     try:
-        from cirro.sdk.dataset import DataPortalDataset
         from cirro_api_client.v1.models import ArtifactType
-        detail = reader.client.datasets.get(project_id=project["id"], dataset_id=row["id"])
-        reader.cost.call("datasets.get", detail=True)
-        wrapped = DataPortalDataset(detail, reader.client)
+        wrapped = reads.portal_dataset(reader, project["id"], row["id"])
         before = wrapped.get_artifact(ArtifactType.SAMPLE_SHEET).read()
         reader.cost.call("artifact.samplesheet")
     except Exception:
@@ -278,9 +278,9 @@ def plan_update_samplesheet(reader: reads.Reader, args: dict) -> Draft:
     diff = list(difflib.unified_diff(
         before.splitlines(), contents.splitlines(),
         fromfile="current samplesheet", tofile="proposed samplesheet", lineterm="", n=2))
-    shown = diff[:DIFF_PREVIEW_CHARS]
-    if len(diff) > DIFF_PREVIEW_CHARS:
-        shown.append(f"... {len(diff) - 60} more diff lines")
+    shown = diff[:DIFF_PREVIEW_LINES]
+    if len(diff) > DIFF_PREVIEW_LINES:
+        shown.append(f"... {len(diff) - DIFF_PREVIEW_LINES} more diff lines")
 
     lines = [f"Replace the samplesheet of {row['name']} ({row['id']}) in "
              f"{project['name']}.", ""]
@@ -482,6 +482,23 @@ def apply_import_public(reader: reads.Reader, args: dict) -> dict:
     return {"created_dataset_id": R.plain(getattr(response, "id", None))}
 
 
+def _coarse_free(free: int) -> int:
+    """Free space rounded down to two significant figures.
+
+    apply re-plans and refuses PLAN_STALE when anything the person read has changed,
+    warnings included (gated._same_disclosure), so a figure that tracks the disk
+    exactly makes every download plan fragile for a reason unrelated to the download:
+    human_bytes prints one decimal on a 1000-base scale, so ~50 MB of unrelated disk
+    activity on a 500 GB volume moved it. Rounding down states less, but states
+    something ordinary churn cannot change -- and understates rather than overstates
+    the room available.
+    """
+    if free <= 0:
+        return 0
+    step = 10 ** max(int(math.log10(free)) - 1, 0)
+    return free - free % step
+
+
 def plan_download_files(reader: reads.Reader, args: dict) -> Draft:
     _need(args, "download_files", "dataset_id", "destination")
     project = _project(reader, args)
@@ -499,7 +516,7 @@ def plan_download_files(reader: reads.Reader, args: dict) -> Draft:
     destination = Path(args["destination"]).expanduser().resolve()
     probe = destination if destination.exists() else destination.parent
     try:
-        free = shutil.disk_usage(probe).free
+        free = _coarse_free(shutil.disk_usage(probe).free)
     except FileNotFoundError:
         raise errors.InvalidQuery(
             f"{destination} has no existing parent directory.",
@@ -526,13 +543,11 @@ def plan_download_files(reader: reads.Reader, args: dict) -> Draft:
         f"{row['name']} ({row['id']}) to local disk.",
         "", f"  Destination  {destination}",
         f"  Filter       {glob or '(all files)'}",
+        f"  Free space   at least {S.human_bytes(free)} there",
         "", "  Files:",
     ]
     lines += [f"    {p['template']}  x{p['n']}" for p in patterns]
     lines += ["", "This writes to the local filesystem, not to Cirro."]
-    # Free space is advisory and changes constantly, so it is a warning: in the
-    # summary it made every apply stale after unrelated disk activity.
-    warnings.append(f"{S.human_bytes(free)} free at the destination.")
 
     return Draft(args={"project_id": project["id"], "dataset_id": row["id"],
                        "destination": str(destination),

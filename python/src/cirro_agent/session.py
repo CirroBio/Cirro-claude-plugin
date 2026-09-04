@@ -21,6 +21,10 @@ SESSION_DIRNAME = ".cirro"
 SESSION_FILE = "session.json"
 AUTH_DEVICE_CODE = "device_code"
 
+# Session resolution runs on the way to every operation, so it waits only briefly on
+# git. Callers already inside a user's checkout pass their own, longer bound.
+GIT_TIMEOUT = 5
+
 
 @dataclass
 class Session:
@@ -34,15 +38,31 @@ class Session:
         return Path(self.dir)
 
 
-def _git_root(start: Path) -> Optional[Path]:
+def git_output(repo: Path, *arguments: str, timeout: float = GIT_TIMEOUT) -> Optional[str]:
+    """`git -C repo ...` stdout stripped, or None if git failed or could not be run.
+
+    The one place this plugin asks git a question. Every caller reads git state it
+    can do without -- a repository root, a version, a remote -- so a missing git
+    binary, a directory outside any checkout and a non-zero exit are all one
+    answer. An empty string is not that answer: it means git succeeded and printed
+    nothing, which the caller may treat as it likes.
+
+    It lives here because `session` is the stdlib-only module the parent process
+    and `scripts/gate.py` both import, and because session resolution was the
+    first caller.
+    """
     try:
-        out = subprocess.run(
-            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=5,
-        )
+        done = subprocess.run(["git", "-C", str(repo), *arguments],
+                              capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
-    return Path(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip() else None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def git_root(start: Path, timeout: float = GIT_TIMEOUT) -> Optional[Path]:
+    """The checkout `start` is inside, or None if it is not inside one."""
+    top = git_output(start, "rev-parse", "--show-toplevel", timeout=timeout)
+    return Path(top) if top else None
 
 
 def _search_ceiling(start: Path) -> Path:
@@ -52,7 +72,7 @@ def _search_ceiling(start: Path) -> Path:
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     if project_dir:
         candidates.append(Path(project_dir).resolve())
-    root = _git_root(start)
+    root = git_root(start)
     if root:
         candidates.append(root.resolve())
     # Deepest ceiling wins: it is the tightest bound on the search.
@@ -207,15 +227,8 @@ def write_private(path: Path, text: str) -> None:
 
 
 def is_git_tracked(session_dir: Path) -> bool:
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(session_dir.parent), "ls-files", "--error-unmatch",
-             str(session_dir)],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return out.returncode == 0
+    return git_output(session_dir.parent, "ls-files", "--error-unmatch",
+                      str(session_dir)) is not None
 
 
 def child_env(session: Session) -> dict:
