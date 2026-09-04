@@ -40,6 +40,10 @@ NAME_CHARSET = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .&\-@!#'()/]*$")
 # The server-side regex engine wants (?<name>...); Python's (?P<name>...) 400s.
 PYTHON_NAMED_GROUP = re.compile(r"\(\?P<")
 
+# "This write does not speak to that field", as distinct from "set it to null". Only
+# needed where the API treats an omitted key and an explicit null differently.
+_UNSPECIFIED = object()
+
 
 # --------------------------------------------------------------------- helpers
 
@@ -487,15 +491,24 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
 def _process_input(*, process_id: str, name: str, description: str, executor: str,
                    category: Optional[str], parent_process_ids: list,
                    child_process_ids: list,
-                   uses_sample_sheet: bool, allow_multiple_sources: bool):
+                   uses_sample_sheet: bool, allow_multiple_sources: bool,
+                   documentation_url=_UNSPECIFIED):
     """The whole-record field set every process write has to fill.
 
     CustomProcessInput replaces the record rather than patching it, so a field left
     out is a field blanked. Built in one place so that a field the model gains is
     gained by create and update together, instead of one path quietly erasing what
     the other sets.
+
+    `documentation_url` distinguishes three states, which is why it is not just
+    Optional[str]. Absent means "this write does not speak to the link", and the key
+    is omitted so the server keeps its own default -- what a create wants. An explicit
+    None means "clear it", which only an explicit null on the wire achieves. A string
+    sets it. Passing None for "not specified" would send a null and silently clear the
+    link, the same defect executor_version had.
     """
     from cirro_api_client.v1.models import CustomProcessInput, Executor
+    from cirro_api_client.v1.types import UNSET
     return CustomProcessInput(
         id=process_id, name=name, description=description,
         executor=Executor(executor), category=category,
@@ -503,6 +516,8 @@ def _process_input(*, process_id: str, name: str, description: str, executor: st
         linked_project_ids=[],
         uses_sample_sheet=uses_sample_sheet,
         allow_multiple_sources=allow_multiple_sources,
+        documentation_url=(UNSET if documentation_url is _UNSPECIFIED
+                           else documentation_url),
     )
 
 
@@ -933,6 +948,14 @@ def plan_update_process(reader: reads.Reader, args: dict) -> Draft:
         if args.get(key) is not None and bool(args[key]) != bool(current):
             changes[key] = bool(args[key])
 
+    # Presence, not value: clearing the link is the point, and every other field here
+    # reads a missing argument as "leave alone", which would make None ambiguous. An
+    # empty string means the same as null, since that is what the form sends.
+    if "documentation_url" in args:
+        wanted = (args["documentation_url"] or "").strip() or None
+        if wanted != detail.get("documentation_url"):
+            changes["documentation_url"] = wanted
+
     config_repo = args.get("config_repository")
     if config_repo and workflow_spec.repository_slug(config_repo) != \
             settings.get("repository"):
@@ -984,6 +1007,7 @@ def plan_update_process(reader: reads.Reader, args: dict) -> Draft:
                             "code": code, "settings": settings,
                             "parent_process_ids": detail.get("parent_process_ids") or [],
                             "child_process_ids": detail.get("child_process_ids") or [],
+                            "documentation_url": detail.get("documentation_url"),
                             "uses_sample_sheet": bool(detail.get("uses_sample_sheet")),
                             "allow_multiple_sources":
                                 bool(detail.get("allow_multiple_sources", True))}}
@@ -1011,7 +1035,13 @@ def apply_update_process(reader: reads.Reader, args: dict) -> dict:
         uses_sample_sheet=changes.get("uses_sample_sheet",
                                       current["uses_sample_sheet"]),
         allow_multiple_sources=changes.get("allow_multiple_sources",
-                                           current["allow_multiple_sources"]))
+                                           current["allow_multiple_sources"]),
+        # Resolved on every update, not only when it changes: the request replaces the
+        # record, so leaving it out cleared the link as a side effect of editing
+        # anything else. None here is deliberate and reaches the wire as a null, which
+        # is what clearing the link takes.
+        documentation_url=changes.get("documentation_url",
+                                      current.get("documentation_url")))
     if current.get("config_source"):
         request.config_source = ConfigSource(current["config_source"])
     if code.get("repository_path"):

@@ -1002,3 +1002,25 @@ def test_allow_multiple_sources_can_be_turned_on():
     draft = pipeline_ops.plan_update_process(
         reader, {"process_id": "org-demo", "allow_multiple_sources": True})
     assert draft.args["changes"]["allow_multiple_sources"] is True
+
+
+def test_documentation_url_can_be_cleared():
+    reader = _reader_for(_owned(documentation_url="https://docs.example.test"))
+    draft = pipeline_ops.plan_update_process(
+        reader, {"process_id": "org-demo", "documentation_url": ""})
+    assert draft.args["changes"]["documentation_url"] is None
+
+
+def test_an_unrelated_update_keeps_the_documentation_url():
+    reader = _reader_for(_owned(documentation_url="https://docs.example.test"))
+    draft = pipeline_ops.plan_update_process(
+        reader, {"process_id": "org-demo", "uses_sample_sheet": False})
+    assert "documentation_url" not in draft.args["changes"]
+    assert draft.args["current"]["documentation_url"] == "https://docs.example.test"
+
+
+def test_omitting_documentation_url_is_not_a_request_to_clear_it():
+    reader = _reader_for(_owned(documentation_url="https://docs.example.test"))
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops.plan_update_process(reader, {"process_id": "org-demo"})
+    assert caught.value.code == "INVALID_QUERY"
