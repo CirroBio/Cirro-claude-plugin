@@ -43,6 +43,12 @@ pull requests?
 For 2 and 3 the branch is not always `main`, and the folder is not always `.cirro` —
 real deployments use paths like `workflows/<name>/<version>`. Ask rather than assume.
 
+The config repository also carries a **type**, and Cirro cannot reach it without one.
+`WITH_PROCESS` takes the code repository's type, being the same repository. `EXTERNAL`
+defaults to the same and accepts `config_repository_type` when the two differ — a public
+configuration repository alongside a private workflow, most often. `repository_type`
+sets the type of the workflow code itself. Both default to `GITHUB_PUBLIC`.
+
 ## Generate and check
 
 Generation is deterministic from the spec, so there is nothing to author by hand. What

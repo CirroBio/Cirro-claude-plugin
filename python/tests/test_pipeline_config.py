@@ -284,8 +284,50 @@ def test_with_process_defaults_to_the_workflow_repo_and_dot_cirro(tmp_path):
         "design_spec": _write_spec(tmp_path), "config_source": "WITH_PROCESS"})
     settings = draft.args["custom_settings"]
     assert settings == {"repository": "epi2me-labs/wf-demo", "branch": "main",
-                        "folder": ".cirro"}
+                        "folder": ".cirro", "repository_type": "GITHUB_PUBLIC"}
     assert "epi2me-labs/wf-demo" in draft.summary
+
+
+def test_config_settings_carry_a_repository_type(tmp_path):
+    """Cirro cannot reach the configuration repository without knowing its type.
+
+    Omitting it is not a soft failure: the API rejects the create, as a 500
+    NullPointerException for some folder names and a 400 for others.
+    """
+    reader = MagicMock()
+    reader.processes.return_value = []
+    reader.base_url = "app.cirro.test"
+    draft = pipeline_ops.plan_create_process(reader, {
+        "design_spec": _write_spec(tmp_path), "config_source": "WITH_PROCESS",
+        "config_folder": "cirro"})
+    assert draft.args["custom_settings"]["repository_type"] == "GITHUB_PUBLIC"
+    assert "GITHUB_PUBLIC" in draft.summary
+
+
+def test_with_process_config_shares_the_code_repository_type(tmp_path):
+    """The config is in the workflow's own repo, so it cannot have a different type."""
+    reader = MagicMock()
+    reader.processes.return_value = []
+    reader.base_url = "app.cirro.test"
+    draft = pipeline_ops.plan_create_process(reader, {
+        "design_spec": _write_spec(tmp_path), "config_source": "WITH_PROCESS",
+        "repository_type": "GITHUB_PRIVATE"})
+    assert draft.args["repository_type"] == "GITHUB_PRIVATE"
+    assert draft.args["custom_settings"]["repository_type"] == "GITHUB_PRIVATE"
+
+
+def test_external_config_repository_type_can_differ_from_the_code(tmp_path):
+    """A separate config repository may be public while the workflow is private."""
+    reader = MagicMock()
+    reader.processes.return_value = []
+    reader.base_url = "app.cirro.test"
+    draft = pipeline_ops.plan_create_process(reader, {
+        "design_spec": _write_spec(tmp_path), "config_source": "EXTERNAL",
+        "config_repository": "OrgName/workflow-configs",
+        "repository_type": "GITHUB_PRIVATE",
+        "config_repository_type": "GITHUB_PUBLIC"})
+    assert draft.args["repository_type"] == "GITHUB_PRIVATE"
+    assert draft.args["custom_settings"]["repository_type"] == "GITHUB_PUBLIC"
 
 
 def test_an_unacceptable_process_name_is_refused(tmp_path):
@@ -652,3 +694,26 @@ def test_create_process_validates_the_authored_assets_it_will_upload(tmp_path):
     assert f"hand-authored in {directory}" in draft.summary
     assert "3 assets, validated clean" in draft.summary
     assert str(directory.resolve()) in draft.summary.split("Registering does not")[1]
+
+
+def test_a_create_returning_no_process_id_is_an_error():
+    """A 400 or 401 arrives as a parsed body, not an exception.
+
+    The generated client returns the response for those statuses instead of raising.
+    Reporting the requested id back as though it were created leaves the caller
+    believing a process exists, and every later read 404s instead.
+    """
+    reader = MagicMock()
+    reader.client.processes.create_custom_process.return_value = MagicMock(id=None)
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops.apply_create_process(reader, {
+            "process_id": "org-demo", "name": "Demo", "description": "d",
+            "executor": "NEXTFLOW", "child_process_ids": [], "parent_process_ids": [],
+            "category": "Community", "repository_path": "epi2me-labs/wf-demo",
+            "version": "v1", "repository_type": "GITHUB_PUBLIC",
+            "entry_point": "main.nf", "executor_version": None,
+            "uses_sample_sheet": False, "allow_multiple_sources": True,
+            "config_source": "STORAGE", "custom_settings": None,
+            "file_mapping_rules": [], "design_spec": "spec.md"})
+    assert caught.value.code == "UPSTREAM_ERROR"
+    assert "org-demo" in str(caught.value)

@@ -285,6 +285,7 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
         )
 
     code_repo = _repository_slug(workflow.get("repository", ""))
+    code_repository_type = args.get("repository_type") or "GITHUB_PUBLIC"
     settings = None
     if source in (WITH_PROCESS, EXTERNAL):
         repo = _repository_slug(args.get("config_repository")
@@ -306,10 +307,18 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
                 field="config_repository", given=repo,
                 retry_with=[{"config_source": EXTERNAL, "config_repository": repo}],
             )
+        # repository_type is required. Without it Cirro cannot tell how to reach the
+        # configuration repository and rejects the create -- as a 500 NullPointerException
+        # for some folder names, and as a 400 for others. A WITH_PROCESS config is in the
+        # workflow's own repository, so it always shares the code repository's type; an
+        # EXTERNAL one may be a repository of different visibility and can be overridden.
         settings = {
             "repository": repo,
             "branch": args.get("config_branch") or R.DEFAULT_BRANCH,
             "folder": args.get("config_folder") or R.DEFAULT_CONFIG_FOLDER,
+            "repository_type": (code_repository_type if source == WITH_PROCESS else
+                                (args.get("config_repository_type")
+                                 or code_repository_type)),
         }
 
     assets, report = _assets_for(args, spec)
@@ -334,7 +343,7 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
         "version": str(workflow.get("version")),
         "entry_point": workflow.get("entrypoint") or "main.nf",
         "executor_version": workflow.get("executor_version"),
-        "repository_type": args.get("repository_type") or "GITHUB_PUBLIC",
+        "repository_type": code_repository_type,
         "parent_process_ids": cirro.get("parent_process_ids") or [],
         "child_process_ids": cirro.get("child_process_ids") or [],
         "uses_sample_sheet": bool(args.get("uses_sample_sheet")),
@@ -348,10 +357,12 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
     where = {
         STORAGE: "uploaded into Cirro storage (a separate upload step after this)",
         WITH_PROCESS: (f"read from {settings['repository']}@{settings['branch']} in "
-                       f"{settings['folder']}/ (the workflow's own repository)"
+                       f"{settings['folder']}/ [{settings['repository_type']}] "
+                       f"(the workflow's own repository)"
                        if settings else ""),
         EXTERNAL: (f"read from {settings['repository']}@{settings['branch']} in "
-                   f"{settings['folder']}/ (a separate configuration repository)"
+                   f"{settings['folder']}/ [{settings['repository_type']}] "
+                   f"(a separate configuration repository)"
                    if settings else ""),
     }[source]
 
@@ -414,7 +425,9 @@ def apply_create_process(reader: reads.Reader, args: dict) -> dict:
     if settings:
         request.custom_settings = CustomPipelineSettings(
             repository=settings["repository"], branch=settings["branch"],
-            folder=settings["folder"])
+            folder=settings["folder"],
+            repository_type=RepositoryType(settings.get("repository_type")
+                                           or args["repository_type"]))
     rules = args.get("file_mapping_rules") or []
     if rules:
         request.file_mapping_rules = [
@@ -429,7 +442,19 @@ def apply_create_process(reader: reads.Reader, args: dict) -> dict:
             for rule in rules]
 
     response = reader.client.processes.create_custom_process(process=request)
-    created = R.plain(getattr(response, "id", None)) or args["process_id"]
+    # The generated client returns the parsed body for 400 and 401 instead of raising,
+    # so a rejected create arrives here as a response carrying no id. Falling back to
+    # the requested id would report a process that does not exist -- the caller then
+    # believes it registered something, and only finds out when every later read 404s.
+    created = R.plain(getattr(response, "id", None))
+    if not created:
+        raise errors.UpstreamError(
+            f"Cirro did not create process {args['process_id']!r}: the API accepted the "
+            f"request but returned no process id.",
+            what="A create that returns no id did not register anything.",
+            user_action=("Check the process in the Cirro UI before retrying. If this "
+                         "persists, the request was rejected without an error body."),
+        )
     follow = ({"tool": "plan", "op": "upload_process_config",
                "args": {"process_id": created, "design_spec": args["design_spec"]}}
               if args["config_source"] == STORAGE else
@@ -808,12 +833,20 @@ def apply_update_process(reader: reads.Reader, args: dict) -> dict:
             executor_version=changes.get("executor_version",
                                          code.get("executor_version")))
     if settings.get("repository"):
+        # Carried through for the same reason it is set on create: Cirro needs the
+        # config repository's type to reach it, and an update that drops it turns a
+        # working configuration into one the server can no longer resolve.
         request.custom_settings = CustomPipelineSettings(
             repository=changes.get("config_repository", settings["repository"]),
             branch=changes.get("config_branch", settings.get("branch")
                                or R.DEFAULT_BRANCH),
             folder=changes.get("config_folder", settings.get("folder")
-                               or R.DEFAULT_CONFIG_FOLDER))
+                               or R.DEFAULT_CONFIG_FOLDER),
+            repository_type=RepositoryType(
+                changes.get("config_repository_type")
+                or settings.get("repository_type")
+                or code.get("repository_type")
+                or "GITHUB_PUBLIC"))
 
     reader.client.processes.update_custom_process(process_id=args["process_id"],
                                                   process=request)
