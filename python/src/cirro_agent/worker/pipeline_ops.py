@@ -923,6 +923,16 @@ def plan_update_process(reader: reads.Reader, args: dict) -> Draft:
         if key in args and args[key] != current:
             changes[key] = args[key]
 
+    # Booleans are compared against None, not truthiness: turning one off is the
+    # commoner edit, and `if args.get(key)` would silently ignore it. Both are on the
+    # process record and already sent by apply, but were unreachable through an update,
+    # so a process registered with the wrong flag could not be corrected here at all.
+    for key, current in (("uses_sample_sheet", detail.get("uses_sample_sheet")),
+                         ("allow_multiple_sources",
+                          detail.get("allow_multiple_sources"))):
+        if args.get(key) is not None and bool(args[key]) != bool(current):
+            changes[key] = bool(args[key])
+
     config_repo = args.get("config_repository")
     if config_repo and workflow_spec.repository_slug(config_repo) != \
             settings.get("repository"):
@@ -998,8 +1008,10 @@ def apply_update_process(reader: reads.Reader, args: dict) -> dict:
         category=changes.get("category", current["category"]),
         parent_process_ids=current["parent_process_ids"],
         child_process_ids=current["child_process_ids"],
-        uses_sample_sheet=current["uses_sample_sheet"],
-        allow_multiple_sources=current["allow_multiple_sources"])
+        uses_sample_sheet=changes.get("uses_sample_sheet",
+                                      current["uses_sample_sheet"]),
+        allow_multiple_sources=changes.get("allow_multiple_sources",
+                                           current["allow_multiple_sources"]))
     if current.get("config_source"):
         request.config_source = ConfigSource(current["config_source"])
     if code.get("repository_path"):

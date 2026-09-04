@@ -948,3 +948,57 @@ def test_a_create_returning_no_process_id_is_an_error():
             "file_mapping_rules": [], "design_spec": "spec.md"})
     assert caught.value.code == "UPSTREAM_ERROR"
     assert "org-demo" in str(caught.value)
+
+
+def _owned(**overrides):
+    """A process record as the reader returns it, owned by the caller."""
+    record = {
+        "id": "org-demo", "name": "Demo", "description": "d", "category": "Community",
+        "executor": "NEXTFLOW", "owner": "me@example.test", "is_custom": True,
+        "config_source": "STORAGE", "custom_settings": None,
+        "pipeline_code": {"repository_path": "org/demo", "version": "v1",
+                          "entry_point": "main.nf", "executor_version": None,
+                          "repository_type": "GITHUB_PUBLIC"},
+        "uses_sample_sheet": True, "allow_multiple_sources": False,
+        "parent_process_ids": [], "child_process_ids": [],
+    }
+    record.update(overrides)
+    return record
+
+
+def _reader_for(record):
+    """A reader whose signed-in user owns the record; edits are refused otherwise."""
+    reader = MagicMock()
+    reader.base_url = "app.cirro.test"
+    reader.username = record["owner"]
+    reader.processes.return_value = [record]
+    reader.process.return_value = record
+    return reader
+
+
+def test_uses_sample_sheet_can_be_turned_off():
+    """A process registered with the wrong flag was previously uncorrectable here.
+
+    apply already sent the field, but plan diffed only name, version and config
+    location, so update_process reported that nothing would change.
+    """
+    reader = _reader_for(_owned())
+    draft = pipeline_ops.plan_update_process(
+        reader, {"process_id": "org-demo", "uses_sample_sheet": False})
+    assert draft.args["changes"]["uses_sample_sheet"] is False
+
+
+def test_a_flag_already_at_the_requested_value_is_not_a_change():
+    reader = _reader_for(_owned())
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops.plan_update_process(
+            reader, {"process_id": "org-demo", "uses_sample_sheet": True})
+    assert caught.value.code == "INVALID_QUERY"
+
+
+def test_allow_multiple_sources_can_be_turned_on():
+    """False is a real value, so the check is against None, not truthiness."""
+    reader = _reader_for(_owned())
+    draft = pipeline_ops.plan_update_process(
+        reader, {"process_id": "org-demo", "allow_multiple_sources": True})
+    assert draft.args["changes"]["allow_multiple_sources"] is True
