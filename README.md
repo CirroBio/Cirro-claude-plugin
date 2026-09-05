@@ -274,6 +274,14 @@ is not a sandbox.
 Editing files is never blocked and never prompts. Writing Python that uses the Cirro SDK
 is ordinary work; only running it is gated.
 
+Nor does that check apply to a session that has not used the plugin. It arms the first
+time a session invokes a Cirro skill, one of the MCP tools, or `cirro-agent`, and stays
+on for the rest of that session. Until then there is no approval to bypass, so a project
+that merely depends on the Cirro SDK is unaffected by having this plugin installed. Two
+things never wait to be armed: `apply` always shows the plan and asks, and a command
+that reads Cirro credential storage or the machine-wide `~/.cirro` is always refused.
+If a session cannot be identified, the checks apply as though it were armed.
+
 Plugins are not allowed to grant themselves permissions, so if you want a hard boundary,
 add this to your own Claude Code settings:
 

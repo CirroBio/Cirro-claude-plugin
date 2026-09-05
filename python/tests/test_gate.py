@@ -563,3 +563,74 @@ def test_every_spelling_of_apply_reaches_the_apply_gate(workdir, tool_name):
     assert run({"tool_name": tool_name, "cwd": str(workdir.path.parent),
                 "tool_input": {"plan_id": plan.plan_id,
                                "digest": plan.digest}}) == ASK
+
+
+# --- arming: a session that never touches the plugin is not gated ---
+
+SDK_CALL = 'python3 -c "import cirro; cirro.DataPortal()"'
+
+
+def armed_env(tmp_path):
+    return {"CIRRO_AGENT_PLUGIN_DATA": str(tmp_path / "data")}
+
+
+def sess(event, session_id="sess-a"):
+    return dict(event, session_id=session_id)
+
+
+def test_an_untouched_session_may_run_the_sdk(tmp_path):
+    """The bypass checks judged every Bash call in every session, so any project that
+    depends on the SDK was unpleasant to work in for no safety gained: a session that
+    never reaches the plugin has no approval to bypass."""
+    assert decide(sess(bash(SDK_CALL)), armed_env(tmp_path))[0] == ALLOW
+
+
+def test_using_a_cirro_skill_arms_the_session(tmp_path):
+    env = armed_env(tmp_path)
+    assert decide(sess({"tool_name": "Skill",
+                        "tool_input": {"skill": "cirro:cirro-explore"}}), env)[0] == ALLOW
+    assert decide(sess(bash(SDK_CALL)), env)[0] == DENY
+
+
+def test_using_a_cirro_mcp_tool_arms_the_session(tmp_path):
+    env = armed_env(tmp_path)
+    assert decide(sess({"tool_name": "mcp__cirro__plan",
+                        "tool_input": {}}), env)[0] == ALLOW
+    assert decide(sess(bash(SDK_CALL)), env)[0] == DENY
+
+
+def test_running_cirro_agent_arms_the_session(tmp_path):
+    env = armed_env(tmp_path)
+    assert decide(sess(bash("cirro-agent read whoami")), env)[0] == ALLOW
+    assert decide(sess(bash(SDK_CALL)), env)[0] == DENY
+
+
+def test_arming_is_per_session(tmp_path):
+    env = armed_env(tmp_path)
+    decide(sess({"tool_name": "Skill", "tool_input": {"skill": "cirro:cirro-explore"}},
+                "sess-a"), env)
+    assert decide(sess(bash(SDK_CALL), "sess-a"), env)[0] == DENY
+    assert decide(sess(bash(SDK_CALL), "sess-b"), env)[0] == ALLOW
+
+
+def test_an_unidentifiable_session_is_gated(tmp_path):
+    """Fail closed. Treating "unknown" as unarmed would switch the gate off for good,
+    and silently, on any host that does not send session_id."""
+    assert decide(bash(SDK_CALL), armed_env(tmp_path))[0] == DENY
+    assert decide(sess(bash(SDK_CALL), ""), armed_env(tmp_path))[0] == DENY
+    assert decide(sess(bash(SDK_CALL), "../escape"), armed_env(tmp_path))[0] == DENY
+
+
+def test_a_skill_from_another_plugin_does_not_arm(tmp_path):
+    env = armed_env(tmp_path)
+    assert decide(sess({"tool_name": "Skill",
+                        "tool_input": {"skill": "docx"}}), env)[0] == ALLOW
+    assert decide(sess(bash(SDK_CALL)), env)[0] == ALLOW
+
+
+def test_credential_snooping_is_blocked_even_unarmed(tmp_path):
+    """This one guards secrets rather than the approval gate, and never fires in
+    ordinary development, so it does not wait to be armed."""
+    # Assembled from parts so this file does not itself trip the pattern under test.
+    snoop = "cat {}/.{}/{}.dat".format("~", "cirro", "token")
+    assert decide(sess(bash(snoop)), armed_env(tmp_path))[0] == DENY

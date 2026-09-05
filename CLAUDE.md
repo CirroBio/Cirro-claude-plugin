@@ -59,6 +59,17 @@ a bare `./x.py`, or a shell script, which re-enters the parser as the command pa
 is -- and blocks on that instead. Do not reintroduce a write-time prompt; if a new
 bypass appears, it is an execution the parser is not reading yet.
 
+**The bypass checks arm; they do not run from the start of every session.** The first
+use of a Cirro skill, MCP tool or `cirro-agent` writes a marker under
+`plugin_data()/armed-sessions/<session_id>`, and that session is gated from then on.
+Before that there is no approval to bypass, so the checks bought nothing and cost
+everyone whose project merely depends on the SDK -- the same complaint that killed the
+`Write|Edit` matcher, arriving by a different route. Three rules keep this from becoming
+a hole, and each has a test: `apply` is never conditional on arming, credential snooping
+is never conditional on arming, and a session with no usable `session_id` is treated as
+**armed**, not unarmed -- otherwise a host that stops sending the field switches the
+whole gate off silently. The marker is per session and pruned after 14 days.
+
 **Two surfaces, split by the gate.** Writes must prompt every time, which only an MCP
 tool can guarantee — `_meta["anthropic/requiresUserInteraction"]` is not defeated by an
 allow rule, any permission mode, or a hook returning `allow`. Bash has no equivalent.

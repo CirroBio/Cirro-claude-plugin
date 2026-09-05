@@ -12,6 +12,12 @@ It judges execution and never authoring: what a command runs is read from disk -
 interpreter's script argument, a module, a `source`d or piped file, a bare `./x.py` --
 and judged by what is in it. Writing such a file is not running it and does not prompt.
 
+And it judges only sessions that have reached the plugin. Job 1 arms on the first use
+of a plugin skill, MCP tool or `cirro-agent` and stays on for the rest of that session;
+before that there is no approval to bypass, so there is nothing to protect and the
+checks are pure friction for anyone whose project merely depends on the SDK. Job 2 and
+the credential check never wait to be armed. See "session arming" below.
+
 Honest about its ceiling: this is string analysis of a shell command. It is
 defeated by a base64 payload, by an interpreter it does not know, and by any
 route to code it cannot see as text. It makes accidental bypass impossible and
@@ -57,7 +63,94 @@ from cirro_agent.errors import NoSessionFolder  # noqa: E402
 from cirro_agent.plans import (DIGEST_MISMATCH, DIGEST_TAMPERED,  # noqa: E402
                                EXPIRED, NOT_PENDING, PLAN_ID_PATTERN,
                                approval_header, approval_warnings, preflight)
+from cirro_agent.runner import plugin_data  # noqa: E402
 from cirro_agent.session import find_session_dir  # noqa: E402
+
+# --------------------------------------------------------------- session arming
+#
+# The bypass checks below judge every Bash call in every session, including ones that
+# have nothing to do with Cirro. That made any project depending on the SDK -- this
+# repo above all -- unpleasant to work in while the plugin was installed, for no
+# safety gained: a session that never reaches the plugin has no approval to bypass.
+#
+# So they arm. The first use of a plugin skill, MCP tool or `cirro-agent` in a session
+# writes a marker, and from then on that session is gated for as long as it lasts.
+# What this deliberately does NOT gate is `apply` (a write must be approved the first
+# time and every time, armed or not) and credential snooping (it protects secrets
+# rather than the approval gate, and never fires in ordinary development).
+#
+# The marker lives beside the runtime, never inside the plugin root -- a directory
+# marketplace copies that tree verbatim into every install.
+ARMED_DIR = "armed-sessions"
+ARMED_TTL_S = 14 * 24 * 3600
+SESSION_ID = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+
+# Set from the marker in main(); the recursive helpers read it rather than threading a
+# parameter through every call site.
+_ARMED = True
+
+
+def _marker(session_id: str) -> Path | None:
+    """Where this session's arming is recorded, or None if it cannot be named."""
+    if not session_id or not SESSION_ID.match(session_id):
+        return None
+    return plugin_data() / ARMED_DIR / session_id
+
+
+def session_is_armed(session_id: str) -> bool:
+    """Armed unless this session is positively known not to have used the plugin.
+
+    Fail closed: an event with no usable session_id cannot be tracked, so it is gated
+    exactly as it was before arming existed. The alternative -- treating "unknown" as
+    unarmed -- would turn the whole gate off for good on any host that does not send
+    the field, and it would do it silently.
+    """
+    path = _marker(session_id)
+    if path is None:
+        return True
+    return path.exists()
+
+
+def arm_session(session_id: str) -> None:
+    """Record that this session has used the plugin. Never fails the gate."""
+    path = _marker(session_id)
+    if path is None or path.exists():
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        _prune(path.parent)
+    except OSError:
+        # An unwritable data directory must not break the tool call. The cost is that
+        # the session stays unarmed, which is the same position it was already in.
+        pass
+
+
+def _prune(directory: Path) -> None:
+    """Drop markers for sessions long finished, so this never grows without bound."""
+    cutoff = time.time() - ARMED_TTL_S
+    try:
+        stale = [p for p in directory.iterdir() if p.stat().st_mtime < cutoff]
+    except OSError:
+        return
+    for path in stale:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def arms_the_session(tool: str, tool_input: dict) -> bool:
+    """Is this tool call a use of the plugin?"""
+    if tool.startswith("mcp__") and "cirro" in tool:
+        return True
+    if tool == "Skill" and "cirro" in str(tool_input.get("skill") or ""):
+        return True
+    if tool == "Bash":
+        return bool(re.search(r"(?:^|[^\w./-])cirro-agent\b",
+                              tool_input.get("command") or ""))
+    return False
+
 
 # This layer's wording for each shared pre-flight verdict, for a human reading a
 # terminal. A verdict with no entry here raises, which the handler at the bottom turns
@@ -387,10 +480,15 @@ def inspect_bash(command: str, cwd: str = "", depth: int = 0) -> None:
     # that mentions the SDK anywhere is treated as driving it.
     whole_mentions_sdk = bool(SDK_MARKERS.search(command))
 
+    # Unconditional: this one guards secrets rather than the approval gate, and a
+    # command that reads token storage is never incidental to ordinary development.
     if TOKEN_SNOOPING.search(command):
         block("Blocked by the Cirro plugin: this command reads Cirro credential storage "
               "or the machine-wide ~/.cirro. The plugin keeps credentials in a "
               "folder-local session and never exposes token material to the model.\n")
+
+    if not _ARMED:
+        return
 
     values = assignments(command)
     for target in piped_scripts(command, values, cwd):
@@ -556,6 +654,7 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
 
 
 def main() -> None:
+    global _ARMED
     try:
         event = json.load(sys.stdin)
     except ValueError:
@@ -563,9 +662,17 @@ def main() -> None:
 
     tool = event.get("tool_name") or ""
     tool_input = event.get("tool_input") or {}
+    session_id = str(event.get("session_id") or "")
+
+    # Arming is checked before it is set, so the call that first reaches the plugin is
+    # itself allowed through. It is a use of the plugin, not a bypass of it.
+    _ARMED = session_is_armed(session_id)
+    if arms_the_session(tool, tool_input):
+        arm_session(session_id)
 
     if tool == "Bash":
         inspect_bash(tool_input.get("command") or "", event.get("cwd") or "")
+    # Never conditional on arming: an apply is the approval itself.
     if tool.endswith("__apply") and "cirro" in tool:
         inspect_apply(tool_input, event.get("cwd") or "")
     passthrough()
