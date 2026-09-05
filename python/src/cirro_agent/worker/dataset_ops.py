@@ -282,25 +282,53 @@ def plan_update_samplesheet(reader: reads.Reader, args: dict) -> Draft:
     if len(diff) > DIFF_PREVIEW_LINES:
         shown.append(f"... {len(diff) - DIFF_PREVIEW_LINES} more diff lines")
 
+    # Writing the CSV does not itself register anything: the SDK's update_samplesheet
+    # puts samplesheet.csv in the dataset prefix and stops there. Re-reading it into
+    # the project's sample metadata is a separate endpoint, so unless it is asked for
+    # the samplesheet and the samples it describes silently disagree.
+    ingest = bool(args.get("ingest_samples", True))
+
     lines = [f"Replace the samplesheet of {row['name']} ({row['id']}) in "
              f"{project['name']}.", ""]
     lines += ["  " + line for line in (shown or ["(no existing samplesheet to compare)"])]
+    lines += ["", ("Then re-ingest this dataset's samples, updating the project's sample "
+                   "metadata to match the new samplesheet.") if ingest else
+              ("The project's sample metadata will NOT be updated: only the CSV is "
+               "replaced. Pass ingest_samples=true to re-ingest.")]
     warnings = []
     if not before:
         warnings.append("No current samplesheet could be read, so this diff is against "
                         "an empty file.")
+    if ingest:
+        warnings.append("Sample re-ingest rewrites sample records for this dataset "
+                        "across the project, not just the CSV. Values that were edited "
+                        "by hand since the last ingest are overwritten by the "
+                        "samplesheet.")
+    scopes = [_inv("datasets", project["id"])]
+    if ingest:
+        scopes.append(_inv("samples", project["id"]))
     return Draft(args={"project_id": project["id"], "dataset_id": row["id"],
-                       "contents": contents},
-                 summary="\n".join(lines), warnings=warnings,
-                 invalidates=[_inv("datasets", project["id"])])
+                       "contents": contents, "ingest_samples": ingest},
+                 summary="\n".join(lines), warnings=warnings, invalidates=scopes)
 
 
 def apply_update_samplesheet(reader: reads.Reader, args: dict) -> dict:
     reader.client.datasets.update_samplesheet(project_id=args["project_id"],
                                               dataset_id=args["dataset_id"],
                                               samplesheet=args["contents"])
-    return {"updated_samplesheet_for": args["dataset_id"],
-            "bytes": len(args["contents"])}
+    result = {"updated_samplesheet_for": args["dataset_id"],
+              "bytes": len(args["contents"]), "samples_ingested": False}
+    if args.get("ingest_samples"):
+        from cirro_api_client.v1.api.datasets import ingest_samples
+        # 202: the ingest is queued, so the project's samples catch up shortly rather
+        # than by the time this returns. Saying "ingested" would overstate it.
+        ingest_samples.sync_detailed(project_id=args["project_id"],
+                                     dataset_id=args["dataset_id"],
+                                     client=reader.client._api_client)
+        result["samples_ingested"] = True
+        result["note"] = ("Sample ingest was accepted and runs asynchronously; project "
+                          "sample metadata updates shortly.")
+    return result
 
 
 def _scan_folder(folder: Path, include_hidden: bool = False) -> tuple:

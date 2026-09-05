@@ -653,7 +653,11 @@ def test_the_samplesheet_preview_is_a_budget_of_diff_lines(
                        args={"project_id": "proj_a", "dataset_id": "ds_0000",
                              "contents": contents})
         assert planned["ok"], planned
-        body = plans.load(session_dir, planned["plan_id"]).summary.split("\n")[2:]
+        # The quoted diff is the indented block; the summary also carries a heading
+        # and a trailing statement of what happens to the project's sample metadata.
+        body = [line for line in
+                plans.load(session_dir, planned["plan_id"]).summary.split("\n")
+                if line.startswith("  ")]
         tail = [line for line in body if "more diff lines" in line]
         assert len(tail) == 1, body
         quoted[budget] = [line for line in body if line not in tail]
@@ -661,3 +665,65 @@ def test_the_samplesheet_preview_is_a_budget_of_diff_lines(
 
     assert (len(quoted[10]), len(quoted[20])) == (10, 20)
     assert remainder[10] - remainder[20] == 10
+
+
+def test_a_samplesheet_update_re_ingests_the_project_samples(
+        writable_tenant, session_dir):
+    """Writing the CSV registers nothing on its own.
+
+    The SDK's update_samplesheet puts samplesheet.csv in the dataset prefix and stops;
+    re-reading it into the project's sample metadata is a separate endpoint. Without
+    it the samplesheet and the samples it describes silently disagree, which is the
+    opposite of what anyone editing a samplesheet is asking for.
+    """
+    planned = call(writable_tenant, session_dir, "plan", op="update_samplesheet",
+                   args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                         "contents": "sample,fastq_1\nS1,S1_R1.fastq.gz\n"})
+    assert planned["ok"], planned
+    assert "re-ingest" in planned["rendered"].lower()
+    assert any("overwritten by the samplesheet" in w for w in planned["warnings"])
+    stored = plans.load(session_dir, planned["plan_id"])
+    assert stored.args["ingest_samples"] is True
+    assert any(scope.get("kind") == "samples" for scope in stored.invalidates)
+
+
+def test_the_samplesheet_executor_writes_the_csv_and_then_ingests(monkeypatch):
+    """Driven directly: the CSV write goes to S3, which the fake tenant does not serve.
+
+    Both halves are asserted because either alone is the bug -- writing without
+    ingesting leaves the samples stale, and ingesting without writing re-reads the
+    old CSV.
+    """
+    from unittest.mock import MagicMock
+    from cirro_api_client.v1.api.datasets import ingest_samples
+    from cirro_agent.worker import dataset_ops
+    calls = []
+    monkeypatch.setattr(ingest_samples, "sync_detailed", lambda **kw: calls.append(kw))
+    reader = MagicMock()
+    args = {"project_id": "proj_a", "dataset_id": "ds_1",
+            "contents": "sample,fastq_1\n", "ingest_samples": True}
+
+    result = dataset_ops.apply_update_samplesheet(reader, args)
+    reader.client.datasets.update_samplesheet.assert_called_once_with(
+        project_id="proj_a", dataset_id="ds_1", samplesheet="sample,fastq_1\n")
+    assert [(c["project_id"], c["dataset_id"]) for c in calls] == [("proj_a", "ds_1")]
+    assert result["samples_ingested"] is True
+
+    calls.clear()
+    declined = dataset_ops.apply_update_samplesheet(
+        MagicMock(), dict(args, ingest_samples=False))
+    assert calls == []
+    assert declined["samples_ingested"] is False
+
+
+def test_a_samplesheet_update_can_decline_the_re_ingest(writable_tenant, session_dir):
+    """Opting out must say so in the text the person approves, not just omit a line."""
+    planned = call(writable_tenant, session_dir, "plan", op="update_samplesheet",
+                   args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                         "contents": "sample,fastq_1\nS1,S1_R1.fastq.gz\n",
+                         "ingest_samples": False})
+    assert planned["ok"], planned
+    assert "will NOT be updated" in planned["rendered"]
+    stored = plans.load(session_dir, planned["plan_id"])
+    assert stored.args["ingest_samples"] is False
+    assert not any(scope.get("kind") == "samples" for scope in stored.invalidates)

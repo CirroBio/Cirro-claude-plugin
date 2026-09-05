@@ -182,7 +182,7 @@ A few things worth knowing:
 |---|---|
 | Analyses | `run_analysis`, `resume_analysis`, `stop_analysis` |
 | Adding data | `upload_dataset`, `upload_reference`, `import_public` |
-| Datasets | `update_dataset` (one or many at once), `update_samplesheet`, `delete_dataset` |
+| Datasets | `update_dataset` (one or many at once), `update_samplesheet` (also re-ingests the project's sample metadata), `delete_dataset` |
 | Projects | `create_project`, `update_project_tags`, `archive_project`, `unarchive_project` |
 | People | `set_user_role`, `invite_user` |
 | Metadata | `update_sample`, `update_project_schema` |

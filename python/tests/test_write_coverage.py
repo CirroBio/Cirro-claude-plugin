@@ -30,6 +30,7 @@ GATED = {
     "DatasetService.update": "update_dataset",
     "DatasetService.delete": "delete_dataset",
     "DatasetService.update_samplesheet": "update_samplesheet",
+    "DeveloperHelper.rerun_sample_ingest_for_dataset": "update_samplesheet",
     "DataPortalDataset.update_samplesheet": "update_samplesheet",
     "DatasetService.import_public": "import_public",
     "ReferenceService.upload_reference": "upload_reference",
@@ -71,8 +72,6 @@ UNSUPPORTED = {
         "a primitive beneath dataset upload; reachable only via upload_dataset",
     "FileService.upload_files":
         "a primitive beneath dataset upload; reachable only via upload_dataset",
-    "DeveloperHelper.rerun_sample_ingest_for_dataset":
-        "developer tooling for pipeline authors, outside this plugin's scope",
 }
 
 

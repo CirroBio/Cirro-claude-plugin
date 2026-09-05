@@ -66,6 +66,33 @@ are effectively creating one; say so.
 A samplesheet governs how a pipeline interprets the dataset's files, so a wrong one
 produces a run that succeeds and is wrong.
 
+### This also updates the project's sample metadata
+
+Two things happen, and the second is the one people do not expect:
+
+1. `samplesheet.csv` is replaced on the dataset.
+2. The dataset's samples are **re-ingested**, so the project's sample metadata is
+   rebuilt from the new CSV.
+
+Writing the CSV does not register anything by itself — the ingest is a separate call.
+Without it the samplesheet and the sample records it describes silently disagree, and
+`cirro-agent read samples -p ...` keeps answering with the old values. So step 2 is on
+by default. It is queued rather than immediate: apply returns as soon as Cirro accepts
+it, and the project's samples catch up shortly after, so a `samples` read taken right
+away may still show the old values.
+
+Re-ingest **overwrites** sample fields from the samplesheet, including values someone
+edited by hand since the last ingest. The plan says so in its warnings; pass that on.
+
+To replace the file and leave the sample records alone:
+
+```
+plan(op="update_samplesheet", args={..., "ingest_samples": False})
+```
+
+The rendered plan states which of the two you are getting, in both directions. Read it
+rather than assuming the default.
+
 ## Delete
 
 ```
