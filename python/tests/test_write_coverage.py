@@ -142,6 +142,30 @@ def test_the_read_cli_cannot_reach_a_mutating_verb():
         "the CLI advertises a verb the worker cannot handle"
 
 
+def test_every_verb_the_read_cli_builds_is_declared_in_read_verbs():
+    """The converse of the check above, and the one that was missing.
+
+    `chain_status` was routed by dispatch and built by the CLI but absent from
+    READ_VERBS, so `read chain-status` refused itself as a write on every call. Only
+    the subset direction was asserted, which cannot catch that.
+    """
+    import ast
+    import pathlib
+    from cirro_agent import cli
+    tree = ast.parse(pathlib.Path(cli.__file__).read_text())
+    built = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values):
+            if (isinstance(key, ast.Constant) and key.value == "verb"
+                    and isinstance(value, ast.Constant)):
+                built.add(value.value)
+    assert built, "the scan found no verb literals, so it is not testing anything"
+    assert built <= cli.READ_VERBS, \
+        f"the CLI builds verbs it has not declared: {sorted(built - cli.READ_VERBS)}"
+
+
 def test_the_read_cli_module_does_not_import_the_mutations_registry():
     import ast
     import pathlib

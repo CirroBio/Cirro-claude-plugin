@@ -225,3 +225,24 @@ def test_detail_cost_can_be_accepted_explicitly(fake_tenant, session_dir):
     assert allowed["ok"], allowed
     assert allowed["cost"]["detail_calls"] == n
     assert any("confirm_detail_cost" in note for note in allowed["notes"])
+
+
+def test_a_filter_on_a_gated_field_is_refused_not_answered_with_zero(
+        fake_tenant, session_dir):
+    """total_size_bytes is fetched per matched row, so it is absent when the filter
+    runs. `size:>=10GB` used to report 0 matches, which reads exactly like a real
+    answer -- the one failure mode a facet-first surface must never have."""
+    result = _query(fake_tenant, session_dir, filter="size:>=10GB")
+    assert result["error"]["code"] == "INVALID_QUERY"
+    assert "total_size_bytes" in result["error"]["message"]
+    # include is not an escape hatch: it fetches after the filter would have run.
+    with_include = _query(fake_tenant, session_dir, filter="size:>=10GB",
+                          include=["total_size_bytes"], confirm_detail_cost=True)
+    assert with_include["error"]["code"] == "INVALID_QUERY"
+
+
+def test_an_unknown_filter_field_is_refused_like_an_unknown_include(
+        fake_tenant, session_dir):
+    result = _query(fake_tenant, session_dir, filter="no_such_field:x")
+    assert result["error"]["code"] == "INVALID_QUERY"
+    assert "no_such_field" in result["error"]["message"]

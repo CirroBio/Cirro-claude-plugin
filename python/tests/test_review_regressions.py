@@ -535,3 +535,47 @@ def test_a_file_read_says_which_named_projects_it_never_looked_at():
     assert entry["fix"]["retry_with"][0] == {
         "entity": "file", "dataset_id": "ds_1", "scope": {"project_ids": ["proj_b"]}}
     assert read_query._projects_left_out("task", ["proj_a"], "ds_1") == []
+
+
+def test_a_free_form_map_model_unwraps_to_a_dict():
+    """Built through the real models, because a fixture dict is what hid this.
+
+    SampleMetadata and DatasetDetailParams keep their keys in
+    `additional_properties` and are neither dict nor Mapping, so `plain` returned
+    them untouched and `samples` and `params` both died on `.items()` -- against
+    every project and every dataset, while the suite stayed green.
+    """
+    from cirro_api_client.v1.models import DatasetDetailParams, SampleMetadata
+    from cirro_agent.worker import rows as R
+    metadata = SampleMetadata.from_dict({"condition": "Tumor", "age": "40"})
+    assert R.plain(metadata) == {"condition": "Tumor", "age": "40"}
+    params = DatasetDetailParams.from_dict({"aligner": "star", "nested": {"a": 1}})
+    assert R.plain(params) == {"aligner": "star", "nested": {"a": 1}}
+
+
+def test_a_real_record_is_not_mistaken_for_a_free_form_map():
+    """Every generated model carries additional_properties, so the test that spots a
+    free-form map has to be its ONLY field -- otherwise Dataset unwraps into a
+    camelCased dict and every caller reading an attribute off one breaks."""
+    from cirro_api_client.v1.models import Dataset
+    from cirro_agent.worker import rows as R
+    assert not R.is_freeform_map(Dataset)
+    fields = {"id", "name", "project_id"}
+    assert fields <= {a.name for a in Dataset.__attrs_attrs__}
+
+
+def test_an_unusable_task_timestamp_pair_yields_no_duration():
+    """Cirro reports a state a task never reached as the Unix epoch, so `now - 1970`
+    put a duration_p95_s of 1788530505 -- 56 years -- in front of a user, and a
+    stop-before-start pair produced a p50 of -99. Both fed the percentiles."""
+    epoch = {"started_at": "1970-01-01T00:00:00Z", "stopped_at": "2026-09-04T14:36:25Z"}
+    backwards = {"started_at": "2026-09-04T14:38:00Z",
+                 "stopped_at": "2026-09-04T14:36:21Z"}
+    good = {"started_at": "2026-09-04T14:36:00Z", "stopped_at": "2026-09-04T14:36:21Z"}
+    assert S.duration_s(epoch) is None
+    assert S.duration_s(backwards) is None
+    assert S.duration_s(good) == 21.0
+    # And nothing unusable reaches the aggregate.
+    body = S.tasks([dict(t, name="FASTQC (s)", status="COMPLETED")
+                    for t in (epoch, backwards, good)])
+    assert body["counts_by_process"][0]["duration_p95_s"] == 21.0

@@ -340,3 +340,57 @@ def test_unknown_metric_is_a_typed_error():
     with pytest.raises(errors.AgentError) as caught:
         Q.group(rows(), ["status"], ["median:total_size_bytes"])
     assert caught.value.code == "INVALID_QUERY"
+
+
+# --- shorthand aliases are entity-aware ---
+
+def test_owner_means_created_by_on_a_dataset():
+    assert Q.parse_shorthand("owner:me@x.test", schema.DATASET) == {
+        "field": "created_by", "op": "eq", "value": "me@x.test"}
+
+
+def test_owner_stays_owner_on_a_process_which_has_no_created_by():
+    """The facet advertised 18 while the alias aimed at a field process lacks."""
+    assert Q.parse_shorthand("owner:me@x.test", schema.PROCESS) == {
+        "field": "owner", "op": "eq", "value": "me@x.test"}
+
+
+def test_size_stays_size_on_a_file_which_has_no_total_size_bytes():
+    assert Q.parse_shorthand("size:>=10GB", schema.FILE) == {
+        "field": "size", "op": "gte", "value": "10GB"}
+
+
+def test_an_alias_still_wins_when_its_target_exists():
+    """folder must reach the multi-valued folders, not the derived single folder."""
+    assert Q.parse_shorthand("folder:Immuno", schema.DATASET) == {
+        "field": "folders", "op": "has_folder", "value": "Immuno"}
+    assert Q.parse_shorthand("process:rnaseq", schema.DATASET)["field"] == "process_id"
+
+
+def test_shorthand_booleans_are_coerced():
+    """is_custom:true sent the string and matched none of the 83 custom processes."""
+    assert Q.parse_shorthand("is_custom:true", schema.PROCESS) == {
+        "field": "is_custom", "op": "eq", "value": True}
+    assert Q.parse_shorthand("is_archived:false", schema.PROCESS)["value"] is False
+
+
+# --- a filter that could not match is refused, never silently empty ---
+
+def test_an_unknown_filter_field_is_refused():
+    with pytest.raises(errors.AgentError) as caught:
+        Q.resolve_filter({"field": "no_such_field", "op": "eq", "value": "x"},
+                         SPEC, ctx())
+    assert caught.value.code == "INVALID_QUERY"
+    assert "no_such_field" in caught.value.message
+
+
+def test_pseudo_fields_survive_the_field_check():
+    assert Q.resolve_filter({"field": "q", "op": "contains", "value": "rna"},
+                            SPEC, ctx())["field"] == "q"
+
+
+def test_filter_fields_walks_junctions():
+    node = {"and": [{"field": "status", "op": "eq", "value": "FAILED"},
+                    {"or": [{"field": "name", "op": "glob", "value": "*x*"},
+                            {"not": {"field": "created_by", "op": "eq", "value": "a"}}]}]}
+    assert Q.filter_fields(node) == {"status", "name", "created_by"}

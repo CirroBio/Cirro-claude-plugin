@@ -150,6 +150,39 @@ def _per_row_fields(include: list, spec: schema.EntitySpec) -> list:
             or (spec.name == "process" and f in _PROCESS_DETAIL_DERIVED)]
 
 
+def _refuse_unfetched_filter(node, spec: schema.EntitySpec, include: list) -> None:
+    """A filter may only read fields a listing row actually holds.
+
+    A gated field costs one call per row and is fetched only for rows that already
+    matched, so filtering on one ran against rows that never had it and returned a
+    zero indistinguishable from a real one: `size:>=10GB` over datasets said 0 not
+    because none are that big but because total_size_bytes was never fetched.
+
+    `include` is deliberately not an escape hatch here. It fetches detail for the
+    matched rows, which is after this filter would have had to run, so honouring the
+    filter would mean a detail call for every scanned row -- 1038 of them in one real
+    project -- which is exactly the cost the tier model exists to refuse. So this
+    refuses outright and points at the fields that are free to filter on.
+    """
+    gated = sorted(f for f in Q.filter_fields(node) - Q.PSEUDO_FIELDS
+                   if spec.tier_of(f) in schema.GATED_TIERS)
+    if not gated:
+        return
+    free = [f for f, (tier, _) in spec.fields.items()
+            if tier not in schema.GATED_TIERS][:6]
+    raise errors.InvalidQuery(
+        f"{spec.name} cannot be filtered on {', '.join(gated)}.",
+        what=(f"{gated[0]} costs one API call per row, so it is not on a listing row. "
+              "Filtering on it would need every scanned row fetched first."),
+        field="filter", given=gated,
+        candidates=[{"field": name} for name in free],
+        retry_with=[{"filter": {"field": name, "op": "eq", "value": "..."}}
+                    for name in free[:3]]
+        + [{"include": gated, "note": "readable per row once a filter has narrowed the "
+                                      "match set"}],
+    )
+
+
 def _refuse_detail_cost(include: list, per_row: list, n_matched: int) -> None:
     """The one cost gate over `include`.
 
@@ -232,7 +265,8 @@ def do_query(request: dict) -> dict:
     lineage = _lineage(scanned) if entity == "dataset" else {}
     ctx = reader.ctx(lineage)
 
-    node = Q.resolve_filter(Q.parse_filter(request.get("filter")), spec, ctx)
+    node = Q.resolve_filter(Q.parse_filter(request.get("filter"), spec), spec, ctx)
+    _refuse_unfetched_filter(node, spec, list(request.get("include") or []))
     matched = Q.apply_filter(scanned, node, spec, ctx)
 
     sort = request.get("sort") or spec.default_sort

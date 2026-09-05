@@ -9,6 +9,7 @@ free. That is why this module leans so hard on faceting and on `suggest`.
 Everything here operates on plain JSON-safe row dicts, so it never imports cirro
 and is testable without a tenant.
 """
+import difflib
 import fnmatch
 import math
 import re
@@ -38,6 +39,10 @@ _MONTH_RE = re.compile(r"^(\d{4})-(\d{2})$")
 _YEAR_RE = re.compile(r"^(\d{4})$")
 
 _MISSING = object()
+
+# Fields the matcher synthesizes rather than reading off a row: `q` is the free-text
+# search over spec.text_fields, `_lineage` is what ancestor_of/descendant_of rewrite to.
+PSEUDO_FIELDS = frozenset({"q", "_lineage"})
 
 OPS = {
     "eq", "ne", "in", "nin", "glob", "regex", "contains", "gt", "gte", "lt", "lte",
@@ -160,21 +165,43 @@ _SHORTHAND_KEYS = {
     "executor": "executor", "type": "type", "ext": "ext", "q": "q",
 }
 
+_BOOLEANS = {"true": True, "false": False}
 
-def parse_shorthand(text: str) -> dict:
+
+def _shorthand_field(key: str, spec: Optional[EntitySpec]) -> str:
+    """Apply the alias, but not onto an entity that lacks the target.
+
+    The table is written for datasets, and two of its targets do not exist on every
+    entity: `owner` means `created_by` on a dataset but is its own field on a process,
+    and `size` means `total_size_bytes` on a dataset but is its own field on a file.
+    Rewriting blindly aimed the filter at a field the entity does not have, and since
+    an unknown field merely matched nothing, it read as an empty result rather than a
+    mistake -- the process `owner` facet advertised 18 while `owner:...` returned 0.
+
+    The alias still wins whenever its target does exist, which is what keeps `folder`
+    pointing at `folders` (has_folder over the multi-valued field, not the derived
+    single-folder convenience field) and `process` at the scalar `process_id`.
+    """
+    target = _SHORTHAND_KEYS.get(key, key)
+    if spec is None or target in spec.fields or key not in spec.fields:
+        return target
+    return key
+
+
+def parse_shorthand(text: str, spec: Optional[EntitySpec] = None) -> dict:
     """`status:FAILED created:last-7d owner:@me name~*RNA* size:>=10GB` -> filter tree."""
     clauses = []
     for token in text.split():
         if "~" in token and ":" not in token.split("~")[0]:
             key, _, value = token.partition("~")
-            clauses.append({"field": _SHORTHAND_KEYS.get(key, key), "op": "glob",
+            clauses.append({"field": _shorthand_field(key, spec), "op": "glob",
                             "value": value})
             continue
         if ":" not in token:
             clauses.append({"field": "q", "op": "contains", "value": token})
             continue
         key, _, value = token.partition(":")
-        field = _SHORTHAND_KEYS.get(key, key)
+        field = _shorthand_field(key, spec)
         for prefix, op in ((">=", "gte"), ("<=", "lte"), (">", "gt"), ("<", "lt")):
             if value.startswith(prefix):
                 clauses.append({"field": field, "op": op, "value": value[len(prefix):]})
@@ -194,16 +221,21 @@ def parse_shorthand(text: str) -> dict:
                 clauses.append({"field": field, "op": "has_folder", "value": value})
             elif field == "tags":
                 clauses.append({"field": field, "op": "has_tag", "value": value})
+            elif value.lower() in _BOOLEANS:
+                # `is_custom:true` sent the string "true" against a boolean row value
+                # and matched none of the 83 rows that were in fact custom.
+                clauses.append({"field": field, "op": "eq",
+                                "value": _BOOLEANS[value.lower()]})
             else:
                 clauses.append({"field": field, "op": "eq", "value": value})
     return {"and": clauses} if len(clauses) != 1 else clauses[0]
 
 
-def parse_filter(filter_spec: Any) -> Optional[dict]:
+def parse_filter(filter_spec: Any, spec: Optional[EntitySpec] = None) -> Optional[dict]:
     if filter_spec is None or filter_spec == {} or filter_spec == "":
         return None
     if isinstance(filter_spec, str):
-        return parse_shorthand(filter_spec)
+        return parse_shorthand(filter_spec, spec)
     if not isinstance(filter_spec, dict):
         raise errors.InvalidQuery(
             "A filter must be an object or a shorthand string.",
@@ -241,6 +273,21 @@ def resolve_filter(node: Optional[dict], spec: EntitySpec, ctx: Ctx) -> Optional
             given=node,
             retry_with=[{"field": name, "op": "eq", "value": "..."}
                         for name in list(spec.fields)[:5]],
+        )
+    if field not in spec.fields and field not in PSEUDO_FIELDS:
+        # Silence here is what hid two other bugs: an unknown field matched no rows,
+        # so a mistyped or mis-aliased name looked like an honest empty result. The
+        # `include` path already refuses an unknown field; a filter now does too.
+        close = difflib.get_close_matches(field, list(spec.fields), n=5, cutoff=0.5)
+        raise errors.InvalidQuery(
+            f"{spec.name} has no field {field!r}.",
+            what=("A filter on an unknown field would match nothing, which is "
+                  "indistinguishable from a real empty result."),
+            field="filter", given=field,
+            candidates=[{"field": name} for name in close],
+            retry_with=([{"filter": {"field": name, "op": op, "value": value}}
+                         for name in close[:3]]
+                        or [{"verb": "describe", "entity": spec.name}]),
         )
 
     if field == "created_by" and value == "@me":
@@ -414,6 +461,19 @@ def _lineage_matches(row: dict, op: str, target: str, depth: int, ctx: Ctx) -> b
         return _reaches(row_id, target, ctx, limit)
     # ancestor_of: is `row` an ancestor of `target`? Same walk, started at `target`.
     return _reaches(target, row_id, ctx, limit)
+
+
+def filter_fields(node: Optional[dict]) -> set:
+    """Every field a resolved filter tree reads, junctions walked through."""
+    if not node:
+        return set()
+    for junction in ("and", "or"):
+        if junction in node:
+            return set().union(*(filter_fields(c) for c in node[junction])) or set()
+    if "not" in node:
+        return filter_fields(node["not"])
+    field = node.get("field")
+    return {field} if field else set()
 
 
 def apply_filter(rows: list, node: Optional[dict], spec: EntitySpec, ctx: Ctx) -> list:
@@ -720,7 +780,7 @@ def suggest(rows: list, base_query: dict, spec: EntitySpec, facets: dict, ctx: C
         call.update(overrides)
         if extra_filter is not None:
             call["filter"] = extra_filter
-            node = resolve_filter(parse_filter(extra_filter), spec,
+            node = resolve_filter(parse_filter(extra_filter, spec), spec,
                                   Ctx(ctx.username, ctx.now, ctx.lineage))
             matched = sum(1 for r in rows if matches(r, node, spec, ctx))
         else:
