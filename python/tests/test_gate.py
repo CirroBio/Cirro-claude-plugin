@@ -474,7 +474,7 @@ def test_the_modules_the_gate_imports_are_stdlib_only():
     """Importing them under a system Python with no cirro installed must load nothing
     but the plugin's own pure modules -- that is what lets the gate run with no venv."""
     code = ("import sys; sys.path.insert(0, 'python/src'); import cirro_agent.plans; "
-            "import cirro_agent.session; "
+            "import cirro_agent.session; import cirro_agent.runner; "
             "bad = [m for m in sys.modules if m.startswith('cirro') and "
             "not m.startswith('cirro_agent')]; assert not bad, bad; "
             "print(sorted(m for m in sys.modules if m.startswith('cirro_agent')))")
@@ -483,6 +483,9 @@ def test_the_modules_the_gate_imports_are_stdlib_only():
     assert done.returncode == 0, done.stderr[-600:]
     assert "cirro_agent.plans" in done.stdout
     assert "cirro_agent.session" in done.stdout
+    # runner joined the list when arming began resolving the data directory through
+    # plugin_data() rather than growing a third copy of that rule.
+    assert "cirro_agent.runner" in done.stdout
 
 
 def test_the_gate_defines_itself_on_the_oldest_python_it_can_be_launched_with():

@@ -150,7 +150,7 @@ def _per_row_fields(include: list, spec: schema.EntitySpec) -> list:
             or (spec.name == "process" and f in _PROCESS_DETAIL_DERIVED)]
 
 
-def _refuse_unfetched_filter(node, spec: schema.EntitySpec, include: list) -> None:
+def _refuse_unfetched_filter(node, spec: schema.EntitySpec) -> None:
     """A filter may only read fields a listing row actually holds.
 
     A gated field costs one call per row and is fetched only for rows that already
@@ -266,7 +266,7 @@ def do_query(request: dict) -> dict:
     ctx = reader.ctx(lineage)
 
     node = Q.resolve_filter(Q.parse_filter(request.get("filter"), spec), spec, ctx)
-    _refuse_unfetched_filter(node, spec, list(request.get("include") or []))
+    _refuse_unfetched_filter(node, spec)
     matched = Q.apply_filter(scanned, node, spec, ctx)
 
     sort = request.get("sort") or spec.default_sort
