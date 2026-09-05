@@ -230,6 +230,15 @@ def _primary_failed_index(reader: Reader, project_id: str, dataset_id: str,
     return failed[0]["task_id"] if failed else None
 
 
+# What S3 and STS say when the credential may not read the object or list the bucket.
+_DENIAL_MARKERS = ("accessdenied", "not authorized", "forbidden", "403")
+
+
+def _is_denial(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _DENIAL_MARKERS)
+
+
 def _read_trace(reader: Reader, project_id: str, dataset_id: str) -> dict:
     try:
         wrapped = portal_dataset(reader, project_id, dataset_id)
@@ -240,11 +249,23 @@ def _read_trace(reader: Reader, project_id: str, dataset_id: str) -> dict:
         # being reported as a missing trace artifact.
         raise
     except Exception as exc:
+        alternatives = [{"verb": "summarize", "of": "tasks", "dataset_id": dataset_id},
+                        {"verb": "summarize", "of": "logs", "dataset_id": dataset_id}]
+        if _is_denial(exc):
+            # Reporting a refusal as an absence sent the reader to look for a run that
+            # "did not get far enough", when the run may well have published a trace
+            # this credential is not allowed to read.
+            raise errors.Forbidden(
+                "Not allowed to read this project's workflow trace.",
+                what="The trace is stored in the project bucket and access was denied, "
+                     "so whether one was published is unknown.",
+                user_action="Ask a project administrator for data access, then retry.",
+                retry_with=alternatives,
+            )
         raise errors.NotFound(
             f"No workflow trace is available for this dataset: {exc}",
             what="A trace is only published by Nextflow runs that got far enough to emit one.",
-            retry_with=[{"verb": "summarize", "of": "tasks", "dataset_id": dataset_id},
-                        {"verb": "summarize", "of": "logs", "dataset_id": dataset_id}],
+            retry_with=alternatives,
         )
     records = frame.to_dict(orient="records") if hasattr(frame, "to_dict") else list(frame)
     return S.trace(records)

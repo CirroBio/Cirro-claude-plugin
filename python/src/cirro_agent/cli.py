@@ -250,8 +250,51 @@ def _query_request(entity: str, args) -> dict:
     return request
 
 
+def _option_strings(parser: argparse.ArgumentParser) -> set:
+    """Every flag this parser and its subparsers accept.
+
+    Subparsers matter: the flags that can follow `--sort` all live on a read
+    subcommand, so a top-level-only scan would find none of them known.
+    """
+    found = set()
+    for action in parser._actions:
+        found.update(action.option_strings)
+        # Only a subparsers action; `choices` on an ordinary option is a list of
+        # allowed values (--slot), which is not something to recurse into.
+        if isinstance(action, argparse._SubParsersAction):
+            for child in action.choices.values():
+                found |= _option_strings(child)
+    return found
+
+
+def _attach_descending(argv: list, parser: argparse.ArgumentParser) -> list:
+    """`--sort -created_at` -> `--sort=-created_at`.
+
+    Both options document a leading `-` as "descending", but argparse reads the next
+    token as another option and fails with "expected one argument", so the documented
+    form did not work and only the `=` form did. Only a token that is not itself a
+    known option is attached, so `--sort --fresh` still reports the missing value.
+    """
+    known = _option_strings(parser)
+    out, takes_descending = [], ("--sort", "--order-by")
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        following = argv[index + 1] if index + 1 < len(argv) else None
+        if (token in takes_descending and following
+                and following.startswith("-") and following not in known):
+            out.append(f"{token}={following}")
+            index += 2
+            continue
+        out.append(token)
+        index += 1
+    return out
+
+
 def main(argv=None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(_attach_descending(argv, parser))
     command = getattr(args, "command", None)
 
     if command == "doctor":

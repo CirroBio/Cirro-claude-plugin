@@ -424,3 +424,32 @@ def test_a_truncated_check_config_says_what_it_dropped(tmp_path):
                             "max_tokens": 12000}
     assert any(step["what"] == "problems" for step in out["budget"]["degraded"])
     assert out["budget"]["used_est"] <= out["budget"]["max_tokens"]
+
+
+def test_a_descending_sort_can_be_written_the_way_the_help_documents_it():
+    """Both options say "prefix with - for descending", but argparse read the next
+    token as another option and failed with "expected one argument", so only the
+    `=` form worked. A real flag after --sort must still be an error."""
+    from cirro_agent import cli
+    parser = cli.build_parser()
+    assert cli._attach_descending(
+        ["read", "datasets", "--sort", "-created_at"], parser
+    ) == ["read", "datasets", "--sort=-created_at"]
+    assert cli._attach_descending(
+        ["read", "datasets", "--order-by", "-count"], parser
+    ) == ["read", "datasets", "--order-by=-count"]
+    # --fresh is a real flag on the subcommand, so it is not swallowed as a value.
+    assert cli._attach_descending(
+        ["read", "datasets", "--sort", "--fresh"], parser
+    ) == ["read", "datasets", "--sort", "--fresh"]
+    args = parser.parse_args(cli._attach_descending(
+        ["read", "datasets", "-p", "P", "--sort", "-created_at"], parser))
+    assert args.sort == ["-created_at"]
+
+
+def test_option_strings_reaches_subcommand_flags():
+    """A top-level-only scan finds none of them, which made every subcommand flag
+    look like a value and let `--sort --fresh` parse as sort=['--fresh']."""
+    from cirro_agent import cli
+    found = cli._option_strings(cli.build_parser())
+    assert {"--fresh", "--stale-ok", "--dir", "--confirm-detail-cost"} <= found
