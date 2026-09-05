@@ -288,14 +288,27 @@ def task_process(name: str) -> str:
     return _TAG_SUFFIX.sub("", name or "").strip()
 
 
-def _duration_s(task: dict) -> Optional[float]:
+def duration_s(task: dict) -> Optional[float]:
+    """A task's wall time, or None when the timestamps cannot support one.
+
+    Cirro reports a task that never reached a given state with the Unix epoch rather
+    than a null, so a task that never started came back as `now - 1970` -- one such
+    task put a duration_p95_s of 1788530505 (56 years) in front of a user, and a
+    stop-before-start pair produced a p50 of -99. Both flowed into the percentiles
+    people read to judge a run, so an unusable pair has to become None here rather
+    than a number. This is the one implementation: rows.task stores what it returns.
+    """
     start, stop = task.get("started_at"), task.get("stopped_at")
     if not start or not stop:
         return None
     try:
-        return (parse_dt(stop) - parse_dt(start)).total_seconds()
+        began, ended = parse_dt(start), parse_dt(stop)
     except errors.AgentError:
         return None
+    if began.timestamp() <= 0 or ended.timestamp() <= 0:
+        return None  # an epoch timestamp is "never", not 1970
+    seconds = (ended - began).total_seconds()
+    return seconds if seconds >= 0 else None
 
 
 def tasks(task_dicts: list, *, primary_failed_index: Optional[int] = None,
@@ -310,7 +323,7 @@ def tasks(task_dicts: list, *, primary_failed_index: Optional[int] = None,
         bucket["n"] += 1
         if "FAIL" in str(task.get("status", "")).upper():
             bucket["failed"] += 1
-        duration = _duration_s(task)
+        duration = duration_s(task)
         if duration is not None:
             bucket["durations"].append(duration)
 
@@ -338,7 +351,7 @@ def tasks(task_dicts: list, *, primary_failed_index: Optional[int] = None,
             "exit_code": task.get("exit_code"),
             "status_message": task.get("status_message"),
             "container_image": task.get("container_image"),
-            "duration_s": _duration_s(task),
+            "duration_s": duration_s(task),
             "is_root_cause": task.get("task_id") == primary_failed_index,
         })
 

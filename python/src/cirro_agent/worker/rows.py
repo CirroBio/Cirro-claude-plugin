@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 from .. import errors
 from ..query import STATUS_CLASSES as _STATUS_CLASSES, parse_dt
-from ..summarize import human_bytes, split_ext, task_process
+from ..summarize import duration_s, human_bytes, split_ext, task_process
 
 # Single source of truth: `is_terminal` on a row and the `@terminal` filter class must
 # never disagree about what counts as finished.
@@ -68,7 +68,29 @@ def plain(value: Any) -> Any:
         return [plain(v) for v in value]
     if isinstance(value, dict):
         return {k: plain(v) for k, v in value.items()}
+    if is_freeform_map(value):
+        return {k: plain(v) for k, v in value.additional_properties.items()}
     return value
+
+
+def is_freeform_map(value: Any) -> bool:
+    """Is this a generated model for a free-form map, rather than a real record?
+
+    SampleMetadata, DatasetDetailParams and MetricRecordServices are attrs classes
+    whose only field is `additional_properties` -- they model an open JSON object, so
+    the keys ARE the data. They are neither dict nor Mapping, so they used to fall
+    through `plain` untouched and reach code that treats them as mappings: `samples`
+    and `params` both died on `.items()`, and spec_shape declared nothing.
+
+    The single-field test matters. Every generated model carries
+    `additional_properties`, so testing for that alone would also unwrap real records
+    like Dataset (12 fields) into camelCased dicts and break every caller that reads
+    an attribute off one.
+    """
+    fields = getattr(type(value), "__attrs_attrs__", None)
+    return (fields is not None and len(fields) == 1
+            and fields[0].name == "additional_properties"
+            and isinstance(getattr(value, "additional_properties", None), dict))
 
 
 def _age_days(created_at: Optional[str], now: datetime) -> Optional[int]:
@@ -311,10 +333,7 @@ def task(obj, index: int) -> dict:
         "stopped_at": stopped,
     }
     if started and stopped:
-        try:
-            row["duration_s"] = (parse_dt(stopped) - parse_dt(started)).total_seconds()
-        except errors.AgentError:
-            row["duration_s"] = None
+        row["duration_s"] = duration_s(row)
     return row
 
 

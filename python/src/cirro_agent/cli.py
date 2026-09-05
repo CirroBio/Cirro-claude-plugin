@@ -16,7 +16,7 @@ from . import errors, formgen, runner
 # The complete set of verbs this binary may ask the worker for.
 READ_VERBS = frozenset({"query", "get", "summarize", "describe", "list",
                         "process_params", "process_config", "workflow_spec", "check_config",
-                        "task_logs", "whoami"})
+                        "task_logs", "chain_status", "whoami"})
 
 
 def _emit(payload: dict) -> int:
