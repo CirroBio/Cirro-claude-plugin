@@ -16,14 +16,16 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      # Outside the checkout on purpose: a directory marketplace copies the plugin
-      # root verbatim into every install, so a virtualenv in the tree ships with the
-      # plugin. Setting it explicitly also means the resolvers and the runner agree
-      # here without depending on what HOME happens to be on the runner.
-      CIRRO_AGENT_PLUGIN_DATA: ${{ runner.temp }}/cirro-agent
     steps:
       - uses: actions/checkout@v7
+
+      - name: Put the runtime outside the checkout
+        # A directory marketplace copies the plugin root verbatim into every install,
+        # so a virtualenv in the tree ships with the plugin. Setting the path
+        # explicitly also means the resolvers and the runner agree here without
+        # depending on what HOME happens to be on the runner. It is set from a step
+        # rather than jobs.<id>.env because the runner context is not readable there.
+        run: echo "CIRRO_AGENT_PLUGIN_DATA=$RUNNER_TEMP/cirro-agent" >> "$GITHUB_ENV"
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -33,7 +35,8 @@ jobs:
         run: UV_PROJECT_ENVIRONMENT="$CIRRO_AGENT_PLUGIN_DATA/dev-venv" uv sync --locked --python 3.12 --project runtime --group dev
 
       - name: Lint
-        run: "$CIRRO_AGENT_PLUGIN_DATA/dev-venv/bin/python" -m flake8 python/src python/tests scripts/gate.py
+        run: |
+          "$CIRRO_AGENT_PLUGIN_DATA/dev-venv/bin/python" -m flake8 python/src python/tests scripts/gate.py
 
       - name: Test
         # The coverage floor is a ratchet, not a target: it sits just under the
