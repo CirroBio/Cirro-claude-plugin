@@ -245,7 +245,7 @@ wheels = [
 
 [[package]]
 name = "cirro"
-version = "1.12.1"
+version = "1.13.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
@@ -263,14 +263,14 @@ dependencies = [
     { name = "s3fs" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fb/21/f674ac885d996b7237df97a4874a3585ed675861965f5a44152f165a0e09/cirro-1.12.1.tar.gz", hash = "sha256:cf4700b69c86574134ecd2a7c8376ee2005b9d3ce8f4fc2ac2d3c571b1bd1792", size = 81786 }
+sdist = { url = "https://files.pythonhosted.org/packages/e2/68/4571d44e1aec56552d12f58975640aa2f8c7c08a8a5d0fcad2b41240ad9c/cirro-1.13.1.tar.gz", hash = "sha256:64f80d2e55b7f887c96532a507da422cc4e926c5974e76d4b1e3151dbce3f3ae", size = 93245 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/44/0c/c03df3a5ece6eb38733751fc0685f9b6278140ffb64ccde5aa3388016a9b/cirro-1.12.1-py3-none-any.whl", hash = "sha256:cfdc6216b93d9abc83f1956559c21846aa33898bbad88cc843f30c184625a22a", size = 110353 },
+    { url = "https://files.pythonhosted.org/packages/45/3f/28591ad63d7739cb39d9ded51ad71ba5617e852dcd80e513971d4a76f5fd/cirro-1.13.1-py3-none-any.whl", hash = "sha256:b637e1e57ba8d04ef24625d6761d3194287df3cb6a8f30fa314718883dc77136", size = 123633 },
 ]
 
 [[package]]
 name = "cirro-agent"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "../python" }
 dependencies = [
     { name = "cirro" },
@@ -288,7 +288,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cirro", specifier = ">=1.12.1,<2" },
+    { name = "cirro", specifier = ">=1.13.1,<2" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=7" },
     { name = "mcp", specifier = ">=1.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
@@ -299,7 +299,7 @@ requires-dist = [
 
 [[package]]
 name = "cirro-agent-runtime"
-version = "0.6.0"
+version = "0.7.0"
 source = { virtual = "." }
 dependencies = [
     { name = "cirro-agent" },

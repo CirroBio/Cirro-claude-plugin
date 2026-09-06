@@ -106,7 +106,8 @@ gave); `storage_bytes` is derived from them.
 
 ## Money
 
-Cirro reports what has **already** been spent, by month and by AWS service:
+Cirro reports what has **already** been spent, at two scales. Whole projects, by month
+and by AWS service:
 
 ```bash
 cirro-agent read spend -p "My Project"     # months, newest first, plus by_service
@@ -116,9 +117,23 @@ cirro-agent read spend --all-projects      # every project, in ONE api call
 `--all-projects` here does not fan out — it is a single request, so it is the right
 answer to "which project is costing us the most" and needs no `--confirm-fanout`.
 
+One analysis, by task status and rolled up by pipeline step:
+
+```bash
+cirro-agent read cost -p "My Project" -d ds_123
+```
+
+`cost_by_process` is the line to read — it says which step took the money, with a
+`share` of the total, and it collapses a 500-task fan-out into one row per step.
+`wasted_cost` is the part spent on tasks that failed or were aborted; `CACHED` costs
+nothing and is not counted there. Report `is_estimate` when it is true: the figure is
+modelled from instance pricing, not a settled bill. A dataset that was uploaded rather
+than computed has no cost record and is refused with `WRONG_EXECUTOR` — that is the
+answer, not an error to retry.
+
 Nothing prices a run *before* it happens. There is no such API, so never estimate what
-an analysis will cost; say what will run instead, and offer this read for what similar
-work has cost so far.
+an analysis will cost; say what will run instead, and offer these reads for what the
+same pipeline has cost already.
 
 ## The other things worth knowing
 

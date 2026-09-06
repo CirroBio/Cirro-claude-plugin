@@ -2,7 +2,7 @@
 # against this file builds the venv that every worker subprocess runs in.
 [project]
 name = "cirro-agent-runtime"
-version = "0.6.0"
+version = "0.7.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "cirro-agent",
@@ -13,10 +13,10 @@ dev = ["cirro-agent[dev]"]
 
 [tool.uv]
 package = false
-# cirro 1.12.1 pins cirro_api_client<1.6.0, but the process config-revision routes
+# cirro 1.13.1 pins cirro_api_client<1.6.0, but the process config-revision routes
 # (save_process_revision, get_process_resource, get_latest_process_revision) and the
 # ConfigSource enum exist only in >=1.6.0 -- without them the plugin cannot read or
-# write pipeline configuration at all. Verified: cirro 1.12.1 imports and runs against
+# write pipeline configuration at all. Verified: cirro 1.13.1 imports and runs against
 # 1.6.0. python/tests/test_runtime_contract.py fails loudly if that stops being true.
 override-dependencies = ["cirro-api-client>=1.6.0,<2"]
 

@@ -329,6 +329,90 @@ def test_summarize_files_collapses_names_into_patterns(fake_tenant, session_dir)
     assert out["result"]["next_calls"][0]["call"]["glob"]
 
 
+def test_the_params_verbs_reach_the_keys_of_a_free_form_map(fake_tenant, session_dir):
+    """Both ways to ask for a run's params, end to end.
+
+    `DatasetDetailParams` is neither dict nor Mapping, so before `plain` learned to
+    unwrap it `summarize params` died on `.items()` for every dataset on every tenant
+    -- and the suite stayed green, because the unwrapping was only ever tested on
+    `plain` itself. These two assert the verbs, which is what shipped broken.
+    """
+    summary = _read(fake_tenant, session_dir, "summarize", of="params",
+                    dataset_id="ds_0000", scope={"project_ids": ["proj_a"]})
+    assert summary["ok"], summary
+    body = summary["result"]["params"]
+    assert body["n_params"] == 2
+    assert body["non_default"] == {"aligner": "star", "genome": "GRCh38"}
+
+    got = _read(fake_tenant, session_dir, "get", entity="dataset", id="ds_0000",
+                scope={"project_ids": ["proj_a"]}, include=["params"])
+    assert got["ok"], got
+    assert got["result"]["rows"][0]["params"] == {"aligner": "star", "genome": "GRCh38"}
+
+
+def test_summarize_cost_rolls_a_fan_out_up_by_process(fake_tenant, session_dir):
+    out = _read(fake_tenant, session_dir, "summarize", of="cost", dataset_id="ds_0000",
+                scope={"project_ids": ["proj_a"]})
+    assert out["ok"], out
+    body = out["result"]["cost"]
+    assert body["total_cost"] == 6.55 and body["unit"] == "$"
+    assert body["is_estimate"] is True, "a modelled figure must not read as a bill"
+    assert body["n_tasks"] == 26
+    assert body["cost_by_status"] == {"COMPLETED": 5.8, "FAILED": 0.75, "CACHED": 0.0}
+    rollup = {row["process"]: row for row in body["cost_by_process"]}
+    # 24 per-sample tasks collapse to two lines, and ALIGN leads on money not on count.
+    assert body["cost_by_process"][0]["process"] == "ALIGN"
+    assert rollup["ALIGN"]["n"] == 4 and rollup["ALIGN"]["cost"] == 5.6
+    assert rollup["FASTQC"]["n"] == 20 and rollup["FASTQC"]["cost"] == 0.4
+    assert rollup["ALIGN"]["share"] == round(5.6 / 6.55, 4)
+    assert len(body["most_expensive_tasks"]) == 10, "the tail never comes back in full"
+    assert body["most_expensive_tasks"][0]["task_id"] == "t_align_3"
+
+
+def test_summarize_cost_separates_money_that_produced_nothing(fake_tenant, session_dir):
+    out = _read(fake_tenant, session_dir, "summarize", of="cost", dataset_id="ds_0000",
+                scope={"project_ids": ["proj_a"]})
+    body = out["result"]["cost"]
+    # CACHED is free rather than wasted, so only the failure counts.
+    assert body["wasted_cost"] == 0.75
+    assert body["wasted_share"] == round(0.75 / 6.55, 4)
+    whys = {call["id"] for call in out["result"]["next_calls"]}
+    assert "nc_failed" in whys, "wasted spend points at the tasks that burned it"
+
+
+def test_cost_on_a_runtime_older_than_the_pin_says_to_rebuild(fake_tenant, session_dir,
+                                                              monkeypatch):
+    """Nothing forces a re-sync when the pin moves, so an install still on 1.12.1 has
+    no cost API. Untyped that is an AttributeError, which the dispatcher renders as
+    "retry once, then check service status" -- advice that can never work."""
+    from cirro.services.execution import ExecutionService
+    monkeypatch.delattr(ExecutionService, "get_cost")
+    out = _read(fake_tenant, session_dir, "summarize", of="cost", dataset_id="ds_0000",
+                scope={"project_ids": ["proj_a"]})
+    assert out["error"]["code"] == "RUNTIME_NOT_INSTALLED"
+    assert "/cirro:setup" in out["error"]["remediation"]["user_action"]
+
+
+@pytest.mark.parametrize("status_code, error_code", [(400, "BAD_REQUEST"),
+                                                     (404, "NOT_FOUND")])
+def test_cost_for_an_uploaded_dataset_is_refused_not_reported_as_zero(
+        fake_tenant, session_dir, status_code, error_code):
+    """A dataset no analysis produced has no cost record, and dev answers that with a
+    400 rather than the 404 the shape suggests. Untyped, either one reaches the caller
+    as a retryable UPSTREAM_ERROR advising them to check Cirro's service status -- and
+    shaping it into a zero total instead would report an upload as a free run."""
+    fake_tenant["router"].get(
+        url__regex=r"https://app.cirro.test/api/projects/[^/]+/execution/[^/]+/cost$"
+    ).respond(status_code=status_code,
+              json={"statusCode": status_code, "errorCode": error_code,
+                    "errorDetail": "This dataset does not have an execution "
+                                   "associated with it", "errors": []})
+    out = _read(fake_tenant, session_dir, "summarize", of="cost", dataset_id="ds_0000",
+                scope={"project_ids": ["proj_a"]})
+    assert out["error"]["code"] == "WRONG_EXECUTOR"
+    assert out["error"]["remediation"]["retry_with"]
+
+
 def test_summarize_needs_a_dataset_for_anything_but_samples(fake_tenant, session_dir):
     out = _read(fake_tenant, session_dir, "summarize", of="files",
                 scope={"project_ids": ["proj_a"]})

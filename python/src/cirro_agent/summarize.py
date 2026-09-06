@@ -371,8 +371,76 @@ def tasks(task_dicts: list, *, primary_failed_index: Optional[int] = None,
     }
 
 
-# --------------------------------------------------------------------------- samples
+# --------------------------------------------------------------------------- cost
 
+# What the run paid for without producing anything: a task that failed or was
+# abandoned still burned the instance it was running on. `CACHED` is the opposite --
+# a resumed run pays nothing for it -- so it is neither wasted nor spent.
+_WASTED_STATUSES = ("FAILED", "ABORTED", "CANCELLED", "KILLED")
+
+
+def cost(record: dict, *, detail_limit: int = 10) -> dict:
+    """Where an analysis's money went, by task status and by process.
+
+    A 500-task run has 500 task costs, which is the thing not to return. What a reader
+    actually acts on is the per-process rollup -- one line saying ALIGN cost 80% of the
+    run -- so the individual tasks appear only as the few most expensive.
+    """
+    task_costs = record.get("tasks") or []
+    total = record.get("total_cost")
+
+    by_status = {}
+    for group in record.get("groups") or []:
+        name = str(group.get("name") or "UNKNOWN").upper()
+        if isinstance(group.get("cost"), (int, float)):
+            by_status[name] = round(group["cost"], 4)
+
+    by_process: dict = defaultdict(lambda: {"n": 0, "cost": 0.0})
+    for entry in task_costs:
+        bucket = by_process[entry.get("process") or "(unnamed)"]
+        bucket["n"] += 1
+        if isinstance(entry.get("cost"), (int, float)):
+            bucket["cost"] += entry["cost"]
+
+    processes = sorted(
+        ({"process": name, "n": data["n"], "cost": round(data["cost"], 4),
+          "share": round(data["cost"] / total, 4) if total else None}
+         for name, data in by_process.items()),
+        key=lambda item: -item["cost"],
+    )
+
+    priciest = sorted(
+        (t for t in task_costs if isinstance(t.get("cost"), (int, float))),
+        key=lambda t: -t["cost"],
+    )[:detail_limit]
+
+    body = {
+        "total_cost": round(total, 4) if isinstance(total, (int, float)) else None,
+        "unit": "$",
+        # Not a forecast and not a bill: an estimate is modelled from instance
+        # pricing, so say which one this is rather than leaving it to be assumed.
+        "is_estimate": record.get("is_estimate"),
+        "n_tasks": len(task_costs),
+        "cost_by_status": by_status,
+        "cost_by_process": processes[:15],
+        "most_expensive_tasks": [
+            {"task_id": t.get("task_id"), "name": t.get("name"),
+             "status": t.get("status"), "cost": round(t["cost"], 4)}
+            for t in priciest
+        ],
+    }
+    wasted = sum(value for name, value in by_status.items()
+                 if any(marker in name for marker in _WASTED_STATUSES))
+    if wasted:
+        body["wasted_cost"] = round(wasted, 4)
+        body["wasted_share"] = round(wasted / total, 4) if total else None
+    if not task_costs:
+        body["note"] = ("the run reported no per-task costs; whatever the total is, "
+                        "it is the head node alone")
+    return body
+
+
+# --------------------------------------------------------------------------- samples
 
 def _infer_dtype(values: list) -> str:
     non_null = [v for v in values if v not in (None, "")]

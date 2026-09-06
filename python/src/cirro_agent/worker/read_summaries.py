@@ -1,13 +1,13 @@
 """Summaries of the things that would otherwise flood the context:
-files, logs, tasks, samples, parameters, trace.
+files, logs, tasks, samples, parameters, trace, cost.
 """
 from typing import Optional, Tuple
 
 from .. import errors, summarize as S
 from ..envelope import DEFAULT_MAX_TOKENS, estimate_tokens, wrap
-from .reads import (MANIFEST_LIST_LIMIT, Reader, dataset_detail, dataset_manifest,
-                    dataset_tasks, declared_schema_keys, is_terminal, portal_dataset,
-                    project_schema_document, spec_shape)
+from .reads import (MANIFEST_LIST_LIMIT, Reader, dataset_cost, dataset_detail,
+                    dataset_manifest, dataset_tasks, declared_schema_keys, is_terminal,
+                    portal_dataset, project_schema_document, spec_shape)
 
 
 def do_summarize(request: dict) -> dict:
@@ -129,6 +129,25 @@ def _tasks_body(reader, request, project_ids, project_id,
     return body, True, next_calls
 
 
+def _cost_body(reader, request, project_ids, project_id,
+               dataset_id) -> Tuple[dict, bool, list]:
+    body = S.cost(dataset_cost(reader, project_id, dataset_id))
+    reader.cost.strategy = "execution_live"
+    next_calls = []
+    if body.get("wasted_cost"):
+        next_calls.append({
+            "id": "nc_failed",
+            "why": "see which tasks burned the money that produced nothing",
+            "call": {"verb": "summarize", "of": "tasks", "dataset_id": dataset_id,
+                     "scope": {"project_ids": project_ids}}})
+    next_calls.append({
+        "id": "nc_trace",
+        "why": "check whether the expensive processes were over-provisioned",
+        "call": {"verb": "summarize", "of": "trace", "dataset_id": dataset_id,
+                 "scope": {"project_ids": project_ids}}})
+    return body, True, next_calls
+
+
 def _params_body(reader, request, project_ids, project_id,
                  dataset_id) -> Tuple[dict, bool, list]:
     row = dataset_detail(reader, project_id, dataset_id)
@@ -155,7 +174,8 @@ def _trace_body(reader, request, project_ids, project_id,
 # One builder per summary kind, all named _<kind>_body and all with the same
 # signature, so do_summarize is the validation and the envelope and nothing else.
 _BUILDERS = {"samples": _samples_body, "files": _files_body, "logs": _logs_body,
-             "tasks": _tasks_body, "params": _params_body, "trace": _trace_body}
+             "tasks": _tasks_body, "params": _params_body, "trace": _trace_body,
+             "cost": _cost_body}
 
 
 def _projects_left_out(of: str, named: list, dataset_id) -> list:
@@ -323,7 +343,8 @@ def do_task_logs(request: dict) -> dict:
                                  or DEFAULT_MAX_TOKENS["summarize"]), next_calls=[])
 
 
-SUMMARIZERS = ("files", "logs", "tasks", "samples", "params", "trace")
+# Derived, not a second list: the two had to be edited together to add a summary.
+SUMMARIZERS = tuple(_BUILDERS)
 
 
 def _raw_slice(text: str, request: dict) -> dict:

@@ -149,6 +149,25 @@ def test_a_dataset_summary_of_files(project):
     assert out["result"]["files"]["total_files"] is not None
 
 
+def test_a_dataset_cost_is_a_figure_or_a_typed_refusal(project):
+    """Both outcomes are correct; what must not happen is an UPSTREAM_ERROR advising a
+    retry, which is how the endpoint's 400 reads until `dataset_cost` types it."""
+    listing = read("datasets", "-p", project, "-f", "status:COMPLETED", max_tokens=6000)
+    rows = listing["result"]["rows"]
+    if not rows:
+        pytest.skip("no completed dataset to price")
+    out = read("cost", "-p", project, "-d", rows[0]["id"], max_tokens=3000)
+    if not out["ok"]:
+        assert out["error"]["code"] == "WRONG_EXECUTOR", out["error"]
+        return
+    _invariants(out, 3000)
+    body = out["result"]["cost"]
+    assert body["total_cost"] is not None and body["unit"] == "$"
+    # Every task cost lands in exactly one rollup row, whatever the run's shape.
+    assert sum(row["n"] for row in body["cost_by_process"]) <= body["n_tasks"]
+    assert len(body["most_expensive_tasks"]) <= 10
+
+
 def test_describe_and_check_config_need_no_tenant(tmp_path):
     out = read("describe", "dataset", max_tokens=2000)
     _invariants(out, 2000)

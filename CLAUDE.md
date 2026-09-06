@@ -95,8 +95,9 @@ configuration is impossible without them. `test_runtime_contract.py` fails if a 
 **Reads are split by verb, with one shared fetch layer.** `worker/reads.py` holds
 `Reader` -- the client, cache, cost accounting and name resolution -- plus the single
 implementation of each expensive fetch (`dataset_detail`, `dataset_manifest`,
-`dataset_tasks`, `process_detail`, `process_revision`, `process_assets`, `spec_shape`,
-`file_count`, `project_metrics`, `all_project_metrics`, `portal_dataset`). The op
+`dataset_tasks`, `dataset_cost`, `process_detail`, `process_revision`,
+`process_assets`, `spec_shape`, `file_count`, `project_metrics`, `all_project_metrics`,
+`portal_dataset`). The op
 families plan against this layer too, so "a fetch two verbs need" includes a verb and a
 planner: `process_revision` and `process_assets` are here because the read path and
 `plan_upload_process_config` had each grown their own copy, and the two had drifted to
@@ -211,6 +212,17 @@ endpoint. Storage arrives in GB, so `storage_amount` with `storage_unit` is the 
 to read and `storage_bytes` states the 2**30 convention it derives from. None of this is
 a forecast, so plans still carry no estimate -- say "nothing prices a run before it
 happens", never "there is no pricing API".
+
+`execution.get_cost` (cirro >=1.13.1) is the same statement one scale down: what one
+analysis has already burned, per task, with an `is_estimate` flag saying whether it is
+modelled from instance pricing or settled. It is never snapshotted -- a running run's
+cost grows as its tasks finish, so a cached figure answers "what did this cost" with a
+number from earlier in the same run. A dataset no analysis produced has no cost record
+and dev refuses it with **400**, not the 404 the shape suggests; both are caught in
+`dataset_cost` and become `WRONG_EXECUTOR`, because untyped either one reaches the
+reader as a retryable UPSTREAM_ERROR telling them to check Cirro's service status.
+Shaping the absence into a zero total is the other wrong answer: it reads as a run
+that was free.
 
 **Never call `DataPortal()` bare.** With no cached token it enters a device-code login
 and blocks until the code expires. Build auth explicitly via `worker/portal.py`.

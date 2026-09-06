@@ -215,6 +215,8 @@ def build_parser() -> argparse.ArgumentParser:
     task_logs.add_argument("--raw", action="store_true")
     task_logs.add_argument("--line-range", nargs=2, type=int, metavar=("START", "END"))
     add("trace", "resource usage per process", project=True, dataset=True)
+    add("cost", "what one analysis cost, by task status and by process",
+        project=True, dataset=True)
     add("params", "diff a run's params against the process defaults",
         project=True, dataset=True)
     ws = add("workflow-spec", "parse a Nextflow or WDL workflow's inputs and parameters")
@@ -335,7 +337,7 @@ def main(argv=None) -> int:
             request["raw"] = True
         return _run(request, args)
 
-    summaries = ("files", "samples", "logs", "tasks", "trace", "params")
+    summaries = ("files", "samples", "logs", "tasks", "trace", "params", "cost")
     if command in summaries:
         request = {"verb": "summarize", "of": command, "scope": _scope(args)}
         if getattr(args, "dataset_id", None):

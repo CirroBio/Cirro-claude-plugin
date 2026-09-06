@@ -337,6 +337,28 @@ def task(obj, index: int) -> dict:
     return row
 
 
+def cost_task(obj) -> dict:
+    """One TaskCost. `process` is the step the task belongs to, as on `task`."""
+    name = plain(getattr(obj, "name", None))
+    return {"task_id": plain(getattr(obj, "task_id", None)), "name": name,
+            "process": task_process(name or ""),
+            "status": plain(getattr(obj, "status", None)),
+            "cost": plain(getattr(obj, "cost", None))}
+
+
+def dataset_cost(obj) -> dict:
+    """CostResponse flattened. `is_estimate` says whether the figure is billed or modelled."""
+    # Unset is falsy, so `or []` covers both an absent field and a null one.
+    return {
+        "total_cost": plain(getattr(obj, "total_cost", None)),
+        "is_estimate": plain(getattr(obj, "is_estimate", None)),
+        "groups": [{"name": plain(getattr(g, "name", None)),
+                    "cost": plain(getattr(g, "cost", None))}
+                   for g in getattr(obj, "groups", None) or []],
+        "tasks": [cost_task(t) for t in getattr(obj, "tasks", None) or []],
+    }
+
+
 def share(obj) -> dict:
     return {"id": plain(getattr(obj, "id", None)), "name": plain(getattr(obj, "name", None)),
             "share_type": plain(getattr(obj, "share_type", None)),

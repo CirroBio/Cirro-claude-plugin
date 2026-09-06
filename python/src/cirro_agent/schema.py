@@ -98,6 +98,7 @@ DATASET = EntitySpec(
         "logs": (EXECUTION, "head-node workflow log; use `summarize logs` instead"),
         "tasks": (EXECUTION, "Nextflow task list; use `summarize tasks` instead"),
         "trace": (EXECUTION, "Nextflow resource trace; use `summarize trace` instead"),
+        "cost": (EXECUTION, "what the analysis cost to run; use `summarize cost` instead"),
         "total_size_human": (DERIVED, "total_size_bytes formatted"),
         "age_days": (DERIVED, "days since created_at"),
         "is_terminal": (DERIVED, "status is not going to change on its own"),

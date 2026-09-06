@@ -4,12 +4,14 @@
     CIRRO_AGENT_E2E_WRITE_DATASET=<dataset id> \\
     PYTHONPATH=python/src "$DEV_VENV/bin/python" -m pytest python/tests/test_live_writes.py
 
-No mutation has ever run against a live tenant through this plugin. Four bugs of the
-kind that only a real call finds were fixed on 2026-08-27 from doubles alone. This
-is the smallest real check: add a tag to a project you name and take it off again;
-add a tag to a dataset you name and take it off again, proving folder membership
-survives. Each half goes through plan then apply exactly as the MCP tools do; the
-approval here is you setting the variables on purpose.
+On 2026-09-06 `upload_dataset` and `update_dataset` were run against a development
+tenant for the first time, on a dataset created for the purpose; every other operation
+has still only ever met a double. Four bugs of the kind that only a real call finds
+were fixed on 2026-08-27 from doubles alone. This is the smallest real check: add a tag
+to a project you name and take it off again; add a tag to a dataset you name and take
+it off again, proving folder membership survives. Each half goes through plan then
+apply exactly as the MCP tools do; the approval here is you setting the variables on
+purpose.
 
 Point it at something disposable. It undoes what it does, but it is still a write.
 """

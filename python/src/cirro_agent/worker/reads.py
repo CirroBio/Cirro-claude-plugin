@@ -7,9 +7,9 @@ reports, and the name-to-id resolution a filter or a planner asks for
 
 Beside it sits the single implementation of each expensive fetch -- `dataset_detail`,
 `dataset_manifest`, `dataset_tasks`, `process_detail`, `process_revision`,
-`process_assets`, `spec_shape`, `file_count`, `project_metrics`, `all_project_metrics`
--- so that two verbs asking Cirro the same question pay for it once and shape the
-answer identically.
+`process_assets`, `spec_shape`, `file_count`, `dataset_cost`, `project_metrics`,
+`all_project_metrics` -- so that two verbs asking Cirro the same question pay for it
+once and shape the answer identically.
 
 The verbs themselves live in `read_query` (query, get), `read_summaries` (summarize,
 task_logs), `read_listings` (list), `read_process` (process_params, process_config)
@@ -479,6 +479,52 @@ def dataset_tasks(reader: Reader, project_id: str, dataset_id: str) -> list:
             ],
         )
     return [R.task(t, index) for index, t in enumerate(found)]
+
+
+def dataset_cost(reader: Reader, project_id: str, dataset_id: str) -> dict:
+    """The compute cost of the analysis that produced a dataset.
+
+    Never cached: a running analysis's cost grows as its tasks finish, so a snapshot
+    would answer "what did this run cost" with a figure from earlier in the same run.
+    A dataset nobody computed -- an upload, or an executor with no task-level
+    accounting -- has no cost record. Observed on dev, the endpoint refuses that with
+    400 "This dataset does not have an execution associated with it", which the
+    dispatcher would otherwise render as a retryable UPSTREAM_ERROR telling the reader
+    to check Cirro's service status. It is neither retryable nor a service fault, so
+    it becomes the typed refusal `dataset_tasks` raises for the same situation -- and
+    never a zero total, which would read as a run that cost nothing.
+    """
+    from cirro_api_client.v1.errors import BadRequestException, NotFoundException
+    if not hasattr(reader.client.execution, "get_cost"):
+        # An install predating the pin move has no cost API at all. Left to itself
+        # that is an AttributeError, which the dispatcher renders as "retry once,
+        # then check service status" -- advice that can never work.
+        import importlib.metadata as metadata
+        raise errors.RuntimeNotInstalled(
+            "The installed Cirro runtime is too old to read dataset costs.",
+            what=f"Per-dataset cost arrived in cirro 1.13.1; this runtime has "
+                 f"{metadata.version('cirro')}.",
+            user_action="Run /cirro:setup to rebuild the runtime against the "
+                        "current pin.",
+        )
+    try:
+        found = reader.client.execution.get_cost(project_id=project_id,
+                                                 dataset_id=dataset_id)
+    except (BadRequestException, NotFoundException):
+        found = None
+    reader.cost.call("execution.cost")
+    if found is None:
+        raise errors.WrongExecutor(
+            "No compute cost is recorded for this dataset.",
+            what="Cost is accounted per analysis task, so a dataset that was uploaded "
+                 "rather than produced by a run has none.",
+            field="dataset_id", given=dataset_id,
+            retry_with=[
+                {"verb": "get", "entity": "dataset", "id": dataset_id},
+                {"verb": "list", "of": "spend"},
+            ],
+        )
+    return R.dataset_cost(found)
 
 
 def process_detail(reader: Reader, process_id: str, base: dict) -> dict:

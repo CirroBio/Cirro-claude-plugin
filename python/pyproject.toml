@@ -1,10 +1,10 @@
 [project]
 name = "cirro-agent"
-version = "0.6.0"
+version = "0.7.0"
 description = "Agent-facing interface to the Cirro data platform"
 requires-python = ">=3.10,<3.14"
 dependencies = [
-    "cirro>=1.12.1,<2",
+    "cirro>=1.13.1,<2",
     "mcp>=1.2",
 ]
 

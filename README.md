@@ -78,7 +78,7 @@ cirro-agent read tasks -p "My Project" -d ds_123
 | Runs | `logs`, `tasks`, `task-logs`, `trace`, `chain-status` |
 | Pipelines | `processes`, `process`, `process-params`, `process-config`, `workflow-spec`, `check-config` |
 | Project resources | `samples`, `references`, `reference-types`, `compute-envs`, `shares`, `workspaces`, `project-users`, `users` |
-| Money | `spend` |
+| Money | `spend`, `cost` |
 
 **Big answers stay useful.** Ask about a project with 4,000 datasets and you will not get
 4,000 rows, and you will not get an arbitrary 40 either. You get the shape of all of them
@@ -157,9 +157,12 @@ Every change is written to a log in `.cirro/runs/` — what was done, when, and 
 A few things worth knowing:
 
 - **Nothing prices a run before it happens**, so a plan tells you what will run and on
-  what rather than inventing an estimate. What a project has *already* cost is real and
-  readable: `cirro-agent read spend -p "My Project"` breaks it down by month and AWS
-  service, and `--all-projects` compares every project you can see in a single call.
+  what rather than inventing an estimate. What has *already* been spent is real and
+  readable at two scales: `cirro-agent read spend -p "My Project"` breaks a project
+  down by month and AWS service, and `--all-projects` compares every project you can
+  see in a single call; `cirro-agent read cost -p "My Project" -d ds_123` gives one
+  analysis's compute bill, split by task status and rolled up by pipeline step, so you
+  can see which step took the money and how much of it went on tasks that failed.
 - **Folders are safe, and they come along for the ride.** Cirro stores folder
   membership alongside tags, so a careless tag edit could quietly move a dataset out of
   its folder. Every plan resolves folder membership explicitly and tells you it is
@@ -313,10 +316,20 @@ on purpose, and could not be added anyway: it prompts regardless.
 
 Reading is complete and verified against a live Cirro tenant.
 
-The change path is built and tested, but **no change has yet been applied to a real Cirro
-tenant** — only to a simulated one. Four bugs found on 2026-08-27 were exactly the kind
-that surface only on a real call, so treat your first use of any given operation as
-untested and pick something disposable.
+**The change path has now been exercised against a real Cirro tenant** — on 2026-09-06,
+against a development tenant, in a project and folder set aside for it. What ran was
+`upload_dataset` (a new two-file dataset into its own folder) and four `update_dataset`
+writes on that dataset alone: a rename, a tag write, and a description edit, each
+restored afterwards. Nothing that already existed was touched, and nothing was deleted.
+Alongside the writes, four refusals were confirmed to fire: a forged digest, an altered
+approval text, a re-used plan, and a plan whose facts had moved underneath it. Folder
+membership survived every tag write, and fields left out of a request — a description
+the caller never mentioned — survived rather than being blanked.
+
+That is two operations out of the coverage table, on one tenant. **Every other operation
+has still only run against a simulated tenant.** Four bugs found on 2026-08-27 were
+exactly the kind that surface only on a real call, so treat your first use of any
+operation not named above as untested and pick something disposable.
 
 Pipeline configuration is built and its generated output is checked against the
 configuration of 213 pipelines already running in Cirro, but the same caveat applies:

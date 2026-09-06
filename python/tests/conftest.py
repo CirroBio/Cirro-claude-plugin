@@ -134,6 +134,32 @@ def _manifest_payload():
     ).to_dict()
 
 
+def _cost_payload():
+    """One run's cost through the generated models.
+
+    Shaped like a real fan-out: a handful of ALIGN tasks carrying most of the money,
+    a long tail of QC tasks, and one failure -- so the rollup, the priciest-task list
+    and the wasted-spend figure each have something to be wrong about.
+    """
+    from cirro_api_client.v1.models import CostResponse, GroupCost, TaskCost
+
+    tasks = [TaskCost(name=f"ALIGN (sample_{i})", task_id=f"t_align_{i}",
+                      status="COMPLETED", cost=1.25 + i * 0.1) for i in range(4)]
+    tasks += [TaskCost(name=f"FASTQC (sample_{i})", task_id=f"t_qc_{i}",
+                       status="COMPLETED", cost=0.02) for i in range(20)]
+    tasks.append(TaskCost(name="MULTIQC", task_id="t_multiqc", status="FAILED",
+                          cost=0.75))
+    tasks.append(TaskCost(name="TRIM (sample_0)", task_id="t_trim_0", status="CACHED",
+                          cost=0.0))
+    return CostResponse(
+        total_cost=6.55, is_estimate=True,
+        groups=[GroupCost(name="COMPLETED", cost=5.80),
+                GroupCost(name="FAILED", cost=0.75),
+                GroupCost(name="CACHED", cost=0.0)],
+        tasks=tasks,
+    ).to_dict()
+
+
 def _metrics_payload(project_id, *, storage_unit="GB"):
     """Both metrics series, through the generated models.
 
@@ -242,6 +268,8 @@ def fake_tenant(monkeypatch):
                        ).respond(json=_detail_payload(datasets[0]))
             router.get(url__regex=rf"{API}/projects/[^/]+/datasets/[^/]+/files"
                        ).respond(json=_manifest_payload())
+            router.get(url__regex=rf"{API}/projects/[^/]+/execution/[^/]+/cost$"
+                       ).respond(json=_cost_payload())
             # Registered under the exact path a test's own serve_user() uses, so
             # re-registering replaces this default rather than losing to a wider regex.
             router.get(f"{API}/users/sminot").respond(json=_user_payload())

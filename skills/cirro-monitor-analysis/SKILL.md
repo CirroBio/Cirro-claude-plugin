@@ -1,6 +1,6 @@
 ---
 name: cirro-monitor-analysis
-description: Check whether a Cirro analysis finished, and diagnose why one failed. Use when the user asks about the status of a run, whether something is done, why a pipeline failed, what went wrong, or to look at logs, tasks, or resource usage for a dataset. Read-only.
+description: Check whether a Cirro analysis finished, and diagnose why one failed. Use when the user asks about the status of a run, whether something is done, why a pipeline failed, what went wrong, or to look at logs, tasks, resource usage, or what a run cost for a dataset. Read-only.
 ---
 
 # Track and diagnose a Cirro run
@@ -107,6 +107,23 @@ cirro-agent read params -p "My Project" -d ds_failed
 Shows what departed from the defaults, and flags `unknown` keys — parameters the
 pipeline silently ignored. A typo there produces a run that "worked" but did the wrong
 thing.
+
+### 7. What the run cost, if that is the question
+
+```bash
+cirro-agent read cost -p "My Project" -d ds_123
+```
+
+Per-task compute cost, grouped by task status and rolled up by pipeline step with each
+step's `share` of the total. On a failed run `wasted_cost` is the money spent on tasks
+that failed or were aborted — worth reporting alongside the diagnosis, because it is
+what a retry saves. `CACHED` tasks cost nothing, so a resume is cheaper than the first
+attempt for exactly that reason.
+
+`is_estimate: true` means the figure is modelled from instance pricing rather than a
+settled bill; say so rather than quoting it as the invoice. An uploaded dataset has no
+execution and so no cost — that comes back as `WRONG_EXECUTOR`, which is the answer
+rather than something to retry.
 
 ## Reporting back
 
