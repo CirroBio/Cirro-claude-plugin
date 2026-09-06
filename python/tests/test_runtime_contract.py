@@ -18,19 +18,28 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_the_three_manifests_declare_one_version():
+def test_every_declaration_agrees_on_one_version():
     """`plugin.json` is what a marketplace installs and what the user sees, so it is
-    the source of truth; the two pyprojects are what gets built into the venvs. They
-    had drifted to 0.3.0 against a released 0.4.2, so the installed wheel reported a
-    version the plugin had not been for two releases.
+    the source of truth; the two pyprojects are what gets built into the venvs, and
+    the MCP server reports its own version in serverInfo. The pyprojects had drifted
+    to 0.3.0 against a released 0.4.2, so the installed wheel reported a version the
+    plugin had not been for two releases.
+
+    The server's string is checked here for the same reason, and because checking only
+    the manifests is what let it sit at 0.4.2 through the whole of 0.5.0 -- the drift
+    this test exists to catch, in the one place it was not looking.
     """
     declared = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())["version"]
-    for manifest in (ROOT / "python" / "pyproject.toml",
-                     ROOT / "runtime" / "pyproject.toml"):
-        found = re.search(r'^version = "([^"]+)"', manifest.read_text(), re.M)
-        assert found, f"{manifest.relative_to(ROOT)} declares no version"
+    sources = {
+        ROOT / "python" / "pyproject.toml": r'^version = "([^"]+)"',
+        ROOT / "runtime" / "pyproject.toml": r'^version = "([^"]+)"',
+        ROOT / "python" / "src" / "cirro_agent" / "mcp_server.py": r'version="([^"]+)"',
+    }
+    for path, pattern in sources.items():
+        found = re.search(pattern, path.read_text(), re.M)
+        assert found, f"{path.relative_to(ROOT)} declares no version"
         assert found.group(1) == declared, (
-            f"{manifest.relative_to(ROOT)} says {found.group(1)} but "
+            f"{path.relative_to(ROOT)} says {found.group(1)} but "
             f".claude-plugin/plugin.json says {declared} -- bump them together")
 
 
