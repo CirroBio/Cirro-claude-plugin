@@ -11,6 +11,51 @@ from .reads import (Reader, near_misses, process_assets, process_detail,
                     process_revision, spec_shape)
 
 
+_PARAMS_NOTE = (
+    "`path` is dotted because Cirro forms group their parameters: a path with a dot is "
+    "submitted nested, so `analysis_type.wes` is {'analysis_type': {'wes': ...}} and "
+    "never a top-level `wes`. Send each value at its declared `type` -- an `array` is a "
+    "list, not a comma-separated string. A flat key validates cleanly and is then "
+    "ignored by the pipeline, so it fails as defaults nobody chose rather than as an "
+    "error. `conditional` fields only apply under one branch of a selector. Keys not "
+    "listed here are accepted by the API and ignored; plan(run_analysis) reports any "
+    "you pass that are not declared."
+)
+
+_SPEC_UNREADABLE = (
+    "The parameter spec could not be read, so nothing here is declared and no "
+    "parameter can be checked against it."
+)
+
+
+def _skeleton(fields: list) -> dict:
+    """The smallest params object that satisfies the spec, nested as it must be sent.
+
+    Required fields only, at their declared defaults; a required field with no default
+    is left as a `<type>` placeholder rather than invented. This is the shape, not a
+    recommendation -- every other parameter is optional and takes its own default.
+    """
+    required = {f["path"] for f in fields if f["required"]}
+    skeleton: dict = {}
+    for field in sorted(fields, key=lambda f: f["path"]):
+        steps = field["path"].split(".")
+        # A field required inside an optional group is required only once that group
+        # is sent, so the smallest valid object leaves the whole group out.
+        owners = [".".join(steps[:n]) for n in range(1, len(steps) + 1)]
+        if not all(owner in required for owner in owners):
+            continue
+        node = skeleton
+        for step in steps[:-1]:
+            node = node.setdefault(step, {})
+        if field["is_group"]:
+            node.setdefault(steps[-1], {})
+        elif field["has_default"]:
+            node[steps[-1]] = field["default"]
+        else:
+            node[steps[-1]] = f"<{field['type'] or 'value'}>"
+    return skeleton
+
+
 def do_process_params(request: dict) -> dict:
     """The authoritative parameter shape for a process, summarized.
 
@@ -27,12 +72,14 @@ def do_process_params(request: dict) -> dict:
         )
     match = reader.resolve_process(given)
 
-    defaults, declared, required = spec_shape(reader, match["id"])
+    fields = spec_shape(reader, match["id"])
     parameters = [
-        {"key": key, "required": key in (required or []),
-         "default": defaults.get(key, None), "has_default": key in defaults}
-        for key in (declared or [])
+        {"path": f["path"], "type": f["type"], "required": f["required"],
+         "conditional": f["conditional"], "is_group": f["is_group"],
+         "default": f["default"], "has_default": f["has_default"]}
+        for f in (fields or [])
     ]
+    required = [f["path"] for f in parameters if f["required"]]
     process = {key: match[key] for key in (
         "id", "name", "executor", "uses_sample_sheet", "documentation_url",
         "file_requirements_message")}
@@ -42,11 +89,10 @@ def do_process_params(request: dict) -> dict:
         result={
                     "process": process,
                     "n_parameters": len(parameters),
-                    "required": [p["key"] for p in parameters if p["required"]],
+                    "required": required,
                     "parameters": parameters,
-                    "note": ("Keys not listed here are accepted by the API and ignored by the "
-                             "pipeline. plan(run_analysis) reports any you pass that are not "
-                             "declared."),
+                    "skeleton": _skeleton(fields or []),
+                    "note": _PARAMS_NOTE if fields is not None else _SPEC_UNREADABLE,
                     "next_calls": [{
                         "id": "nc_plan", "why": "plan a run once the params are chosen",
                         "call": {"tool": "plan", "op": "run_analysis",

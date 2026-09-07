@@ -82,6 +82,96 @@ def test_plan_flags_parameters_the_pipeline_would_ignore(writable_tenant, sessio
     assert any("typo_param" in w for w in result["warnings"]), result["warnings"]
 
 
+# A real Cirro form groups its parameters, and the group is the key submitted at the
+# top level. `wes` is required inside its group and `tools` is an array -- the three
+# shapes that a flat parameter surface got wrong.
+GROUPED_SPEC = {
+    "form": {"type": "object",
+             "required": ["analysis_type"],
+             "properties": {
+                 "analysis_type": {
+                     "type": "object",
+                     "required": ["analysis_type", "wes"],
+                     "properties": {
+                         "analysis_type": {"type": "string"},
+                         "wes": {"type": "boolean", "default": False},
+                         "tools": {"type": "array", "default": ["haplotypecaller"]}}},
+                 "workflow_version": {"type": "string", "default": "3.8.1"}}},
+    "ui": {},
+}
+
+
+def serve_spec(tenant, spec):
+    tenant["router"].get(f"{API}/processes/proc_rnaseq/parameters").respond(json=spec)
+
+
+def test_a_nested_parameter_sent_flat_names_where_it_belongs(writable_tenant,
+                                                             session_dir):
+    """The form sets no additionalProperties:false, so a flat key validates, the
+    pipeline ignores it, and the run proceeds on a default nobody chose. Three failed
+    runs and a wrong bug report came out of exactly this."""
+    serve_spec(writable_tenant, GROUPED_SPEC)
+    result = plan_run(writable_tenant, session_dir,
+                      params={"analysis_type": {"analysis_type": "Germline",
+                                                "wes": False},
+                              "wes": True})
+    assert result["ok"], result
+    flagged = [w for w in result["warnings"] if "wes belongs at analysis_type.wes" in w]
+    assert flagged, result["warnings"]
+    assert "ignore them" in flagged[0]
+
+
+def test_correct_nested_parameters_raise_nothing(writable_tenant, session_dir):
+    """The group containers of a correct run read as undeclared typos, because the
+    declared list held only leaf names."""
+    serve_spec(writable_tenant, GROUPED_SPEC)
+    result = plan_run(writable_tenant, session_dir,
+                      params={"analysis_type": {"analysis_type": "Germline",
+                                                "wes": False,
+                                                "tools": ["haplotypecaller"]}})
+    assert result["ok"], result
+    assert not [w for w in result["warnings"] if "typo" in w or "ignore" in w], \
+        result["warnings"]
+
+
+def test_a_requirement_inside_a_group_is_refused_at_plan_time(writable_tenant,
+                                                              session_dir):
+    """A group that is present but incomplete is a schema violation, so it is refused
+    outright rather than warned about -- nothing is launched and nothing is charged."""
+    serve_spec(writable_tenant, GROUPED_SPEC)
+    result = plan_run(writable_tenant, session_dir,
+                      params={"analysis_type": {"analysis_type": "Germline"}})
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_QUERY"
+    assert "wes" in result["error"]["message"]
+
+
+def test_the_declared_workflow_version_is_sent_and_disclosed(writable_tenant,
+                                                             session_dir):
+    """Cirro rejects a launch that omits it while the spec calls it optional, which
+    stranded two completed uploads mid-chain."""
+    serve_spec(writable_tenant, GROUPED_SPEC)
+    result = plan_run(writable_tenant, session_dir,
+                      params={"analysis_type": {"analysis_type": "Germline",
+                                                "wes": False}})
+    assert result["ok"], result
+    assert any("workflow_version" in w and "3.8.1" in w for w in result["warnings"]), \
+        result["warnings"]
+    # Disclosed in the text a person approves, not only in the warning list.
+    assert "workflow_version = '3.8.1'" in result["rendered"]
+
+
+def test_a_supplied_workflow_version_is_left_alone(writable_tenant, session_dir):
+    serve_spec(writable_tenant, GROUPED_SPEC)
+    result = plan_run(writable_tenant, session_dir,
+                      params={"analysis_type": {"analysis_type": "Germline",
+                                                "wes": False},
+                              "workflow_version": "3.9.0"})
+    assert result["ok"], result
+    assert not any("workflow_version" in w for w in result["warnings"])
+    assert "workflow_version = '3.9.0'" in result["rendered"]
+
+
 def test_plan_rejects_a_process_that_does_not_exist(writable_tenant, session_dir):
     result = plan_run(writable_tenant, session_dir, process="nf-core/nope")
     assert result["ok"] is False

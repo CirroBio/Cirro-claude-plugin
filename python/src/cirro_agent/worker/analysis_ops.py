@@ -7,6 +7,7 @@ A launch notifies the account the session is authenticated as unless the caller
 says otherwise, which is what the web UI does; `_notify` explains the mechanics.
 """
 
+from typing import Optional, Tuple
 
 from .. import errors, summarize as S
 from . import mutations, reads, rows as R
@@ -47,8 +48,7 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
         inputs.append({"id": row["id"], "name": row["name"], "file_count": count,
                        "size_human": detail.get("total_size_human")})
 
-    params = args.get("params") or {}
-    warnings = _validate_params(reader, process["id"], params)
+    params, warnings = _resolve_params(reader, process["id"], args.get("params") or {})
 
     notify, notify_shown, notify_warnings = _notify(reader, args)
     warnings += notify_warnings
@@ -262,14 +262,25 @@ def _notify(reader: reads.Reader, args: dict):
     return [email], f"{email} (default: the account this session is logged in as)", []
 
 
-def _validate_params(reader: reads.Reader, process_id: str, params: dict) -> list:
-    """Validate against the spec, and report undeclared keys separately.
+# Required by the execution API rather than by any form: a process whose pipeline code
+# is not pinned to a branch rejects a launch that omits it, with a 400 the schema gives
+# no warning of -- `required` is empty and the field carries a default. Omitting it
+# stranded two completed uploads mid-chain. The spec states the value, so materialising
+# it is safe whether or not this particular process enforces it.
+SERVER_REQUIRED_PARAM = "workflow_version"
 
-    jsonschema will not flag an unknown key unless the schema sets
-    additionalProperties:false, so a typo silently does nothing. Finding that out
-    six hours into a pipeline is the expensive version of this check.
+
+def _resolve_params(reader: reads.Reader, process_id: str,
+                    params: dict) -> Tuple[dict, list]:
+    """The params a launch will actually send, and what to disclose about them.
+
+    Validates against the spec and reports undeclared keys separately: jsonschema will
+    not flag an unknown key unless the schema sets additionalProperties:false, so a
+    typo silently does nothing. Finding that out six hours into a pipeline is the
+    expensive version of this check.
     """
     warnings = []
+    params = dict(params or {})
     try:
         spec = reader.client.processes.get_parameter_spec(process_id=process_id)
         reader.cost.call("processes.parameter_spec")
@@ -278,10 +289,18 @@ def _validate_params(reader: reads.Reader, process_id: str, params: dict) -> lis
         # disclosure, and `_same_disclosure` compares it verbatim at apply. An upstream
         # body carrying a request id or a timestamp would differ between the plan and
         # its re-plan and make every affected plan PLAN_STALE.
-        return [f"Could not load the parameter spec for validation "
-                f"({type(exc).__name__}), so the parameters below were not checked."]
+        return params, [f"Could not load the parameter spec for validation "
+                        f"({type(exc).__name__}), so the parameters below were not "
+                        f"checked."]
+    fields = reads.spec_shape(reader, process_id)
+    injected = _fill_server_required(params, fields)
+    if injected is not None:
+        warnings.append(
+            f"{SERVER_REQUIRED_PARAM} was not supplied and the process declares a "
+            f"default, so the launch will send {injected!r}. Cirro rejects a launch "
+            f"that omits it.")
     try:
-        spec.validate_params(params or {})
+        spec.validate_params(params)
     except Exception as exc:
         raise errors.InvalidQuery(
             f"Parameters rejected by the process spec: {exc}",
@@ -291,14 +310,41 @@ def _validate_params(reader: reads.Reader, process_id: str, params: dict) -> lis
                         {"verb": "summarize", "of": "params",
                          "note": "inspect a previous run's params for a working shape"}],
         )
-    _, declared, required = reads.spec_shape(reader, process_id)
-    if declared is not None:
-        unknown = [k for k in (params or {}) if k not in set(declared)]
-        if unknown:
+    if fields is None:
+        return params, warnings
+    body = S.params(params, fields)
+    unknown = body["unknown"]
+    if unknown:
+        # A misplaced key is the expensive one: it validates, the pipeline ignores it,
+        # and the run proceeds on the default the caller thought they had overridden.
+        misplaced = body.get("misplaced") or {}
+        if misplaced:
+            warnings.append(
+                "Parameters sent at the top level that this process nests, so the "
+                "pipeline will ignore them and use its defaults: "
+                + ", ".join(f"{flat} belongs at {where}"
+                            for flat, where in sorted(misplaced.items())))
+        rest = sorted(set(unknown) - set(misplaced))
+        if rest:
             warnings.append(
                 f"Parameters not declared by this process and therefore ignored: "
-                f"{sorted(unknown)} -- usually a typo")
-    missing = [k for k in (required or []) if k not in (params or {})]
-    if missing:
-        warnings.append(f"Required parameters absent: {sorted(missing)}")
-    return warnings
+                f"{rest} -- usually a typo")
+    if body["missing_required"]:
+        warnings.append(f"Required parameters absent: {sorted(body['missing_required'])}")
+    return params, warnings
+
+
+def _fill_server_required(params: dict, fields: Optional[list]) -> Optional[str]:
+    """Materialise the declared default for the one parameter the API demands.
+
+    Mutates `params` and returns what it set, or None if it set nothing. A declared
+    default is a value the caller already has; leaving it unsent is not a choice they
+    made, and the API states no default of its own.
+    """
+    if fields is None or SERVER_REQUIRED_PARAM in params:
+        return None
+    declared = next((f for f in fields if f["path"] == SERVER_REQUIRED_PARAM), None)
+    if declared is None or not declared["has_default"]:
+        return None
+    params[SERVER_REQUIRED_PARAM] = declared["default"]
+    return declared["default"]

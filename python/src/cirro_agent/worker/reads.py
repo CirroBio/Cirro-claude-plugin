@@ -622,15 +622,32 @@ def process_assets(reader: Reader, process_id: str,
     return content, unreadable
 
 
-def spec_shape(reader: Reader, process_id: Optional[str]) -> Tuple[dict, Optional[list],
-                                                                   Optional[list]]:
+def spec_shape(reader: Reader, process_id: Optional[str]) -> Optional[list]:
+    """Every parameter a process declares, each with the path it must be nested at.
+
+    Returns None when the spec cannot be read, which callers must not confuse with a
+    process that declares nothing: the first means "unknown", the second "no
+    parameters", and only the first should suppress an undeclared-key warning.
+
+    A record is {"path", "type", "required", "conditional", "is_group", "default",
+    "has_default"}. The path is what makes this usable: real Cirro forms group their
+    parameters, so `wes` is submitted as `analysis_type.wes` and never at the top
+    level. Reporting the leaf name alone described a flat parameter surface that no
+    form has -- and because a form does not set `additionalProperties: false`, the
+    flat object a caller then built validated cleanly, was ignored by the pipeline,
+    and surfaced minutes into a billed run as defaults nobody chose.
+
+    Groups are records too, typed `object` and flagged `is_group`. They are the keys
+    actually submitted at the top level, so omitting them made a correct run's
+    parameters read as undeclared -- the same wrong answer from the other direction.
+    """
     if not process_id:
-        return {}, None, None
+        return None
     try:
         spec = reader.client.processes.get_parameter_spec(process_id=process_id)
         reader.cost.call("processes.parameter_spec")
     except Exception:
-        return {}, None, None
+        return None
     # `get_parameter_spec` returns the hand-written ParameterSpecification, whose
     # `form_spec_json` is `form_schema.form.additional_properties` -- already the
     # JSONSchema, with `properties` at its root. It is a plain dict, never a generated
@@ -641,22 +658,30 @@ def spec_shape(reader: Reader, process_id: Optional[str]) -> Tuple[dict, Optiona
     # named `form` and analyse the wrong subtree.
     form = getattr(spec, "form_spec_json", None)
     if not isinstance(form, dict):
-        return {}, None, None
-    # formcheck.iter_fields is the one correct walk over a form: conditional fields
-    # live inside dependencies.<selector>.oneOf[] and then/else, and walking
-    # `properties` alone reported every conditional parameter as undeclared.
-    defaults, declared = {}, []
-    for path, field in formcheck.iter_fields(form):
-        if isinstance(field, dict) and field.get("type") == "object" \
-                and "properties" in field:
+        return None
+    # formcheck.walk_form is the one correct walk over a form: conditional fields live
+    # inside dependencies.<selector>.oneOf[] and then/else, and walking `properties`
+    # alone reported every conditional parameter as undeclared. The empty prefix makes
+    # the paths relative to the params object a caller actually submits.
+    fields, seen = [], set()
+    for record in formcheck.walk_form(form, ""):
+        field = record["field"] if isinstance(record["field"], dict) else {}
+        # A selector is restated inside each of its own branches, so the same path
+        # arrives several times; the first occurrence carries the declaration.
+        if record["path"] in seen:
             continue
-        key = path.rsplit(".", 1)[-1]
-        if key not in declared:
-            declared.append(key)
-        if isinstance(field, dict) and "default" in field and key not in defaults:
-            defaults[key] = field["default"]
-    required = list(form.get("required") or [])
-    return defaults, declared, required
+        seen.add(record["path"])
+        is_group = field.get("type") == "object" and "properties" in field
+        fields.append({
+            "path": record["path"],
+            "type": field.get("type") or ("object" if is_group else None),
+            "required": record["required"],
+            "conditional": record["conditional"],
+            "is_group": is_group,
+            "default": field.get("default"),
+            "has_default": "default" in field,
+        })
+    return fields
 
 
 def project_schema_document(reader: Reader, project_id: str) -> Optional[dict]:

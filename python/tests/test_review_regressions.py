@@ -291,10 +291,15 @@ def test_spec_shape_declares_parameters_hidden_behind_a_selector():
     # does not produce.
     reader.client.processes.get_parameter_spec.return_value = SimpleNamespace(
         form_spec_json=form)
-    defaults, declared, _required = reads.spec_shape(reader, "proc_x")
-    assert "qdnaseq_bin_size" in declared
-    assert defaults["qdnaseq_bin_size"] == 500
-    assert "cnv_options" not in declared, "groups are containers, not parameters"
+    fields = {f["path"]: f for f in reads.spec_shape(reader, "proc_x")}
+    assert "cnv_options.qdnaseq_bin_size" in fields
+    assert fields["cnv_options.qdnaseq_bin_size"]["default"] == 500
+    # Only reachable when the selector picks that branch, and the path says where the
+    # value is nested -- a top-level `qdnaseq_bin_size` is silently ignored.
+    assert fields["cnv_options.qdnaseq_bin_size"]["conditional"] is True
+    # The group is the key actually submitted, so it is declared, not a stray.
+    assert fields["cnv_options"]["is_group"] is True
+    assert fields["cnv_options"]["conditional"] is False
 
 
 IF_THEN_FORM = {"ui": {}, "form": {"type": "object", "properties": {
@@ -345,11 +350,11 @@ def test_spec_shape_declares_parameters_behind_an_if_then():
     # The form half only -- see the note in the cnv_options test above.
     reader.client.processes.get_parameter_spec.return_value = SimpleNamespace(
         form_spec_json=IF_THEN_FORM["form"])
-    defaults, declared, _required = reads.spec_shape(reader, "proc_y")
-    assert "star_index" in declared and "bwa_threads" in declared
-    assert defaults["star_index"] == "GRCh38"
-    assert defaults["bwa_threads"] == 4
-    assert "align" not in declared, "groups are containers, not parameters"
+    fields = {f["path"]: f for f in reads.spec_shape(reader, "proc_y")}
+    assert "align.star_index" in fields and "align.bwa_threads" in fields
+    assert fields["align.star_index"]["default"] == "GRCh38"
+    assert fields["align.bwa_threads"]["default"] == 4
+    assert fields["align"]["is_group"] is True
 
 
 def test_the_root_cause_lookup_books_its_detail_call():

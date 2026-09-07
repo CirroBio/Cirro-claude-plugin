@@ -152,8 +152,8 @@ def test_process_params_reports_declared_keys_and_defaults(writable_tenant, sess
     out = _read(writable_tenant, session_dir, "process_params", id="proc_rnaseq")
     assert out["ok"], out
     result = out["result"]
-    keys = {p["key"] for p in result["parameters"]}
-    assert "genome" in keys
+    paths = {p["path"] for p in result["parameters"]}
+    assert "genome" in paths
     assert result["n_parameters"] == len(result["parameters"])
     assert result["process"]["id"] == "proc_rnaseq"
     assert result["next_calls"][0]["call"]["op"] == "run_analysis"

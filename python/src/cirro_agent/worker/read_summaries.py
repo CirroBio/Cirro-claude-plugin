@@ -151,9 +151,7 @@ def _cost_body(reader, request, project_ids, project_id,
 def _params_body(reader, request, project_ids, project_id,
                  dataset_id) -> Tuple[dict, bool, list]:
     row = dataset_detail(reader, project_id, dataset_id)
-    defaults, declared, required = spec_shape(reader, row.get("process_id"))
-    body = S.params(row.get("params") or {}, defaults=defaults, declared=declared,
-                    required=required)
+    body = S.params(row.get("params") or {}, spec_shape(reader, row.get("process_id")))
     body["process"] = row.get("process")
     reader.cost.strategy = "detail+parameter_spec"
     return body, True, [{

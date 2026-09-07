@@ -178,24 +178,70 @@ def test_samples_returns_examples_not_the_table():
 
 # --- params ---
 
+def _field(path, **over):
+    field = {"path": path, "type": "string", "required": False, "conditional": False,
+             "is_group": False, "default": None, "has_default": False}
+    field.update(over)
+    return field
+
+
 def test_only_departures_from_default_are_shown_in_full():
     body = S.params({"aligner": "star", "genome": "GRCh38", "skip_qc": False},
-                    defaults={"aligner": "star", "skip_qc": False},
-                    declared=["aligner", "genome", "skip_qc"])
+                    [_field("aligner", default="star", has_default=True),
+                     _field("genome"),
+                     _field("skip_qc", type="boolean", default=False,
+                            has_default=True)])
     assert body["non_default"] == {"genome": "GRCh38"}
     assert body["n_defaulted"] == 2
 
 
 def test_undeclared_params_are_flagged_because_they_do_nothing():
-    body = S.params({"typo_param": 1}, declared=["aligner"])
+    body = S.params({"typo_param": 1}, [_field("aligner")])
     assert body["unknown"] == ["typo_param"]
     assert "typo" in body["unknown_note"]
 
 
 def test_missing_required_params_are_listed():
-    body = S.params({"genome": "GRCh38"}, declared=["genome", "outdir"],
-                    required=["genome", "outdir"])
+    body = S.params({"genome": "GRCh38"},
+                    [_field("genome", required=True), _field("outdir", required=True)])
     assert body["missing_required"] == ["outdir"]
+
+
+def test_a_groups_own_key_is_not_an_undeclared_typo():
+    """The group containers of a successful run were reported as typos the pipeline
+    ignores, because the declared list held only leaf names."""
+    fields = [_field("qc_options", type="object", is_group=True),
+              _field("qc_options.skip_fastqc", type="boolean", default=False,
+                     has_default=True)]
+    body = S.params({"qc_options": {"skip_fastqc": True}}, fields)
+    assert body["unknown"] == []
+    assert body["non_default"] == {"qc_options.skip_fastqc": True}
+
+
+def test_a_nested_parameter_sent_flat_is_named_with_where_it_belongs():
+    """The form does not set additionalProperties:false, so a flat key validates and
+    is then ignored -- the run silently uses the default instead."""
+    fields = [_field("qc_options", type="object", is_group=True),
+              _field("qc_options.skip_fastqc", type="boolean", default=False,
+                     has_default=True)]
+    body = S.params({"skip_fastqc": True}, fields)
+    assert body["unknown"] == ["skip_fastqc"]
+    assert body["misplaced"] == {"skip_fastqc": "qc_options.skip_fastqc"}
+
+
+def test_a_free_form_object_parameter_is_one_value_not_one_per_key():
+    """Only a declared group is descended into; a parameter that legitimately takes an
+    object is a single value."""
+    body = S.params({"extra": {"a": 1, "b": 2}}, [_field("extra", type="object")])
+    assert body["unknown"] == []
+    assert body["non_default"] == {"extra": {"a": 1, "b": 2}}
+
+
+def test_a_requirement_inside_an_absent_group_is_not_reported_missing():
+    fields = [_field("opts", type="object", is_group=True),
+              _field("opts.mode", required=True)]
+    assert S.params({}, fields)["missing_required"] == []
+    assert S.params({"opts": {}}, fields)["missing_required"] == ["opts.mode"]
 
 
 def test_secret_shaped_keys_are_redacted():
@@ -204,7 +250,7 @@ def test_secret_shaped_keys_are_redacted():
 
 
 def test_long_values_are_clipped_with_their_true_length():
-    body = S.params({"x": "y" * 5000}, declared=["x"])
+    body = S.params({"x": "y" * 5000}, [_field("x")])
     assert body["non_default"]["x"]["truncated"] is True
     assert body["non_default"]["x"]["full_len"] == 5000
 

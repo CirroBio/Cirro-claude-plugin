@@ -551,46 +551,116 @@ def _clip(value: Any) -> Any:
     return value
 
 
-def params(actual: dict, *, defaults: Optional[dict] = None,
-           declared: Optional[list] = None, required: Optional[list] = None) -> dict:
+def param_paths(actual: dict, fields: Optional[list]) -> list:
+    """Every path a submitted params object addresses, in the form's own terms.
+
+    Descends only where the form declares a group, so a parameter whose value is
+    legitimately a free-form object counts as one path rather than one per key inside
+    it. Both the read path and `plan(run_analysis)` classify against this, so a key
+    they disagree about cannot exist.
+    """
+    groups = {f["path"] for f in (fields or []) if f["is_group"]}
+
+    def visit(value: dict, prefix: str) -> None:
+        for key in value:
+            path = f"{prefix}.{key}" if prefix else key
+            found.append(path)
+            if path in groups and isinstance(value[key], dict):
+                visit(value[key], path)
+
+    found: list = []
+    if isinstance(actual, dict):
+        visit(actual, "")
+    return found
+
+
+def misplaced_param(path: str, fields: Optional[list]) -> Optional[str]:
+    """Where an undeclared top-level key was probably meant to go.
+
+    A form does not set `additionalProperties: false`, so a parameter sent flat when
+    the form nests it validates cleanly and is then ignored by the pipeline -- the
+    failure arrives minutes into a billed run, as defaults nobody chose. A leaf name
+    that exists at exactly one nested path is that mistake and nothing else.
+    """
+    if "." in path or not fields:
+        return None
+    nested = [f["path"] for f in fields
+              if "." in f["path"] and f["path"].rsplit(".", 1)[-1] == path]
+    return nested[0] if len(nested) == 1 else None
+
+
+def params(actual: dict, fields: Optional[list] = None) -> dict:
     """Diff the params a run used against the process spec.
 
     Only the departures from default are interesting, and `unknown` is the one that
     matters most: a mistyped parameter silently does nothing, which is an expensive
     way to discover a typo six hours into a pipeline.
+
+    `fields` is `reads.spec_shape`, whose paths are dotted because real forms group
+    their parameters. Classifying a submitted key against leaf names alone reported
+    every group container of a *successful* run as an undeclared typo, which told the
+    reader that correct parameters were being ignored.
     """
     actual = actual or {}
-    defaults = defaults or {}
-    declared_set = set(declared) if declared is not None else None
+    by_path = {f["path"]: f for f in fields} if fields is not None else None
 
     non_default, defaulted, unknown = {}, [], []
-    for key, value in sorted(actual.items()):
-        if _SECRET_HINT.search(key):
-            non_default[key] = "<redacted>"
+    for path in sorted(param_paths(actual, fields)):
+        leaf = path.rsplit(".", 1)[-1]
+        spec = by_path.get(path) if by_path is not None else None
+        if by_path is not None and spec is None:
+            unknown.append(path)
             continue
-        if declared_set is not None and key not in declared_set:
-            unknown.append(key)
+        # A group is the container the nested values were read out of, not a value.
+        if spec is not None and spec["is_group"]:
             continue
-        if key in defaults and defaults[key] == value:
-            defaulted.append(key)
+        if _SECRET_HINT.search(leaf):
+            non_default[path] = "<redacted>"
             continue
-        non_default[key] = _clip(value)
+        value = _at_path(actual, path)
+        if spec is not None and spec["has_default"] and spec["default"] == value:
+            defaulted.append(path)
+            continue
+        non_default[path] = _clip(value)
 
     out = {
         "non_default": non_default,
         "n_defaulted": len(defaulted),
         "defaulted_keys": defaulted if len(defaulted) <= 15 else defaulted[:15] + ["..."],
         "unknown": unknown,
-        "n_params": len(actual),
+        "n_params": len(non_default) + len(defaulted) + len(unknown),
     }
     if unknown:
+        misplaced = {path: where for path in unknown
+                     if (where := misplaced_param(path, fields))}
         out["unknown_note"] = (
-            "These keys are not declared by the process parameter spec. Cirro will "
+            "These paths are not declared by the process parameter spec. Cirro will "
             "accept them and the pipeline will ignore them -- usually a typo."
         )
-    if required:
-        out["missing_required"] = [key for key in required if key not in actual]
+        if misplaced:
+            out["misplaced"] = misplaced
+            out["unknown_note"] = (
+                "These paths are not declared by the process parameter spec. Cirro "
+                "will accept them and the pipeline will ignore them. `misplaced` "
+                "names the ones that are real parameters sent at the top level "
+                "instead of inside their group."
+            )
+    if fields is not None:
+        submitted = set(param_paths(actual, fields))
+        out["missing_required"] = [
+            f["path"] for f in fields
+            if f["required"] and f["path"] not in submitted
+            and ("." not in f["path"]
+                 or f["path"].rsplit(".", 1)[0] in submitted)
+        ]
     return out
+
+
+def _at_path(actual: dict, path: str) -> Any:
+    node: Any = actual
+    for step in path.split("."):
+        node = node[step]
+    return node
 
 
 # --------------------------------------------------------------------------- trace

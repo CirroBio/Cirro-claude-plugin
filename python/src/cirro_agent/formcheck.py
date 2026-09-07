@@ -283,13 +283,14 @@ def check_branch_overlap(form: dict, prefix: str = "form") -> list:
     return problems
 
 
-def iter_fields(form: dict, prefix: str = "form") -> list:
-    """Every field the form declares, as (path, field) pairs in declaration order.
+def walk_form(form: dict, prefix: str = "form") -> list:
+    """Every field the form declares, as records in declaration order.
 
-    This is the one walk over a form's structure. A form's fields are not just its
-    `properties`: conditional fields live inside `dependencies.<selector>.oneOf[]`
-    and inside `then`/`else`, and any analysis that walks `properties` alone reports
-    live, correctly-mapped fields as dangling.
+    This is the one walk over a form's structure, and `iter_fields` is its
+    (path, field) view. A form's fields are not just its `properties`: conditional
+    fields live inside `dependencies.<selector>.oneOf[]` and inside `then`/`else`,
+    and any analysis that walks `properties` alone reports live, correctly-mapped
+    fields as dangling.
 
     Conditional wrappers -- `dependencies`, `oneOf`, `allOf`, `anyOf`, `then`, `else`
     -- are transparent: a field inside one keeps the path of the object that owns the
@@ -297,35 +298,61 @@ def iter_fields(form: dict, prefix: str = "form") -> list:
     addresses it. `dependencies` keys are the names of the *selector* fields depended
     upon, not a nesting level, so they are skipped rather than appended.
 
+    A record is {"path", "field", "name", "required", "conditional"}. `conditional`
+    means every occurrence of the field sat inside a wrapper, so it applies only when
+    that branch is selected; `required` is resolved after the walk because a later
+    branch can require a name an earlier one did not, and it counts only the
+    `required` arrays reached without passing through a wrapper -- a requirement
+    stated inside a branch binds only when that branch is chosen, and reporting it
+    flatly would demand a parameter nobody has to supply.
+
     Two consequences for callers: a path can repeat, because a selector is normally
     restated inside each of its own branches, and `field` can be a bare `true`/`false`
     as draft-07 permits rather than a dict. `if` is not walked -- its `properties`
     state conditions on fields declared elsewhere, so it declares nothing of its own.
     """
-    def descend(node, path: str):
+    def descend(node, path: str, conditional: bool):
         if isinstance(node, list):
             for item in node:
-                descend(item, path)
+                descend(item, path, conditional)
             return
         if not isinstance(node, dict):
             return
+        if not conditional and isinstance(node.get("required"), list):
+            required.setdefault(path, set()).update(
+                name for name in node["required"] if isinstance(name, str))
         for name, field in (node.get("properties") or {}).items():
-            here = f"{path}.{name}"
-            fields.append((here, field))
-            descend(field, here)
+            here = f"{path}.{name}" if path else name
+            records.append({"path": here, "field": field, "name": name, "owner": path,
+                            "conditional": conditional})
+            if not conditional:
+                unconditional.add(here)
+            descend(field, here, conditional)
         for wrapper in WRAPPERS:
             branch = node.get(wrapper)
             if branch is None:
                 continue
             if wrapper == "dependencies" and isinstance(branch, dict):
                 for sub in branch.values():
-                    descend(sub, path)
+                    descend(sub, path, True)
             else:
-                descend(branch, path)
+                descend(branch, path, True)
 
-    fields = []
-    descend(form, prefix)
-    return fields
+    records, required, unconditional = [], {}, set()
+    descend(form, prefix, False)
+    for record in records:
+        record["conditional"] = record["path"] not in unconditional
+        record["required"] = (not record["conditional"]
+                              and record["name"] in required.get(record["owner"], ()))
+    return records
+
+
+def iter_fields(form: dict, prefix: str = "form") -> list:
+    """Every field the form declares, as (path, field) pairs in declaration order.
+
+    The path-and-schema view of `walk_form`, which documents the traversal rules.
+    """
+    return [(record["path"], record["field"]) for record in walk_form(form, prefix)]
 
 
 def form_paths(document: dict) -> set:
