@@ -197,7 +197,7 @@ class Reader:
         def load():
             found = self.client.references.get_for_project(project_id=project_id) or []
             self.cost.call("references.list")
-            return [R.reference(r) for r in found], True
+            return [R.reference(r, project_id) for r in found], True
         return self._snapshot("references", load, project=project_id)
 
     # ---------------------------------------------------------------- resolution

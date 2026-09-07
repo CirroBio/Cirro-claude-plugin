@@ -435,6 +435,17 @@ def apply_upload_dataset(reader: reads.Reader, args: dict) -> dict:
 def plan_upload_reference(reader: reads.Reader, args: dict) -> Draft:
     _need(args, "upload_reference", "name", "reference_type", "files")
     project = _project(reader, args)
+    # cirro/services/references.py raises on this at upload, so without the check the
+    # plan reads clean and apply dies -- inside a chain that spends the approval and
+    # stops mid-way. Spaces only: the SDK guesses at no wider charset and neither can
+    # this, or a name Cirro accepts would be refused here.
+    if " " in args["name"]:
+        raise errors.InvalidQuery(
+            "Reference names cannot contain spaces.",
+            what="Choose a name without spaces.", field="name", given=args["name"],
+            retry_with=[{"op": "upload_reference",
+                         "args": {"name": args["name"].replace(" ", "_")}}],
+        )
     types = reader.reference_types()
     wanted = args["reference_type"]
     match = next((t for t in types if t["name"] == wanted), None)

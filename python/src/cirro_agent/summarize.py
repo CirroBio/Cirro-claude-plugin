@@ -8,7 +8,7 @@ and 4,000 identical log lines become one row with n=4000.
 import math
 import re
 from collections import Counter, defaultdict
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from . import errors
 from .query import parse_dt
@@ -355,8 +355,7 @@ def tasks(task_dicts: list, *, primary_failed_index: Optional[int] = None,
             "is_root_cause": task.get("task_id") == primary_failed_index,
         })
 
-    names = Counter(task.get("name", "") for task in task_dicts)
-    retries = [{"name": name, "attempts": n} for name, n in names.most_common(5) if n > 1]
+    retries, scattered = _repeated_names(task_dicts)
 
     return {
         "n_tasks": len(task_dicts),
@@ -368,7 +367,32 @@ def tasks(task_dicts: list, *, primary_failed_index: Optional[int] = None,
             str(t.get("exit_code")) for t in task_dicts if t.get("exit_code") is not None
         )),
         "retries": retries,
+        "scattered": scattered,
     }
+
+
+def _repeated_names(task_dicts: list) -> Tuple[list, list]:
+    """Split repeated task names into retries and scatter chunks.
+
+    A name occurring many times is normally a fan-out -- 12 parallel chunks of one
+    sample -- not a task that keeps failing. Counting names alone reported `retries`
+    on a run whose 68 tasks all exited 0, which invites the reader to diagnose a
+    flapping task that does not exist. Only a repeat with a failed attempt among it is
+    a retry.
+    """
+    attempts: dict = defaultdict(lambda: {"n": 0, "failed": 0})
+    for task in task_dicts:
+        bucket = attempts[task.get("name", "")]
+        bucket["n"] += 1
+        if "FAIL" in str(task.get("status", "")).upper():
+            bucket["failed"] += 1
+    repeated = sorted(((name, data) for name, data in attempts.items() if data["n"] > 1),
+                      key=lambda item: -item[1]["n"])
+    retries = [{"name": name, "attempts": data["n"], "failed": data["failed"]}
+               for name, data in repeated if data["failed"]][:5]
+    scattered = [{"name": name, "chunks": data["n"]}
+                 for name, data in repeated if not data["failed"]][:5]
+    return retries, scattered
 
 
 # --------------------------------------------------------------------------- cost

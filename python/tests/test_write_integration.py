@@ -817,3 +817,19 @@ def test_a_samplesheet_update_can_decline_the_re_ingest(writable_tenant, session
     stored = plans.load(session_dir, planned["plan_id"])
     assert stored.args["ingest_samples"] is False
     assert not any(scope.get("kind") == "samples" for scope in stored.invalidates)
+
+
+def test_a_reference_name_with_a_space_is_refused_at_plan_time(
+        writable_tenant, session_dir, tmp_path):
+    """The SDK raises on this at upload, so the plan read clean and apply died --
+    inside a chain that spends the approval and strands the steps before it."""
+    reference = tmp_path / "regions.bed"
+    reference.write_text("chr20\t0\t20000000\n")
+    result = call(writable_tenant, session_dir, "plan", op="upload_reference",
+                  args={"project_id": "proj_a", "name": "chr20 0 20Mb",
+                        "reference_type": "intervals", "files": [str(reference)]})
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_QUERY"
+    assert result["error"]["field"] == "name"
+    assert result["error"]["remediation"]["retry_with"][0]["args"]["name"] == \
+        "chr20_0_20Mb"

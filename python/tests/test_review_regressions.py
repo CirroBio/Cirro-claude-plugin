@@ -584,3 +584,44 @@ def test_an_unusable_task_timestamp_pair_yields_no_duration():
     body = S.tasks([dict(t, name="FASTQC (s)", status="COMPLETED")
                     for t in (epoch, backwards, good)])
     assert body["counts_by_process"][0]["duration_p95_s"] == 21.0
+
+
+# --- reference data is addressable ------------------------------------------
+
+def test_a_reference_carries_the_paths_a_pipeline_parameter_needs():
+    """The row kept only `len(files)`, so nothing in the plugin could produce the
+    s3:// path a file-valued parameter takes. Passing the reference NAME validated
+    clean and failed two minutes into a billed run."""
+    from cirro_api_client.v1.models import FileEntry, Reference
+    from cirro_agent.worker import rows as R
+    obj = Reference(
+        id="ref_1", name="chr20_0_20Mb", description="", type_="intervals",
+        created_by="sminot", created_at=None,
+        files=[FileEntry(path="intervals/chr20_0_20Mb/chr20_0_20Mb.bed", size=120)])
+    row = R.reference(obj, "abc123")
+    assert row["n_files"] == 1
+    assert row["files"] == ["intervals/chr20_0_20Mb/chr20_0_20Mb.bed"]
+    assert row["s3_paths"] == [
+        "s3://project-abc123/resources/data/references/"
+        "intervals/chr20_0_20Mb/chr20_0_20Mb.bed"]
+
+
+def test_a_reference_path_without_a_project_is_absent_not_invented():
+    from cirro_api_client.v1.models import FileEntry, Reference
+    from cirro_agent.worker import rows as R
+    obj = Reference(id="ref_1", name="r", description="", type_="t",
+                    created_by="sminot", created_at=None,
+                    files=[FileEntry(path="t/r/x.bed", size=1)])
+    assert R.reference(obj)["s3_paths"] == []
+
+
+def test_a_reference_type_carries_the_save_as_rule():
+    """`_get_reference_upload_file_name` honours `saveAs`, so the stored filename is
+    not always the uploaded one and cannot be predicted without the rule."""
+    from cirro_api_client.v1.models import ReferenceType, ReferenceTypeValidationItem
+    from cirro_agent.worker import rows as R
+    item = ReferenceTypeValidationItem()
+    item.additional_properties = {"fileType": ".bed", "saveAs": "regions.bed"}
+    row = R.reference_type(ReferenceType(name="intervals", description="",
+                                         directory="intervals", validation=[item]))
+    assert row["validation"] == [{"fileType": ".bed", "saveAs": "regions.bed"}]

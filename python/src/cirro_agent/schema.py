@@ -230,10 +230,13 @@ REFERENCE = EntitySpec(
         "description": (LIST, "free text"),
         "created_by": (LIST, "username"),
         "created_at": (LIST, "ISO-8601 UTC"),
-        # `absolute_path` was declared LIST and produced by nothing; the row carries the
-        # file count instead, and no read fetches a reference's file paths.
-        "n_files": (DERIVED, "how many files the reference holds; the file list itself"
-                             " is not carried"),
+        # `absolute_path` was declared LIST and produced by nothing. The listing
+        # already carries the file entries, so these cost no extra call -- they are
+        # DERIVED only because rows are the expensive part of a response.
+        "n_files": (DERIVED, "how many files the reference holds"),
+        "files": (DERIVED, "each file's path within the reference"),
+        "s3_paths": (DERIVED, "each file's full s3:// location -- what a file-valued "
+                              "pipeline parameter takes; a reference name is rejected"),
     },
     projections={
         "standard": ["name", "type", "description", "created_at", "created_by"],

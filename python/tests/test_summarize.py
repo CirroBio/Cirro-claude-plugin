@@ -127,6 +127,24 @@ def test_the_root_cause_task_is_listed_first():
     assert body["failed"][0]["is_root_cause"] is True
 
 
+def test_parallel_chunks_are_not_reported_as_retries():
+    """A run whose 68 tasks all exited 0 reported `retries` on every scatter chunk,
+    inviting a diagnosis of a flapping task that does not exist."""
+    scatter = [{"name": "ALIGN_NA12878", "status": "COMPLETED", "exit_code": 0}
+               for _ in range(12)]
+    body = S.tasks(scatter)
+    assert body["retries"] == []
+    assert body["scattered"] == [{"name": "ALIGN_NA12878", "chunks": 12}]
+
+
+def test_a_repeat_with_a_failed_attempt_is_a_retry():
+    attempts = [{"name": "ALIGN", "status": "FAILED", "exit_code": 1},
+                {"name": "ALIGN", "status": "COMPLETED", "exit_code": 0}]
+    body = S.tasks(attempts)
+    assert body["retries"] == [{"name": "ALIGN", "attempts": 2, "failed": 1}]
+    assert body["scattered"] == []
+
+
 def test_task_process_strips_the_tag_suffix():
     assert S.task_process("STAR_ALIGN (sample_1)") == "STAR_ALIGN"
     assert S.task_process("MULTIQC") == "MULTIQC"

@@ -287,8 +287,26 @@ def sample(obj) -> dict:
     }
 
 
-def reference(obj) -> dict:
-    files = plain(getattr(obj, "files", None)) or []
+# Where reference data lives, taken from the SDK's own upload path
+# (`services/references.py`): the listing returns each file relative to this. A
+# file-valued pipeline parameter takes a full s3:// path and nothing resolves a
+# reference name into one, so passing the name validated clean and then failed two
+# minutes into a billed run -- "does not match [\\S+\\.(bed|interval_list)$]".
+REFERENCE_BASE = "s3://project-{project_id}/resources/data/references"
+
+
+def reference_s3(project_id: Optional[str], path: str) -> Optional[str]:
+    """The absolute location of one reference file, or None without a project."""
+    if path.startswith("s3://"):
+        return path
+    if not project_id:
+        return None
+    return f"{REFERENCE_BASE.format(project_id=project_id)}/{path.lstrip('/')}"
+
+
+def reference(obj, project_id: Optional[str] = None) -> dict:
+    raw = plain(getattr(obj, "files", None))
+    files = [file_entry(entry) for entry in raw] if isinstance(raw, list) else []
     return {
         "id": plain(getattr(obj, "id", None)),
         "name": plain(obj.name),
@@ -297,6 +315,10 @@ def reference(obj) -> dict:
         "created_by": plain(getattr(obj, "created_by", None)),
         "created_at": plain(getattr(obj, "created_at", None)),
         "n_files": len(files),
+        "files": [f["path"] for f in files if f["path"]],
+        "s3_paths": [location for location in
+                     (reference_s3(project_id, f["path"]) for f in files if f["path"])
+                     if location],
     }
 
 
@@ -377,9 +399,24 @@ def compute_environment(obj) -> dict:
 
 
 def reference_type(obj) -> dict:
+    # `validation` carries the `saveAs` rule the SDK applies on upload, so without it
+    # the stored filename cannot be predicted from the uploaded one -- and a pipeline
+    # parameter needs the stored name.
+    validation = plain(getattr(obj, "validation", None))
     return {"name": plain(getattr(obj, "name", None)),
             "description": plain(getattr(obj, "description", None)),
-            "directory": plain(getattr(obj, "directory", None))}
+            "directory": plain(getattr(obj, "directory", None)),
+            "validation": [_validation_rule(rule) for rule in validation]
+            if isinstance(validation, list) else []}
+
+
+def _validation_rule(rule) -> dict:
+    """One accepted-file rule. The generated item keeps its fields in
+    `additional_properties`, which `plain` unwraps only for a model that has nothing
+    else -- ReferenceTypeValidationItem does, so read it through `to_dict`."""
+    if hasattr(rule, "to_dict"):
+        rule = rule.to_dict()
+    return rule if isinstance(rule, dict) else {}
 
 
 def user(obj) -> dict:
