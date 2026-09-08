@@ -255,6 +255,10 @@ def fake_tenant(monkeypatch):
             router.get(f"{API}/projects/proj_b/datasets").respond(
                 json={"data": [], "nextToken": None})
             router.get(url__regex=rf"{API}/projects/[^/]+/shares$").respond(json=[])
+            # Empty is the ordinary answer: a project with no DEDICATED environment
+            # still runs on Cirro's shared Batch compute, which this route omits.
+            router.get(url__regex=rf"{API}/projects/[^/]+/compute-environments"
+                       ).respond(json=[])
             router.get(f"{API}/projects/proj_a/metrics").respond(
                 json=_metrics_payload("proj_a"))
             router.get(f"{API}/projects/proj_b/metrics").respond(

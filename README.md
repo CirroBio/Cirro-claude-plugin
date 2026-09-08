@@ -197,7 +197,13 @@ A few things worth knowing:
 | Your computer | `download_files` |
 
 Downloading is gated too. It does not change anything in Cirro, but it can fill a disk,
-so the plan tells you how many bytes are coming and how much space you have.
+so the plan tells you how many bytes are coming and how much space you have. Transfers
+also have a time ceiling: if the bytes could not move within it, the plan says so before
+you approve rather than after the transfer is cut off.
+
+Deleting a reference is not on this list. The API route the plugin has available
+identifies a project but not which reference to remove, so there is no way to delete one
+safely from here — use the web UI.
 
 ## What Claude brings to each task
 

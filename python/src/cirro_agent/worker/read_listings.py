@@ -73,7 +73,16 @@ def do_list(request: dict) -> dict:
     project_id = reader.scope_project_ids(scope)[0]
 
     if of == "compute_envs":
-        return _flat(reader, request, of, reader.compute_environments(project_id))
+        # An empty list is the normal answer, not a broken one: this route returns the
+        # environments REGISTERED for the project, and the shared AWS Batch queue every
+        # run lands on by default is not one of them. Read as a bare `count: 0` on a
+        # tenant that plainly runs pipelines, it looks like a fault.
+        environments = reader.compute_environments(project_id)
+        return _flat(reader, request, of, environments, note=(
+            "These are the compute environments registered for this project. Cirro's "
+            "own AWS Batch compute is always available and is never listed here -- an "
+            "empty list means no dedicated environment, not no compute. Omit "
+            "`compute_environment` on run_analysis to use the default."))
 
     if of == "shares":
         return _flat(reader, request, of, reader.shares(project_id))

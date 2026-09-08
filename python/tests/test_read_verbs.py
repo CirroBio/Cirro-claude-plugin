@@ -138,6 +138,18 @@ def test_a_project_with_no_metrics_says_so(monkeypatch):
     assert "no storage records" in row["storage_note"]
 
 
+def test_an_empty_compute_listing_says_the_default_is_not_in_it(fake_tenant,
+                                                                session_dir):
+    """`count: 0` on a tenant whose runs plainly land on a Batch queue reads as a
+    fault. The route lists registered environments; the shared default is not one."""
+    out = _read(fake_tenant, session_dir, "list", of="compute_envs",
+                scope={"project_ids": ["proj_a"]})
+    assert out["ok"], out
+    assert out["result"]["count"] == 0
+    note = out["result"]["note"]
+    assert "not no compute" in note and "run_analysis" in note
+
+
 def test_an_unknown_listing_names_the_ones_that_exist(fake_tenant, session_dir):
     out = _read(fake_tenant, session_dir, "list", of="nonesuch",
                 scope={"project_ids": ["proj_a"]})

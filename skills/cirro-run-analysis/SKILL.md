@@ -30,12 +30,36 @@ cirro-agent read processes -f "q:rnaseq"
 cirro-agent read process-params "nf-core/rnaseq v3.14"
 ```
 
-This is the authoritative list of accepted keys, which are required, and their
+This is the authoritative list of accepted parameters, which are required, and their
 defaults. **Do not construct `params` from memory or from another pipeline's shape.**
 
-A key that is not in this list will be accepted by the API and silently ignored by the
-pipeline. Discovering that after a six-hour run is the expensive way. `plan` warns
-about undeclared keys, but reading the spec first is how you avoid them.
+**Parameters are usually nested, and `path` says where.** Cirro forms group their
+parameters, so a `path` containing a dot is submitted nested and never flat:
+
+```
+path                       type      required
+analysis_type              object    yes        <- the key you send at the top level
+analysis_type.wes          boolean   yes
+analysis_type.tools        array     no
+workflow_version           string    no
+```
+
+```json
+{"analysis_type": {"analysis_type": "Germline Variant Calling",
+                   "wes": false,
+                   "tools": ["haplotypecaller"]},
+ "workflow_version": "3.8.1"}
+```
+
+Send each value at its declared `type` — an `array` is a list, not a comma-separated
+string. The response also carries a `skeleton`: the smallest valid params object,
+already nested, to fill in.
+
+A key sent flat when the form nests it, or one that is not in the list at all, will be
+accepted by the API and silently ignored by the pipeline — the run then proceeds on the
+default you thought you had overridden. Discovering that after a six-hour run is the
+expensive way. `plan` warns about both, naming where a misplaced key belongs, but
+reading the spec first is how you avoid them.
 
 If a previous run of the same pipeline worked, its parameters are a good starting
 point:
