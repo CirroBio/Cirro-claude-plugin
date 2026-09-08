@@ -600,7 +600,6 @@ def test_a_reference_carries_the_paths_a_pipeline_parameter_needs():
         files=[FileEntry(path="intervals/chr20_0_20Mb/chr20_0_20Mb.bed", size=120)])
     row = R.reference(obj, "abc123")
     assert row["n_files"] == 1
-    assert row["files"] == ["intervals/chr20_0_20Mb/chr20_0_20Mb.bed"]
     assert row["s3_paths"] == [
         "s3://project-abc123/resources/data/references/"
         "intervals/chr20_0_20Mb/chr20_0_20Mb.bed"]
@@ -655,3 +654,34 @@ def test_a_reference_path_that_is_already_absolute_is_not_prefixed_twice():
                     created_by="sminot", created_at=None,
                     files=[FileEntry(path=absolute, size=1)])
     assert R.reference(obj, "abc123")["s3_paths"] == [absolute]
+
+
+def test_the_required_shape_states_what_a_group_obliges():
+    """Measured on demo.cirro.bio: sarek's top-level groups are all optional, so "the
+    smallest valid params object" is `{}` -- correct and useless. What the caller
+    cannot see is that sending `analysis_type` at all obliges them to put `wes`
+    inside it, which is the rule three failed runs were spent discovering."""
+    from cirro_agent.worker.read_process import _required_shape
+    fields = [
+        {"path": "workflow_version", "type": "string", "required": False,
+         "conditional": False, "is_group": False, "default": "3.8.1",
+         "has_default": True},
+        {"path": "analysis_type", "type": "object", "required": False,
+         "conditional": False, "is_group": True, "default": None,
+         "has_default": False},
+        {"path": "analysis_type.analysis_type", "type": "string", "required": True,
+         "conditional": False, "is_group": False, "default": None,
+         "has_default": False},
+        {"path": "analysis_type.wes", "type": "boolean", "required": True,
+         "conditional": False, "is_group": False, "default": False,
+         "has_default": True},
+    ]
+    assert _required_shape(fields) == {
+        "analysis_type": {"analysis_type": "<string>", "wes": False}}
+
+
+def test_a_form_that_requires_nothing_has_an_empty_required_shape():
+    from cirro_agent.worker.read_process import _required_shape
+    assert _required_shape([{"path": "x", "type": "string", "required": False,
+                             "conditional": False, "is_group": False,
+                             "default": None, "has_default": False}]) == {}

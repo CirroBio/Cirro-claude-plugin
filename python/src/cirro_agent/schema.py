@@ -234,9 +234,10 @@ REFERENCE = EntitySpec(
         # already carries the file entries, so these cost no extra call -- they are
         # DERIVED only because rows are the expensive part of a response.
         "n_files": (DERIVED, "how many files the reference holds"),
-        "files": (DERIVED, "each file's path within the reference"),
         "s3_paths": (DERIVED, "each file's full s3:// location -- what a file-valued "
-                              "pipeline parameter takes; a reference name is rejected"),
+                              "pipeline parameter takes; a reference name is rejected. "
+                              "The stored filename is not always the uploaded one, so "
+                              "read it here rather than deriving it from the name"),
     },
     projections={
         "standard": ["name", "type", "description", "created_at", "created_by"],

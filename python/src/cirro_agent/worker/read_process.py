@@ -17,9 +17,11 @@ _PARAMS_NOTE = (
     "never a top-level `wes`. Send each value at its declared `type` -- an `array` is a "
     "list, not a comma-separated string. A flat key validates cleanly and is then "
     "ignored by the pipeline, so it fails as defaults nobody chose rather than as an "
-    "error. `conditional` fields only apply under one branch of a selector. Keys not "
-    "listed here are accepted by the API and ignored; plan(run_analysis) reports any "
-    "you pass that are not declared."
+    "error. `conditional` fields only apply under one branch of a selector. "
+    "`required_shape` is what a group obliges you to include once you send it at all "
+    "-- the groups themselves are usually optional, so `required` being short does "
+    "not mean a group can be half-filled. Keys not listed here are accepted by the "
+    "API and ignored; plan(run_analysis) reports any you pass that are not declared."
 )
 
 _SPEC_UNREADABLE = (
@@ -28,32 +30,30 @@ _SPEC_UNREADABLE = (
 )
 
 
-def _skeleton(fields: list) -> dict:
-    """The smallest params object that satisfies the spec, nested as it must be sent.
+def _required_shape(fields: list) -> dict:
+    """What each group demands once you send it, nested as it must be sent.
 
-    Required fields only, at their declared defaults; a required field with no default
-    is left as a `<type>` placeholder rather than invented. This is the shape, not a
-    recommendation -- every other parameter is optional and takes its own default.
+    Not "the smallest valid params object": on a real form the top-level groups are
+    themselves optional, so that object is `{}` for every process measured -- correct,
+    and useless to someone who has to fill one of those groups in. What they need is
+    the rule they cannot see, which is that sending `analysis_type` at all obliges
+    them to put `wes` inside it.
+
+    Every required field appears, under whatever groups contain it, at its declared
+    default; a required field with no default is a `<type>` placeholder rather than an
+    invented value. A group absent from here requires nothing of its own.
     """
-    required = {f["path"] for f in fields if f["required"]}
-    skeleton: dict = {}
+    shape: dict = {}
     for field in sorted(fields, key=lambda f: f["path"]):
-        steps = field["path"].split(".")
-        # A field required inside an optional group is required only once that group
-        # is sent, so the smallest valid object leaves the whole group out.
-        owners = [".".join(steps[:n]) for n in range(1, len(steps) + 1)]
-        if not all(owner in required for owner in owners):
+        if not field["required"] or field["is_group"]:
             continue
-        node = skeleton
+        steps = field["path"].split(".")
+        node = shape
         for step in steps[:-1]:
             node = node.setdefault(step, {})
-        if field["is_group"]:
-            node.setdefault(steps[-1], {})
-        elif field["has_default"]:
-            node[steps[-1]] = field["default"]
-        else:
-            node[steps[-1]] = f"<{field['type'] or 'value'}>"
-    return skeleton
+        node[steps[-1]] = (field["default"] if field["has_default"]
+                           else f"<{field['type'] or 'value'}>")
+    return shape
 
 
 def do_process_params(request: dict) -> dict:
@@ -91,7 +91,7 @@ def do_process_params(request: dict) -> dict:
                     "n_parameters": len(parameters),
                     "required": required,
                     "parameters": parameters,
-                    "skeleton": _skeleton(fields or []),
+                    "required_shape": _required_shape(fields or []),
                     "note": _PARAMS_NOTE if fields is not None else _SPEC_UNREADABLE,
                     "next_calls": [{
                         "id": "nc_plan", "why": "plan a run once the params are chosen",

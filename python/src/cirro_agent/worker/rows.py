@@ -320,7 +320,6 @@ def reference(obj, project_id: Optional[str] = None) -> dict:
         "created_by": plain(getattr(obj, "created_by", None)),
         "created_at": plain(getattr(obj, "created_at", None)),
         "n_files": len(files),
-        "files": [f["path"] for f in files if f["path"]],
         "s3_paths": [location for location in
                      (reference_s3(project_id, f["path"]) for f in files if f["path"])
                      if location],

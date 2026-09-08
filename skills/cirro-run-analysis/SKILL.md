@@ -36,24 +36,37 @@ defaults. **Do not construct `params` from memory or from another pipeline's sha
 **Parameters are usually nested, and `path` says where.** Cirro forms group their
 parameters, so a `path` containing a dot is submitted nested and never flat:
 
+Real paths go several levels deep. From nf-core/sarek's variant calling process:
+
 ```
-path                       type      required
-analysis_type              object    yes        <- the key you send at the top level
-analysis_type.wes          boolean   yes
-analysis_type.tools        array     no
-workflow_version           string    no
+path                                                type     required  conditional
+analysis_type                                       object   no        no
+analysis_type.analysis_type                         string   yes       no
+analysis_type.wes                                   boolean  yes       no
+analysis_type.tools                                 array    no        yes
+analysis_type.genome_selection.genome_source        string   no        no
+analysis_type.genome_selection.igenomes.genome      string   no        yes
+workflow_version                                    string   no        no
 ```
 
 ```json
 {"analysis_type": {"analysis_type": "Germline Variant Calling",
                    "wes": false,
-                   "tools": ["haplotypecaller"]},
- "workflow_version": "3.8.1"}
+                   "tools": ["haplotypecaller"],
+                   "genome_selection": {"genome_source": "igenomes",
+                                        "igenomes": {"genome": "GATK.GRCh38"}}}}
 ```
 
 Send each value at its declared `type` — an `array` is a list, not a comma-separated
-string. The response also carries a `skeleton`: the smallest valid params object,
-already nested, to fill in.
+string.
+
+**`required` being short does not mean a group can be half-filled.** The groups
+themselves are usually optional, so almost nothing is required outright — but sending
+`analysis_type` at all obliges you to include `wes`. The response's `required_shape`
+states that rule directly: it is what each group demands once you use it.
+
+A `conditional` field only exists under one branch of a selector — `igenomes.genome`
+applies when `genome_source` is `igenomes` and not otherwise.
 
 A key sent flat when the form nests it, or one that is not in the list at all, will be
 accepted by the API and silently ignored by the pipeline — the run then proceeds on the
