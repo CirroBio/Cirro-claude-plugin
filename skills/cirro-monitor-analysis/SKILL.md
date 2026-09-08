@@ -89,6 +89,12 @@ line numbers from an error block:
 cirro-agent read logs -p P -d ds_failed --raw --line-range 4180 4260
 ```
 
+**The middle is not in the response.** `omitted` carries a `LOG_MIDDLE_ELIDED` entry
+naming the span between the head and the tail, with the exact call that reads it.
+Error blocks reach into that span only where a line carries an error marker, so a
+preprocess trace that fails quietly is there and nowhere else — if the head and tail
+explain nothing, read that range before concluding the log is unhelpful.
+
 ### 5. Resources, if it looks like a limit
 
 ```bash
@@ -104,9 +110,14 @@ Per-process peak memory against what was allocated, flagged `near_limit` or
 cirro-agent read params -p "My Project" -d ds_failed
 ```
 
-Shows what departed from the defaults, and flags `unknown` keys — parameters the
-pipeline silently ignored. A typo there produces a run that "worked" but did the wrong
-thing.
+Shows what departed from the defaults, and flags `unknown` paths — parameters the
+pipeline silently ignored. A run that "worked" but did the wrong thing usually starts
+here.
+
+Check `misplaced` first: those are real parameters sent at the top level when the form
+nests them, so the pipeline never saw them and used its own default instead. The rest
+are typos. Paths are dotted (`analysis_type.wes`), matching how they must be sent —
+`read process-params <process>` gives the full shape.
 
 ### 7. What the run cost, if that is the question
 

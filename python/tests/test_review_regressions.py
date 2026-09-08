@@ -625,3 +625,21 @@ def test_a_reference_type_carries_the_save_as_rule():
     row = R.reference_type(ReferenceType(name="intervals", description="",
                                          directory="intervals", validation=[item]))
     assert row["validation"] == [{"fileType": ".bed", "saveAs": "regions.bed"}]
+
+
+def test_the_elided_log_span_is_declared_with_a_call_that_returns_it():
+    """CLAUDE.md's rule: what a response leaves out is named in `omitted` with a
+    runnable fix. The middle of a log was dropped with neither."""
+    from cirro_agent.worker.read_summaries import _log_middle_left_out
+    body = {"lines": 167, "elided": {"range": [31, 107], "lines": 77}}
+    entry = _log_middle_left_out(body, "ds_1", ["proj_a"])[0]
+    assert entry["code"] == "LOG_MIDDLE_ELIDED"
+    assert "31-107" in entry["detail"]
+    call = entry["fix"]["retry_with"][0]
+    assert call["raw"] is True and call["line_range"] == [31, 107]
+    assert call["dataset_id"] == "ds_1"
+
+
+def test_a_log_with_no_elided_span_declares_nothing():
+    from cirro_agent.worker.read_summaries import _log_middle_left_out
+    assert _log_middle_left_out({"lines": 12}, "ds_1", ["proj_a"]) == []

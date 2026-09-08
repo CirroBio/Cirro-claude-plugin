@@ -103,6 +103,19 @@ def test_tail_is_kept_for_failures():
     assert "Command exit status: 137" in body["tail"][-1]
 
 
+def test_the_span_between_head_and_tail_is_declared():
+    """`error_blocks` only reaches lines carrying an error marker, so a preprocess
+    trace between the two slices was in the response nowhere and nothing said so."""
+    body = S.logs("\n".join(f"line {i}" for i in range(1, 168)), head=30, tail=60)
+    assert body["elided"] == {"range": [31, 107], "lines": 77}
+    assert len(body["head"]) + body["elided"]["lines"] + len(body["tail"]) == 167
+
+
+def test_a_log_that_fits_elides_nothing():
+    body = S.logs("\n".join(f"line {i}" for i in range(1, 20)), head=30, tail=60)
+    assert "elided" not in body
+
+
 # --- tasks ---
 
 def fanout_tasks(n=480, failures=(0,)):

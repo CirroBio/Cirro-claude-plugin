@@ -262,13 +262,14 @@ def logs(text: str, *, head: int = 30, tail: int = 60, max_blocks: int = 5) -> d
     for block in blocks:
         block.pop("_end", None)
 
-    return {
+    # Compared against head + tail, not head: otherwise a 40-line log with
+    # head=30/tail=60 returns the first 30 lines and then all 40 again.
+    tail_lines = lines[head:][-tail:]
+    body = {
         "bytes": len(text),
         "lines": len(lines),
         "head": lines[:head],
-        # Compared against head + tail, not head: otherwise a 40-line log with
-        # head=30/tail=60 returns the first 30 lines and then all 40 again.
-        "tail": lines[head:][-tail:],
+        "tail": tail_lines,
         "error_blocks": blocks,
         "signature_counts": repeated,
         "raw_available": {
@@ -276,6 +277,13 @@ def logs(text: str, *, head: int = 30, tail: int = 60, max_blocks: int = 5) -> d
             "max_line": len(lines),
         },
     }
+    # What sits between the two slices. `error_blocks` reaches into it, but only where
+    # a line carries an error marker -- a preprocess trace that carries none is in the
+    # response nowhere, and nothing said so.
+    first, last = head + 1, len(lines) - len(tail_lines)
+    if last >= first:
+        body["elided"] = {"range": [first, last], "lines": last - first + 1}
+    return body
 
 
 # --------------------------------------------------------------------------- tasks

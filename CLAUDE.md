@@ -224,6 +224,15 @@ reader as a retryable UPSTREAM_ERROR telling them to check Cirro's service statu
 Shaping the absence into a zero total is the other wrong answer: it reads as a run
 that was free.
 
+**There is no safe way to delete one reference.** The generated
+`delete_project_reference` route is `DELETE /projects/{project_id}/references` and takes
+the project id alone -- nothing in it names the reference to remove, though its own
+docstring says "Deletes a reference". 1.6.0 is the newest published `cirro-api-client`
+and it bundles no spec to check against, so whether the server takes a parameter the
+generator dropped cannot be settled from here. Built on that route as it stands, a
+`delete_reference` operation would be a destructive op whose blast radius is every
+reference in the project. It stays unimplemented, and the README says to use the web UI.
+
 **Never call `DataPortal()` bare.** With no cached token it enters a device-code login
 and blocks until the code expires. Build auth explicitly via `worker/portal.py`.
 

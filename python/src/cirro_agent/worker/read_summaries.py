@@ -40,9 +40,36 @@ def do_summarize(request: dict) -> dict:
         scope_echo["dataset_id"] = dataset_id
     build = _BUILDERS[of]
     body, complete, next_calls = build(reader, request, project_ids, project_id, dataset_id)
+    omitted = _projects_left_out(of, named_project_ids, dataset_id)
+    if of == "logs":
+        omitted += _log_middle_left_out(body, dataset_id, project_ids)
     return _summary_envelope(reader, request, of, body, complete, scope_echo,
-                             max_tokens, next_calls=next_calls,
-                             omitted=_projects_left_out(of, named_project_ids, dataset_id))
+                             max_tokens, next_calls=next_calls, omitted=omitted)
+
+
+def _log_middle_left_out(body: dict, dataset_id: Optional[str],
+                         project_ids: list) -> list:
+    """The span between the head and the tail, declared rather than silently dropped.
+
+    `error_blocks` reaches into that span, but only where a line carries an error
+    marker. A preprocess trace that carries none is in the response nowhere -- and on
+    a 167-line log the middle is where it lives.
+    """
+    gap = body.get("elided")
+    if not gap:
+        return []
+    return [{
+        "code": "LOG_MIDDLE_ELIDED",
+        "detail": (f"lines {gap['range'][0]}-{gap['range'][1]} ({gap['lines']} of "
+                   f"{body['lines']}) sit between the head and tail shown. "
+                   "`error_blocks` covers the marked errors in that span; anything "
+                   "carrying no error marker is not in this response."),
+        "fix": {"note": "read that span verbatim",
+                "retry_with": [{"verb": "summarize", "of": "logs",
+                                "dataset_id": dataset_id,
+                                "scope": {"project_ids": project_ids},
+                                "raw": True, "line_range": gap["range"]}]},
+    }]
 
 
 def _samples_body(reader, request, project_ids, project_id,
