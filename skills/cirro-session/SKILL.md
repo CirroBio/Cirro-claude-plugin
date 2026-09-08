@@ -5,10 +5,15 @@ description: Set up a Cirro session folder and authenticate, or repair a broken 
 
 # Connect to Cirro
 
-Every Cirro operation runs against a **session folder**: a `.cirro/` directory in the
-user's working directory that holds that directory's credential, cache and audit log.
-It is deliberately separate from the machine-wide `~/.cirro`, which the plugin never
-touches.
+Every Cirro operation runs against a **session folder**: a `.cirro/` directory holding
+a credential, cache and audit log. It is deliberately separate from the machine-wide
+`~/.cirro`, which the plugin never touches.
+
+It sits in one of two places. Signing in without naming a directory creates it for the
+**tenant**, outside every checkout, and every directory with nothing bound nearer
+resolves to it — one sign-in for the machine. Naming a directory instead binds that
+directory alone, ahead of any tenant login, which is what you want only when a project
+needs a different tenant or account from the usual one.
 
 ## Order of operations
 
@@ -29,8 +34,11 @@ not need to ask at all.
 login_start(base_url="app.cirro.bio")
 ```
 
-It creates the session folder if there is none, so `session_init` is not a separate
-step in this flow. Do not run `cirro-agent read doctor` first: `login_start` returns
+It creates the session folder if there is none — for the tenant, unless you name a
+`directory` — so `session_init` is not a separate step in this flow. Do not add one
+just to pass `shared`: that is already what happens.
+
+Do not run `cirro-agent read doctor` first: `login_start` returns
 the same typed errors, and a diagnostic pass before the thing you are diagnosing just
 puts another approval prompt between the user and their link.
 
@@ -81,13 +89,18 @@ work through `cirro-agent read` and writes through `plan` / `apply`.
 | `AUTH_EXPIRED` | The SDK discards a cached token once its refresh token is within 12h of expiring | `login_start`, relay the link, `login_wait` |
 | `TENANT_MISMATCH` | `CIRRO_BASE_URL` is set to a different host than this folder is bound to, or a plan was made elsewhere | One folder serves one tenant. Either unset the variable or work in a directory with its own session folder |
 | `NETWORK_UNAVAILABLE` | DNS or TCP to the Cirro host failed | A VPN or hostname problem. The message distinguishes "cannot resolve" from "cannot connect" — pass that on |
-| `no_session_folder` | You are running outside any directory that has one | `login_start` with the hostname creates it, or change to the right directory |
-| `TENANT_MISMATCH` from `login_start` | You passed a hostname this folder is not bound to | One folder serves one tenant. Drop the argument to use the bound one, or move to a directory bound to the host you meant |
+| `no_session_folder` | Nothing is bound near the working directory and no tenant is signed in | `login_start` with the hostname creates it |
+| `no_session_folder` naming candidates | Several tenants are signed in, so there is no single one to fall back to | The `candidates` are tenant folders. Ask which, then pass it as `directory` / `--dir` |
+| `TENANT_MISMATCH` from `login_start` | You passed a hostname that a *directory* is bound to something else | That folder was bound deliberately. Drop the argument to use it, or sign in for the tenant with `session_init(base_url=..., shared=true)` |
 
 ## Multiple tenants
 
-The plugin refuses to guess. Two tenants means two directories, each with its own
-`.cirro/`. Do not attempt to repoint an existing folder at a different host.
+The plugin refuses to guess between them. Signing in to a second tenant from a
+directory nobody bound just works — it creates that tenant's folder alongside the
+first. From then on a directory with nothing bound nearer is ambiguous, and
+`no_session_folder` comes back listing both in `candidates`: ask the user which they
+mean rather than picking. Do not attempt to repoint an existing folder at a different
+host.
 
 You do not have to move the session to use another folder. Every tool that resolves a
 session takes `directory`, and every read takes `--dir`:

@@ -20,6 +20,7 @@ from . import errors
 SESSION_DIRNAME = ".cirro"
 SESSION_FILE = "session.json"
 AUTH_DEVICE_CODE = "device_code"
+TENANTS_DIRNAME = "tenants"
 
 # Session resolution runs on the way to every operation, so it waits only briefly on
 # git. Callers already inside a user's checkout pass their own, longer bound.
@@ -63,6 +64,45 @@ def git_root(start: Path, timeout: float = GIT_TIMEOUT) -> Optional[Path]:
     """The checkout `start` is inside, or None if it is not inside one."""
     top = git_output(start, "rev-parse", "--show-toplevel", timeout=timeout)
     return Path(top) if top else None
+
+
+def tenants_root() -> Path:
+    """Where tenant folders live: one per Cirro host, outside every checkout.
+
+    Under `plugin_data()` for the reason that function gives -- a directory
+    marketplace copies the plugin root verbatim into every install, so a credential
+    left there is shipped to everyone who installs the plugin. This is the same
+    argument that keeps the virtualenv out, arriving at the same answer.
+    """
+    # Imported here rather than at module scope: `runner` imports this module, and
+    # `plugin_data` is defined below that import.
+    from .runner import plugin_data
+    return plugin_data() / TENANTS_DIRNAME
+
+
+def tenant_dir(base_url: str) -> Path:
+    """The working directory for one tenant. Its `.cirro/` is the session folder."""
+    return tenants_root() / _normalize_base_url(base_url)
+
+
+def is_tenant_dir(session_dir: Path) -> bool:
+    """Whether a folder is a tenant's rather than one someone bound.
+
+    Both sides are resolved: the walk returns a resolved path and the tenants root is
+    built from `Path.home()`, so a symlink anywhere above either would otherwise make
+    a tenant folder look like a bound directory.
+    """
+    return session_dir.resolve().parent.parent == tenants_root().resolve()
+
+
+def bound_tenants() -> list:
+    """Every tenant folder that has been signed in to, ordered by host."""
+    root = tenants_root()
+    if not root.is_dir():
+        return []
+    return sorted((host / SESSION_DIRNAME for host in root.iterdir()
+                   if (host / SESSION_DIRNAME / SESSION_FILE).is_file()),
+                  key=lambda found: found.parent.name)
 
 
 def _search_ceiling(start: Path) -> Path:
@@ -122,11 +162,33 @@ def find_session_dir(start: Optional[Path] = None) -> Path:
             break
         here = here.parent
 
+    # Nothing bound near the work, so fall back to a tenant folder -- but only when
+    # there is exactly one, because choosing between tenants is the one thing this
+    # resolver has never done. The fallback finds; it never creates.
+    tenants = bound_tenants()
+    if len(tenants) == 1:
+        return tenants[0]
+    if tenants:
+        raise errors.NoSessionFolder(
+            f"No Cirro session folder found in {start} or any parent up to {ceiling}, "
+            f"and {len(tenants)} tenants are signed in, so there is no single one to "
+            "fall back to.",
+            what="One session folder serves exactly one Cirro tenant.",
+            user_action=("Name the tenant folder to work against, with --dir on a read "
+                         "or `directory` on an MCP tool."),
+            candidates=[str(found.parent) for found in tenants],
+            searched_from=str(start),
+            ceiling=str(ceiling),
+        )
+
     raise errors.NoSessionFolder(
-        f"No Cirro session folder found in {start} or any parent up to {ceiling}.",
-        what="A session folder holds this directory's Cirro credential and cache.",
+        f"No Cirro session folder found in {start} or any parent up to {ceiling}, and "
+        "no tenant is signed in.",
+        what="A session folder holds a Cirro credential and cache.",
         user_action=("Create one with the session_init MCP tool (or the "
-                     "cirro-session skill), giving the Cirro hostname."),
+                     "cirro-session skill), giving the Cirro hostname. Pass "
+                     "shared=true to sign in once for the tenant instead of for "
+                     "this directory alone."),
         searched_from=str(start),
         ceiling=str(ceiling),
     )
@@ -165,6 +227,18 @@ def _normalize_base_url(base_url: str) -> str:
         if url.startswith(prefix):
             url = url[len(prefix):]
     return url.split("/")[0]
+
+
+def init_tenant(base_url: str, auth: str = AUTH_DEVICE_CODE) -> Session:
+    """Create the session folder for a tenant rather than for one directory.
+
+    Every directory with nothing bound nearer resolves to it, so one sign-in covers
+    the whole machine -- and it sits somewhere no install overwrites and no checkout
+    carries, which a project directory cannot promise.
+    """
+    workdir = tenant_dir(base_url)
+    workdir.mkdir(parents=True, exist_ok=True)
+    return init(workdir, base_url, auth)
 
 
 def init(workdir: Path, base_url: str, auth: str = AUTH_DEVICE_CODE) -> Session:

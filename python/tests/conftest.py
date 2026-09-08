@@ -355,3 +355,17 @@ def fake_reader(*, processes=(), username=None, base_url="app.cirro.test", sessi
 def _no_project_dir_from_the_outer_session(monkeypatch):
     """Tests decide their own session folder; the host's must not leak in."""
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_tenant_folders_from_the_developer(monkeypatch, tmp_path_factory):
+    """Session resolution falls back to a signed-in tenant folder, which lives under
+    `plugin_data()`. Left alone that is the developer's own, so whether a test found a
+    folder would depend on whose machine it ran on.
+
+    Only the tenants root is redirected, not `plugin_data()` itself -- the pinned
+    runtime lives under that too, and moving it leaves the worker with no interpreter.
+    """
+    from cirro_agent import session as session_mod
+    root = tmp_path_factory.mktemp("tenants")
+    monkeypatch.setattr(session_mod, "tenants_root", lambda: root)

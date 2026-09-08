@@ -48,41 +48,43 @@ refreshed silently and Claude just tells you who you are.
 
 ### Where your credentials live
 
-Each directory you work in gets its own `.cirro/` folder holding that directory's login,
-a cache, and a log of every change made. It ignores itself in git, and it is separate
-from the `~/.cirro` used by the standalone `cirro` CLI — the plugin never touches that.
+A `.cirro/` folder holds a login, a cache, and a log of every change made. It ignores
+itself in git, and it is separate from the `~/.cirro` used by the standalone `cirro`
+CLI — the plugin never touches that.
 
-One directory, one Cirro tenant. If you work with two, use two directories; the plugin
-will not guess between them.
+There are two places it can go, and the difference is worth a minute.
 
-You do not have to move to use another one. Ask Claude to work against a different
-signed-in directory and it will, naming the tenant it used — the same thing
-`cirro-agent read ... --dir <path>` does on the command line.
+**Signed in for the tenant.** Ask Claude to sign in and this is what you want. The
+folder is created outside every checkout, one per Cirro hostname, and any directory
+with nothing bound nearer resolves to it — so you sign in once and every project on
+the machine can read Cirro. It survives plugin installs and updates, which a folder
+inside a checkout does not.
 
-#### Which directory to sign in
+**Signed in for one directory.** A `.cirro/` created inside a working directory answers
+for that directory and everything under it, ahead of any tenant login. Use it when a
+particular project genuinely needs a different tenant or a different account from your
+usual one.
 
-Sign in at the directory you actually mean, and pick one that will still be there
-tomorrow.
+One folder, one Cirro tenant, either way. If two tenants are signed in and the
+directory you are working in has nothing bound nearer, Claude will not pick between
+them — it names both and asks. You can always say which to use, without moving:
+`cirro-agent read ... --dir <path>` does the same on the command line.
+
+#### If you sign in for a directory
+
+Two things to avoid, both of which have bitten people.
 
 **Not a parent of your work.** The search walks up from wherever Claude is working,
 stopping at the project directory or the enclosing git checkout — and at your home
 directory when it is neither. A `.cirro/` high up therefore captures everything
 beneath it, so signing in at `~` or `~/projects` quietly binds every project under it
-to that one tenant. This is the usual cause of a session talking to the wrong Cirro.
+to that one tenant. This is the usual cause of a session talking to the wrong Cirro,
+and signing in for the tenant instead avoids it entirely.
 
 **Not inside anything that gets copied or replaced.** Installing or updating a plugin
 copies its whole directory, and a signed-in `.cirro/` goes with it — tenant, username
 and, where your OS keychain is unavailable, the token itself in plain text. The same
-applies to a git worktree you intend to delete. If you want one login you can reach
-from anywhere, keep a directory for the tenant and sign in there:
-
-```bash
-mkdir -p ~/cirro/app.cirro.bio
-```
-
-Then work against it from any project with `--dir ~/cirro/app.cirro.bio`, or just ask
-Claude to use it. Each tenant gets its own directory, and none of them is anywhere
-that an install will overwrite.
+applies to a git worktree you intend to delete.
 
 **Sharing one with another session is fine.** Two Claude sessions can work against
 the same signed-in directory at once. If both find an expired token in the same

@@ -127,8 +127,24 @@ resolves a session takes `directory`, and every read subcommand takes `--dir`, s
 Claude session can work across several bound folders without being moved -- which is
 what people actually do. A test asserts each tool still takes it. The safety rules are
 unchanged and do the work: the machine-wide global credential folder is still refused,
-nothing is created implicitly, and `session_dir` is inside `DIGEST_FIELDS`, so a plan
-made in one folder cannot be applied in another.
+nothing is created implicitly, and `session_dir` is inside `DIGEST_FIELDS`.
+
+**When the walk finds nothing, one signed-in tenant answers; two never do.** A tenant
+folder is `plugin_data()/tenants/<host>/.cirro`, created by `init_tenant` and reached
+by every directory with nothing bound nearer, so a person signs in once rather than
+once per project. It lives under `plugin_data()` for the reason that function gives --
+inside the plugin root it would be copied into every install, credential and all --
+and that is the whole point: the two failures it exists to fix are a `.cirro/` in a
+checkout that an install overwrites, and a `.cirro/` high in `$HOME` that silently
+captures every project below it, because `_search_ceiling` falls back to home.
+
+The fallback finds and never creates, the walk-up still wins, and `bound_tenants()`
+returning more than one is an error listing them in `candidates` -- choosing between
+tenants is the one thing this resolver has never done. One consequence to keep in
+view: two projects sharing a tenant folder share a `session_dir`, so a plan made while
+in one can be applied while in the other. That was already true of any two directories
+under one bound folder; the tenant folder makes it the common case rather than the
+accidental one, and the approval text still names the tenant and the objects.
 
 **Nothing may live in the plugin root that is not meant to ship.** A directory
 marketplace copies the whole tree into every install, verbatim: it consults no

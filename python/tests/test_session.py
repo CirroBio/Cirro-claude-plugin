@@ -124,3 +124,124 @@ def test_the_read_cli_resolves_the_directory_it_is_given(tmp_path, monkeypatch):
     cli.main(["read", "folders", "-p", "X", "--dir", str(tmp_path)])
     assert seen["start"] == tmp_path
     assert session_mod.load(seen["start"]).base_url == "dev.cirro.bio"
+
+
+def test_init_tenant_creates_the_folder_outside_every_checkout(tmp_path):
+    current = session_mod.init_tenant("https://app.cirro.bio/api")
+    root = Path(__file__).resolve().parents[2]
+    assert current.path == session_mod.tenants_root() / "app.cirro.bio" / ".cirro"
+    assert (current.path / session_mod.SESSION_FILE).is_file()
+    assert root not in current.path.parents, (
+        "a tenant folder inside the plugin root is copied into every install by a "
+        "directory marketplace, credential and all")
+
+
+def test_a_directory_with_nothing_bound_falls_back_to_the_one_tenant(tmp_path):
+    session_mod.init_tenant("app.cirro.bio")
+    work = tmp_path / "unbound"
+    work.mkdir()
+    assert session_mod.find_session_dir(work) == session_mod.tenant_dir(
+        "app.cirro.bio") / ".cirro"
+
+
+def test_a_folder_bound_nearer_still_wins(tmp_path):
+    """The fallback is a fallback. A directory that was signed in to on purpose keeps
+    answering for itself."""
+    session_mod.init_tenant("app.cirro.bio")
+    session_mod.init(tmp_path, "other.cirro.bio")
+    assert session_mod.find_session_dir(tmp_path) == tmp_path / ".cirro"
+
+
+def test_two_signed_in_tenants_are_never_chosen_between(tmp_path):
+    session_mod.init_tenant("app.cirro.bio")
+    session_mod.init_tenant("dev.cirro.bio")
+    work = tmp_path / "unbound"
+    work.mkdir()
+    with pytest.raises(errors.AgentError) as caught:
+        session_mod.find_session_dir(work)
+    assert caught.value.code == "NO_SESSION_FOLDER"
+    assert [Path(c).name for c in caught.value.candidates] == [
+        "app.cirro.bio", "dev.cirro.bio"], "both tenants must be offered by name"
+
+
+def test_no_tenant_and_no_folder_still_says_how_to_make_one(tmp_path):
+    work = tmp_path / "unbound"
+    work.mkdir()
+    with pytest.raises(errors.AgentError) as caught:
+        session_mod.find_session_dir(work)
+    assert caught.value.code == "NO_SESSION_FOLDER"
+    assert not caught.value.candidates
+    assert "shared" in caught.value.user_action
+
+
+def test_a_tenant_folder_is_not_rebound_to_another_tenant(tmp_path):
+    """`init_tenant` derives the path from the host, so this can only happen if the
+    normalization ever stops distinguishing two hosts."""
+    session_mod.init_tenant("app.cirro.bio")
+    assert session_mod.tenant_dir("app.cirro.bio") != session_mod.tenant_dir(
+        "dev.cirro.bio")
+
+
+def test_session_init_shared_puts_the_folder_under_the_tenant_root(tmp_path):
+    from cirro_agent import mcp_server
+    result = mcp_server.session_init("app.cirro.bio", shared=True)
+    assert result["ok"]
+    assert Path(result["session_dir"]) == session_mod.tenant_dir("app.cirro.bio") / ".cirro"
+
+
+def test_session_init_refuses_shared_and_a_directory_together(tmp_path):
+    """Their locations disagree, and silently honouring one would bind a folder the
+    caller did not name."""
+    from cirro_agent import mcp_server
+    result = mcp_server.session_init("app.cirro.bio", directory=str(tmp_path),
+                                     shared=True)
+    assert result["error"]["code"] == "NOT_SUPPORTED"
+    assert not (tmp_path / ".cirro").exists()
+
+
+def test_naming_a_second_tenant_signs_into_it_rather_than_refusing(tmp_path, monkeypatch):
+    """Falling back to the one signed-in tenant must not make the second one
+    unreachable: nothing bound this directory, so another host is not a conflict."""
+    from cirro_agent import mcp_server
+    session_mod.init_tenant("app.cirro.bio")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mcp_server.runner, "call",
+                        lambda request, **kwargs: {"ok": True, "verb": request["verb"]})
+
+    assert mcp_server.login_start("dev.cirro.bio")["ok"]
+    assert [found.parent.name for found in session_mod.bound_tenants()] == [
+        "app.cirro.bio", "dev.cirro.bio"]
+
+
+def test_naming_another_tenant_in_a_bound_directory_still_refuses(tmp_path, monkeypatch):
+    """A directory somebody bound on purpose is not overridden by a base_url."""
+    from cirro_agent import mcp_server
+    session_mod.init(tmp_path, "app.cirro.bio")
+    monkeypatch.chdir(tmp_path)
+
+    result = mcp_server.login_start("dev.cirro.bio")
+    assert result["error"]["code"] == "TENANT_MISMATCH"
+    assert result["error"]["remediation"]["retry_with"][0]["shared"] is True
+
+
+def test_login_start_with_nothing_bound_signs_in_for_the_tenant(tmp_path, monkeypatch):
+    """The default has to be the good one: this is the single call the session skill
+    makes, and binding the working directory is how a credential lands in a checkout."""
+    from cirro_agent import mcp_server
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mcp_server.runner, "call", lambda request, **kw: {"ok": True})
+
+    assert mcp_server.login_start("app.cirro.bio")["ok"]
+    assert not (tmp_path / ".cirro").exists()
+    assert (session_mod.tenant_dir("app.cirro.bio") / ".cirro"
+            / session_mod.SESSION_FILE).is_file()
+
+
+def test_login_start_given_a_directory_still_binds_that_directory(tmp_path, monkeypatch):
+    """Naming one is how you ask for a folder of its own."""
+    from cirro_agent import mcp_server
+    monkeypatch.setattr(mcp_server.runner, "call", lambda request, **kw: {"ok": True})
+
+    assert mcp_server.login_start("app.cirro.bio", directory=str(tmp_path))["ok"]
+    assert (tmp_path / ".cirro" / session_mod.SESSION_FILE).is_file()
+    assert not session_mod.bound_tenants()

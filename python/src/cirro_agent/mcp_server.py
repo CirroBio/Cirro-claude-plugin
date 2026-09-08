@@ -65,18 +65,34 @@ def _start(directory: Optional[str]) -> Optional[Path]:
     name="session_init",
     title="Create a Cirro session folder",
     description=(
-        "Create the .cirro session folder in a working directory and bind it to one "
-        "Cirro tenant. The folder holds this directory's credential and cache, kept "
-        "separate from the machine-wide ~/.cirro. Call this once per project directory; "
-        "it is never created implicitly. Pass `directory` to bind one other than the "
-        "working directory. Creates a directory and writes to it."
+        "Create the .cirro session folder and bind it to one Cirro tenant. The folder "
+        "holds a credential and cache, kept separate from the machine-wide ~/.cirro. "
+        "It is never created implicitly.\n\n"
+        "Pass `shared=true` to sign in for the tenant rather than for one directory: "
+        "the folder is created outside every checkout, and any directory with nothing "
+        "bound nearer resolves to it. Prefer this unless a directory genuinely needs "
+        "its own credential -- it survives plugin installs, which a folder inside a "
+        "checkout does not.\n\n"
+        "Otherwise the folder is created in the working directory, or in `directory` "
+        "when given. Creates a directory and writes to it."
     ),
 )
-def session_init(base_url: str, directory: Optional[str] = None) -> dict:
-    """Bind a working directory to a Cirro tenant."""
+def session_init(base_url: str, directory: Optional[str] = None,
+                 shared: bool = False) -> dict:
+    """Bind a directory, or the whole machine, to a Cirro tenant."""
     try:
-        target = Path(directory).expanduser().resolve() if directory else Path.cwd()
-        current = session_mod.init(target, base_url)
+        if shared:
+            if directory:
+                return errors.NotSupported(
+                    "session_init takes `shared` or `directory`, not both.",
+                    what="A shared session folder's location is derived from the tenant.",
+                    user_action=("Drop `directory` to sign in for the tenant, or drop "
+                                 "`shared` to bind that directory alone."),
+                ).to_dict()
+            current = session_mod.init_tenant(base_url)
+        else:
+            target = Path(directory).expanduser().resolve() if directory else Path.cwd()
+            current = session_mod.init(target, base_url)
         tracked = session_mod.is_git_tracked(current.path)
         warnings = []
         if tracked:
@@ -102,8 +118,10 @@ def session_init(base_url: str, directory: Optional[str] = None) -> dict:
     title="Begin a Cirro login",
     description=(
         "Start a device-code login and return immediately with a URL and code to relay "
-        "to the person. Never blocks. Creates the session folder when given a base_url, "
-        "so it needs no session_init first, and reports a missing runtime or a "
+        "to the person. Never blocks. Creates the session folder when given a base_url "
+        "-- for the tenant, reachable from every directory, unless `directory` names "
+        "one to bind instead -- so it needs no session_init first, and reports a "
+        "missing runtime or a "
         "mismatched tenant itself, so it needs no doctor pass first -- call it first. "
         "If the folder already holds a working credential it reports the authenticated "
         "identity instead, proved by a live API call, refreshing an expired token "
@@ -127,23 +145,39 @@ def login_start(base_url: Optional[str] = None,
         if not base_url:
             return exc.to_dict()
         try:
-            current = session_mod.init(start or Path.cwd(), base_url)
+            # A named `directory` means that folder; otherwise sign in for the tenant,
+            # which every directory can reach and no install overwrites. Binding the
+            # working directory by default is how a credential ends up inside whatever
+            # checkout the person happened to be standing in.
+            current = (session_mod.init(start, base_url) if start
+                       else session_mod.init_tenant(base_url))
         except errors.AgentError as init_error:
             return init_error.to_dict()
     except errors.AgentError as exc:
         return exc.to_dict()
     if base_url and session_mod._normalize_base_url(base_url) != current.base_url:
-        # One folder serves one tenant. Silently logging in to the bound tenant while
-        # the caller named a different one is the wrong kind of safe: it answers a
-        # question nobody asked, and the two paths that used to surface the binding
-        # (session_init, doctor) are no longer on the login path.
-        return errors.TenantMismatch(
-            f"This folder is bound to {current.base_url}, not {base_url}.",
-            what="A session folder serves exactly one Cirro tenant.",
-            user_action=(f"Work in a directory bound to {base_url}, or drop the "
-                         f"base_url argument to log in to {current.base_url}."),
-            retry_with=[{"tool": "login_start"}],
-        ).to_dict()
+        if session_mod.is_tenant_dir(current.path):
+            # Resolved by falling back to a tenant nobody bound to this directory, so
+            # naming another one is not a conflict -- it is a second tenant being
+            # signed in to. Tenant folders are one per host, so this rebinds nothing.
+            try:
+                current = session_mod.init_tenant(base_url)
+            except errors.AgentError as init_error:
+                return init_error.to_dict()
+        else:
+            # One folder serves one tenant. Silently logging in to the bound tenant
+            # while the caller named a different one is the wrong kind of safe: it
+            # answers a question nobody asked, and the two paths that used to surface
+            # the binding (session_init, doctor) are no longer on the login path.
+            return errors.TenantMismatch(
+                f"This folder is bound to {current.base_url}, not {base_url}.",
+                what="A session folder serves exactly one Cirro tenant.",
+                user_action=(f"Work in a directory bound to {base_url}, sign in for "
+                             f"the tenant with session_init(shared=true), or drop the "
+                             f"base_url argument to log in to {current.base_url}."),
+                retry_with=[{"tool": "session_init",
+                             "base_url": base_url, "shared": True}],
+            ).to_dict()
     return runner.call(request, session=current)
 
 
