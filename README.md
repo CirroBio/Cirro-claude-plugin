@@ -59,6 +59,39 @@ You do not have to move to use another one. Ask Claude to work against a differe
 signed-in directory and it will, naming the tenant it used — the same thing
 `cirro-agent read ... --dir <path>` does on the command line.
 
+#### Which directory to sign in
+
+Sign in at the directory you actually mean, and pick one that will still be there
+tomorrow.
+
+**Not a parent of your work.** The search walks up from wherever Claude is working,
+stopping at the project directory or the enclosing git checkout — and at your home
+directory when it is neither. A `.cirro/` high up therefore captures everything
+beneath it, so signing in at `~` or `~/projects` quietly binds every project under it
+to that one tenant. This is the usual cause of a session talking to the wrong Cirro.
+
+**Not inside anything that gets copied or replaced.** Installing or updating a plugin
+copies its whole directory, and a signed-in `.cirro/` goes with it — tenant, username
+and, where your OS keychain is unavailable, the token itself in plain text. The same
+applies to a git worktree you intend to delete. If you want one login you can reach
+from anywhere, keep a directory for the tenant and sign in there:
+
+```bash
+mkdir -p ~/cirro/app.cirro.bio
+```
+
+Then work against it from any project with `--dir ~/cirro/app.cirro.bio`, or just ask
+Claude to use it. Each tenant gets its own directory, and none of them is anywhere
+that an install will overwrite.
+
+**Sharing one with another session is fine.** Two Claude sessions can work against
+the same signed-in directory at once. If both find an expired token in the same
+moment, one renews it and the other waits and picks up the result, rather than both
+asking Cirro at once — which used to risk being throttled, and a throttled refresh
+discards the stored login. A token that expires in the middle of a long upload is
+still renewed the old way, so a transfer running for hours alongside another session
+remains the one case worth staggering.
+
 ## Looking at things
 
 Ask in plain language and Claude handles the rest. Underneath it uses a read-only

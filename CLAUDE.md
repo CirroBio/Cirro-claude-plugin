@@ -243,6 +243,20 @@ reference in the project. It stays unimplemented, and the README says to use the
 **Never call `DataPortal()` bare.** With no cached token it enters a device-code login
 and blocks until the code expires. Build auth explicitly via `worker/portal.py`.
 
+**The SDK's token refresh is not safe across processes.** `DeviceCodeAuth` guards it
+with a `threading.Lock` built per client, and every operation here is a fresh
+subprocess, so two workers on one session folder refresh in the same moment. The
+losing call does not merely fail: `_refresh_access_token` answers *any* `ClientError`
+-- a throttle above all -- by calling `_clear_token_info()`, which deletes the shared
+credential for both workers and every later one, unrecoverably. `renew_under_lock`
+takes an exclusive `flock` on `<session>/auth.lock`, re-reads the store under it so N
+workers waking together cost one Cognito call rather than N, and renews within
+`REFRESH_MARGIN` of expiry rather than waiting for the SDK to notice. It is held
+across the renewal alone, never the operation: blocking a read behind an unrelated
+four-hour upload would be worse than the bug it fixes. A token that expires *during* a
+transfer is still refreshed lazily, outside the lock. The SDK internals this drives
+are pinned in `test_runtime_contract.py`.
+
 **`get_all_records` truncates silently** and overshoots its own ceiling. Paginate
 locally so truncation is detectable and `scan_complete` can be honest.
 

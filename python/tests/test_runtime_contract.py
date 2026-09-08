@@ -151,3 +151,28 @@ def test_importing_any_entry_point_does_not_load_the_sdk():
     assert not leaked, (
         "these SDK modules load at import time, defeating the CIRRO_HOME contract: "
         f"{leaked}")
+
+
+def test_device_code_auth_still_exposes_what_the_refresh_lock_drives():
+    """`portal.renew_under_lock` serializes the SDK's own token refresh across worker
+    processes, which means reaching past its public surface -- the SDK guards the
+    refresh with a per-process `threading.Lock` and offers no cross-process story.
+
+    Pin the names here so a cirro upgrade that renames one fails the build. Silently
+    disarming the lock would restore the bug it exists to prevent: concurrent refreshes
+    provoke a Cognito throttle, and `_refresh_access_token` deletes the stored
+    credential on any ClientError.
+    """
+    import inspect
+    from cirro.auth.device_code import DeviceCodeAuth
+
+    for method in ("_load_token_info", "_update_token_metadata",
+                   "_refresh_access_token"):
+        assert callable(getattr(DeviceCodeAuth, method, None)), (
+            f"DeviceCodeAuth.{method} is gone; portal.renew_under_lock drives it")
+
+    # Set in __init__, so they are instance state rather than class attributes.
+    source = inspect.getsource(DeviceCodeAuth)
+    for attribute in ("_token_info", "access_token_expiry"):
+        assert f"self.{attribute} =" in source, (
+            f"DeviceCodeAuth no longer sets {attribute}; portal._refresh_due reads it")

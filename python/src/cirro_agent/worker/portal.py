@@ -10,8 +10,10 @@ Instead we build `DeviceCodeAuth` ourselves with `enable_cache=True` and
 `await_completion=False`, and treat "no token was loaded" as a typed error rather
 than an invitation to log in.
 """
+import fcntl
 import os
 import socket
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -22,6 +24,11 @@ AUTH_CLIENT_CREDENTIALS = "client_credentials"
 AUTH_ACCESS_TOKEN = "access_token"
 
 _LOGIN_HINT = "Run the cirro-session skill, or the login_start MCP tool, to log in."
+
+# A token this near expiry is renewed up front, where the renewal can be serialized,
+# rather than lazily on whichever call first notices.
+REFRESH_MARGIN = timedelta(seconds=120)
+LOCK_NAME = "auth.lock"
 
 
 def probe_network(base_url: str) -> None:
@@ -78,6 +85,44 @@ def auth_mode() -> str:
     if os.environ.get("CIRRO_CLIENT_ID") and os.environ.get("CIRRO_CLIENT_SECRET"):
         return AUTH_CLIENT_CREDENTIALS
     return AUTH_DEVICE_CODE
+
+
+def _refresh_due(auth) -> bool:
+    expiry = getattr(auth, "access_token_expiry", None)
+    return expiry is not None and datetime.now() >= expiry - REFRESH_MARGIN
+
+
+def renew_under_lock(auth) -> None:
+    """Renew a near-expired access token with the session folder locked.
+
+    The SDK guards its refresh with a `threading.Lock` built per client, and every
+    operation here is a fresh subprocess -- so two workers sharing a session folder
+    refresh in the same moment and nothing stands between them. That would be harmless
+    if the losing call merely failed, but `_refresh_access_token` answers *any*
+    ClientError, throttling included, by calling `_clear_token_info()`: the shared
+    credential is deleted outright, for both workers and every later one, and nothing
+    recovers it because the refresh token is gone from the store.
+
+    Waiting for the lock is not the same as still needing a refresh, so the token is
+    re-read from the store first: N workers waking together cost one Cognito call
+    rather than N serialized ones.
+
+    Held across the renewal alone, never the operation. A refresh is a single call,
+    whereas blocking a read behind an unrelated four-hour upload would be a worse bug
+    than this one -- so a token that expires *during* a long transfer is still
+    refreshed lazily by the SDK, outside this lock. Closing that window too would mean
+    wrapping every call the SDK makes.
+    """
+    if auth._token_info is None or not _refresh_due(auth):
+        return
+    with open(Path(os.environ["CIRRO_HOME"], LOCK_NAME), "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        persisted = auth._load_token_info()
+        if persisted:
+            auth._token_info = persisted
+            auth._update_token_metadata()
+        if _refresh_due(auth):
+            auth._refresh_access_token()
 
 
 def build_auth(base_url: str, *, start_flow: bool = False) -> Tuple[object, object]:
@@ -142,6 +187,7 @@ def build_auth(base_url: str, *, start_flow: bool = False) -> Tuple[object, obje
             ),
             user_action=_LOGIN_HINT,
         )
+    renew_under_lock(auth)
     return auth, config
 
 
