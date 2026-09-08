@@ -293,12 +293,11 @@ def _resolve_params(reader: reads.Reader, process_id: str,
                         f"({type(exc).__name__}), so the parameters below were not "
                         f"checked."]
     fields = reads.spec_shape(reader, process_id)
-    injected = _fill_server_required(params, fields)
-    if injected is not None:
+    if _fill_server_required(params, fields):
         warnings.append(
             f"{SERVER_REQUIRED_PARAM} was not supplied and the process declares a "
-            f"default, so the launch will send {injected!r}. Cirro rejects a launch "
-            f"that omits it.")
+            f"default, so the launch will send {params[SERVER_REQUIRED_PARAM]!r}. "
+            f"Cirro rejects a launch that omits it.")
     try:
         spec.validate_params(params)
     except Exception as exc:
@@ -334,17 +333,19 @@ def _resolve_params(reader: reads.Reader, process_id: str,
     return params, warnings
 
 
-def _fill_server_required(params: dict, fields: Optional[list]) -> Optional[str]:
+def _fill_server_required(params: dict, fields: Optional[list]) -> bool:
     """Materialise the declared default for the one parameter the API demands.
 
-    Mutates `params` and returns what it set, or None if it set nothing. A declared
-    default is a value the caller already has; leaving it unsent is not a choice they
-    made, and the API states no default of its own.
+    Mutates `params`; True if it set the value. A boolean rather than the value it
+    set, because a schema is free to declare a default of null and "set nothing" has
+    to stay distinguishable from it. A declared default is a value the caller already
+    has; leaving it unsent is not a choice they made, and the API states no default of
+    its own.
     """
     if fields is None or SERVER_REQUIRED_PARAM in params:
-        return None
+        return False
     declared = next((f for f in fields if f["path"] == SERVER_REQUIRED_PARAM), None)
     if declared is None or not declared["has_default"]:
-        return None
+        return False
     params[SERVER_REQUIRED_PARAM] = declared["default"]
-    return declared["default"]
+    return True

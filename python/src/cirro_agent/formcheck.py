@@ -45,7 +45,7 @@ NAME_BEARING = ("properties", "dependencies")
 OPAQUE = ("mm",)
 
 # Keys whose contents are fields of the object that owns them rather than fields of a
-# new nesting level. `iter_fields` treats each as transparent.
+# new nesting level. `walk_form` treats each as transparent.
 WRAPPERS = ("dependencies", "oneOf", "allOf", "anyOf", "then", "else")
 
 # The two levels a Problem carries. Callers outside this module read them through
@@ -198,7 +198,7 @@ def check_form(document: dict) -> list:
 def iter_dependency_branches(form: dict, prefix: str = "form") -> list:
     """Every `dependencies.<selector>.oneOf` in the form, as (where, selector, branches).
 
-    A second traversal, and deliberately so. `iter_fields` is the one walk over a
+    A second traversal, and deliberately so. `walk_form` is the one walk over a
     form's *fields*, and it makes a conditional wrapper transparent -- which is
     precisely the information a branch-level check needs. This one walks the
     wrappers and yields no fields at all, so the two cannot drift into disagreeing
@@ -298,13 +298,17 @@ def walk_form(form: dict, prefix: str = "form") -> list:
     addresses it. `dependencies` keys are the names of the *selector* fields depended
     upon, not a nesting level, so they are skipped rather than appended.
 
-    A record is {"path", "field", "name", "required", "conditional"}. `conditional`
-    means every occurrence of the field sat inside a wrapper, so it applies only when
-    that branch is selected; `required` is resolved after the walk because a later
-    branch can require a name an earlier one did not, and it counts only the
-    `required` arrays reached without passing through a wrapper -- a requirement
-    stated inside a branch binds only when that branch is chosen, and reporting it
-    flatly would demand a parameter nobody has to supply.
+    A record is {"path", "field", "name", "owner", "required", "conditional"}, where
+    `owner` is the path of the object declaring the field. `conditional` means every
+    occurrence of the field sat inside a wrapper, so it applies only when that branch
+    is selected; `required` is resolved after the walk because a later branch can
+    require a name an earlier one did not, and it counts only the `required` arrays
+    reached without passing through a wrapper -- a requirement stated inside a branch
+    binds only when that branch is chosen, and reporting it flatly would demand a
+    parameter nobody has to supply.
+
+    `conditional` and `required` are decided per path rather than per occurrence, so
+    the several records a restated selector produces agree with each other.
 
     Two consequences for callers: a path can repeat, because a selector is normally
     restated inside each of its own branches, and `field` can be a bare `true`/`false`
@@ -361,7 +365,7 @@ def form_paths(document: dict) -> set:
     The JSONPath mirrors the form's `properties` nesting exactly, at whatever depth --
     an ungrouped form yields `$.dataset.params.<field>`, a grouped one
     `$.dataset.params.<group>.<field>`, and nested groups go deeper. Conditional
-    wrappers are transparent; `iter_fields` documents that rule and implements it.
+    wrappers are transparent; `walk_form` documents that rule and implements it.
     """
     form = (document or {}).get("form") or {}
     return {path for path, _field in iter_fields(form, "$.dataset.params")}

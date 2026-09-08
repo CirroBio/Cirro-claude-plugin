@@ -643,3 +643,15 @@ def test_the_elided_log_span_is_declared_with_a_call_that_returns_it():
 def test_a_log_with_no_elided_span_declares_nothing():
     from cirro_agent.worker.read_summaries import _log_middle_left_out
     assert _log_middle_left_out({"lines": 12}, "ds_1", ["proj_a"]) == []
+
+
+def test_a_reference_path_that_is_already_absolute_is_not_prefixed_twice():
+    """`File.from_file_entry` branches on whether a FileEntry path is absolute, so
+    both shapes are this field's contract and neither may be assumed."""
+    from cirro_api_client.v1.models import FileEntry, Reference
+    from cirro_agent.worker import rows as R
+    absolute = "s3://project-abc123/resources/data/references/t/r/x.bed"
+    obj = Reference(id="ref_1", name="r", description="", type_="t",
+                    created_by="sminot", created_at=None,
+                    files=[FileEntry(path=absolute, size=1)])
+    assert R.reference(obj, "abc123")["s3_paths"] == [absolute]

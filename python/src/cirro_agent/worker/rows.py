@@ -288,15 +288,20 @@ def sample(obj) -> dict:
 
 
 # Where reference data lives, taken from the SDK's own upload path
-# (`services/references.py`): the listing returns each file relative to this. A
-# file-valued pipeline parameter takes a full s3:// path and nothing resolves a
-# reference name into one, so passing the name validated clean and then failed two
-# minutes into a billed run -- "does not match [\\S+\\.(bed|interval_list)$]".
+# (`services/references.py`). A file-valued pipeline parameter takes a full s3:// path
+# and nothing resolved a reference name into one, so passing the name validated clean
+# and then failed two minutes into a billed run -- "does not match
+# [\\S+\\.(bed|interval_list)$]".
 REFERENCE_BASE = "s3://project-{project_id}/resources/data/references"
 
 
 def reference_s3(project_id: Optional[str], path: str) -> Optional[str]:
-    """The absolute location of one reference file, or None without a project."""
+    """The absolute location of one reference file, or None without a project.
+
+    A FileEntry path may already be absolute: `cirro.models.file.File.from_file_entry`
+    branches on exactly that, so both shapes are the API's own contract for this field
+    rather than a guess about which one arrives.
+    """
     if path.startswith("s3://"):
         return path
     if not project_id:

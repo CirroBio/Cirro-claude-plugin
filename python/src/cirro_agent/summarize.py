@@ -583,13 +583,13 @@ def _clip(value: Any) -> Any:
     return value
 
 
-def param_paths(actual: dict, fields: Optional[list]) -> list:
+def _param_paths(actual: dict, fields: Optional[list]) -> list:
     """Every path a submitted params object addresses, in the form's own terms.
 
     Descends only where the form declares a group, so a parameter whose value is
     legitimately a free-form object counts as one path rather than one per key inside
-    it. Both the read path and `plan(run_analysis)` classify against this, so a key
-    they disagree about cannot exist.
+    it. The read path and `plan(run_analysis)` both classify through `params`, so a
+    path they disagree about cannot exist.
     """
     groups = {f["path"] for f in (fields or []) if f["is_group"]}
 
@@ -606,7 +606,7 @@ def param_paths(actual: dict, fields: Optional[list]) -> list:
     return found
 
 
-def misplaced_param(path: str, fields: Optional[list]) -> Optional[str]:
+def _misplaced_param(path: str, fields: Optional[list]) -> Optional[str]:
     """Where an undeclared top-level key was probably meant to go.
 
     A form does not set `additionalProperties: false`, so a parameter sent flat when
@@ -636,8 +636,9 @@ def params(actual: dict, fields: Optional[list] = None) -> dict:
     actual = actual or {}
     by_path = {f["path"]: f for f in fields} if fields is not None else None
 
+    submitted = _param_paths(actual, fields)
     non_default, defaulted, unknown = {}, [], []
-    for path in sorted(param_paths(actual, fields)):
+    for path in sorted(submitted):
         leaf = path.rsplit(".", 1)[-1]
         spec = by_path.get(path) if by_path is not None else None
         if by_path is not None and spec is None:
@@ -664,7 +665,7 @@ def params(actual: dict, fields: Optional[list] = None) -> dict:
     }
     if unknown:
         misplaced = {path: where for path in unknown
-                     if (where := misplaced_param(path, fields))}
+                     if (where := _misplaced_param(path, fields))}
         out["unknown_note"] = (
             "These paths are not declared by the process parameter spec. Cirro will "
             "accept them and the pipeline will ignore them -- usually a typo."
@@ -678,12 +679,13 @@ def params(actual: dict, fields: Optional[list] = None) -> dict:
                 "instead of inside their group."
             )
     if fields is not None:
-        submitted = set(param_paths(actual, fields))
+        present = set(submitted)
+        # A requirement inside a group binds only once that group is sent, so an
+        # absent optional group is not a pile of missing parameters.
         out["missing_required"] = [
             f["path"] for f in fields
-            if f["required"] and f["path"] not in submitted
-            and ("." not in f["path"]
-                 or f["path"].rsplit(".", 1)[0] in submitted)
+            if f["required"] and f["path"] not in present
+            and ("." not in f["path"] or f["path"].rsplit(".", 1)[0] in present)
         ]
     return out
 

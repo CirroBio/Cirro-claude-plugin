@@ -170,12 +170,19 @@ because when both were called `folder` one of them was a footgun.
 `dependencies.<selector>.oneOf[].properties`, and `dependencies` keys are *selector field
 names*, not a nesting level. Any analysis that walks only `properties` will report live,
 correctly-mapped fields as dangling — this has already produced one wrong answer to a
-user. Use `formcheck.iter_fields()`, which is the one implementation of that walk; it
-yields `(path, field)` pairs, covers every wrapper in `formcheck.WRAPPERS`
+user. Use `formcheck.walk_form()`, which is the one implementation of that walk; it
+yields a record per field carrying its path, its owner, whether the owner requires it
+and whether it exists only inside a branch, covers every wrapper in `formcheck.WRAPPERS`
 (`dependencies`, `oneOf`, `allOf`, `anyOf`, `then`, `else`) and holds the
-selector-is-transparent rule in one place. `form_paths()` is its path-only view. There
-were two walks once, and they had already drifted apart over `then`/`else` -- which is
-how the wrong answer above got out.
+selector-is-transparent rule in one place. `iter_fields()` is its `(path, field)` view
+and `form_paths()` its path-only one -- views, never re-traversals. There were two walks
+once, and they had already drifted apart over `then`/`else` -- which is how the wrong
+answer above got out.
+
+A field's `required` counts only the `required` arrays reached without passing through a
+wrapper. A requirement stated inside a branch binds only when that branch is selected,
+so reporting it flatly would demand a parameter nobody has to supply -- and both
+`missing_required` warnings and `process_params` read that flag.
 
 **Configuration assets may be authored, not only generated.** `assets_dir` is a
 first-class alternative to `design_spec` on `create_process` and
