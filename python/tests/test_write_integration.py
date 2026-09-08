@@ -833,3 +833,15 @@ def test_a_reference_name_with_a_space_is_refused_at_plan_time(
     assert result["error"]["field"] == "name"
     assert result["error"]["remediation"]["retry_with"][0]["args"]["name"] == \
         "chr20_0_20Mb"
+
+
+def test_a_transfer_that_cannot_finish_is_flagged_before_the_approval():
+    """The plan already counts the bytes, so the ceiling can be stated while the
+    person is still deciding rather than discovered when the worker is killed."""
+    from cirro_agent import runner
+    from cirro_agent.worker import dataset_ops
+    budget = runner.TRANSFER_TIMEOUT * dataset_ops.OBSERVED_TRANSFER_BYTES_PER_S
+    assert dataset_ops._too_big_to_finish(int(budget * 0.9), "Upload") is None
+    warning = dataset_ops._too_big_to_finish(int(budget * 3), "Upload")
+    assert warning is not None
+    assert "web UI" in warning and "Upload fewer files" in warning

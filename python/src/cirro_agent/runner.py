@@ -13,7 +13,14 @@ from typing import Optional
 
 from . import errors, session as session_mod
 
-WORKER_TIMEOUT = 900  # uploads and downloads are legitimately slow
+WORKER_TIMEOUT = 900  # the budget for an API call, however slow the tenant is
+
+# A transfer is bounded by bandwidth, not by the API, so it gets its own budget. 900s
+# is right for a request and wrong for 3.4 GB: at the ~2.3 MB/s measured against a live
+# tenant it put the practical ceiling near 2 GB, and the upload that hit it was killed
+# having moved no files at all, leaving an orphaned PENDING dataset behind.
+TRANSFER_TIMEOUT = 4 * 60 * 60
+TRANSFER_OPS = frozenset({"upload_dataset", "upload_reference", "download_files"})
 READY_MARKER = "cirro-agent-ready.json"
 # The maintainer's environment, built by the README's uv sync. It sits beside the
 # installed runtime rather than in the checkout, for the reason plugin_data() gives.
@@ -94,8 +101,42 @@ def child_environment(session: session_mod.Session) -> dict:
     return env
 
 
+def _transfer_op(request: dict, session: session_mod.Session) -> Optional[str]:
+    """The transfer this request performs, or None if it is not one.
+
+    An apply carries only a plan id, so the operation is read back from the stored
+    record. That read chooses a time budget and nothing else -- the worker still
+    validates the plan and is still the thing that refuses it.
+    """
+    verb = request.get("verb")
+    if verb == "plan":
+        return request["op"] if request.get("op") in TRANSFER_OPS else None
+    if verb != "apply":
+        return None
+    from . import plans
+    op = plans.stored_op(session, request.get("plan_id") or "")
+    return op if op in TRANSFER_OPS else None
+
+
+def _timeout_advice(op: Optional[str]) -> str:
+    """What a person can actually do about a killed worker.
+
+    Never the upstream command-line client: scripts/gate.py blocks it, so advising it
+    sends the reader at a wall. The web UI is the one route out of the plugin that
+    works.
+    """
+    if op == "upload_dataset":
+        return ("Upload fewer files at a time, or use the Cirro web UI. The dataset "
+                "may already exist in PENDING with nothing in it -- list the "
+                "project's datasets and delete it before retrying, or the retry "
+                "leaves a second one behind.")
+    if op in TRANSFER_OPS:
+        return "Transfer fewer files at a time, or use the Cirro web UI."
+    return "Narrow the request, or use the Cirro web UI."
+
+
 def call(request: dict, *, session: Optional[session_mod.Session] = None,
-         start: Optional[Path] = None, timeout: int = WORKER_TIMEOUT) -> dict:
+         start: Optional[Path] = None, timeout: Optional[int] = None) -> dict:
     """Execute one operation and return its response dict."""
     try:
         session = session or session_mod.load(start)
@@ -103,6 +144,10 @@ def call(request: dict, *, session: Optional[session_mod.Session] = None,
         python = interpreter()
     except errors.AgentError as exc:
         return exc.to_dict()
+
+    op = _transfer_op(request, session)
+    if timeout is None:
+        timeout = TRANSFER_TIMEOUT if op else WORKER_TIMEOUT
 
     payload = dict(request)
     payload["base_url"] = session.base_url
@@ -120,7 +165,7 @@ def call(request: dict, *, session: Optional[session_mod.Session] = None,
             f"The operation did not finish within {timeout}s.",
             what="The worker was terminated.",
             retry_with=[{"note": "retry, or narrow the request"}],
-            user_action="For large transfers, use the Cirro CLI or web UI instead.",
+            user_action=_timeout_advice(op),
         ).to_dict()
 
     if completed.stdout.strip():

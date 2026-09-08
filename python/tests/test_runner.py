@@ -94,3 +94,35 @@ def test_the_shell_resolver_and_the_runner_agree_on_the_runtime_location(monkeyp
     for var in ("CIRRO_AGENT_PLUGIN_DATA", "CLAUDE_PLUGIN_DATA"):
         monkeypatch.delenv(var, raising=False)
     assert Path(shell) == runner.plugin_data()
+
+
+# --- a transfer is bounded by bandwidth, not by the API ----------------------
+
+def test_only_a_transfer_gets_the_bandwidth_budget(bound):
+    """900s is the budget for a request. A 3.4 GB upload was killed at 900s having
+    moved no files, leaving an orphaned PENDING dataset to delete by hand."""
+    assert runner.TRANSFER_TIMEOUT > runner.WORKER_TIMEOUT
+    assert runner._transfer_op({"verb": "plan", "op": "upload_dataset"}, bound) == \
+        "upload_dataset"
+    assert runner._transfer_op({"verb": "plan", "op": "update_dataset"}, bound) is None
+    assert runner._transfer_op({"verb": "query", "entity": "dataset"}, bound) is None
+
+
+def test_an_applys_budget_comes_from_the_plan_it_names(bound):
+    from cirro_agent import plans
+    plan = plans.create(bound, op="upload_dataset", args={}, summary="s",
+                        request_args={}, risk="cirro_write", username="sminot")
+    assert runner._transfer_op({"verb": "apply", "plan_id": plan.plan_id}, bound) == \
+        "upload_dataset"
+    # A plan that cannot be read still reaches the worker, which is what refuses it.
+    assert runner._transfer_op({"verb": "apply", "plan_id": "pl_nope"}, bound) is None
+
+
+def test_the_timeout_advice_never_points_at_a_blocked_command():
+    """`scripts/gate.py` blocks the upstream client, so advising it sent the reader
+    at a wall."""
+    for op in (None, "upload_dataset", "download_files"):
+        advice = runner._timeout_advice(op)
+        assert "web UI" in advice
+        assert "CLI" not in advice
+    assert "PENDING" in runner._timeout_advice("upload_dataset")

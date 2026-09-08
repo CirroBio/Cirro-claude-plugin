@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from .. import errors, summarize as S
+from .. import errors, runner, summarize as S
 from . import mutations, reads, rows as R
 from .mutations import (Draft, Op, RISK_DESTRUCTIVE, RISK_LOCAL, RISK_WRITE, _dataset, _inv,
                         _need, _project, _tag_models, _target_folders, _wire_tags)
@@ -345,6 +345,25 @@ def _scan_folder(folder: Path, include_hidden: bool = False) -> tuple:
     return found, total
 
 
+# Sustained throughput measured against a live tenant. A rate, not a promise: it is
+# used only to say BEFORE the approval that a transfer cannot finish inside the
+# worker's lifetime. Discovering that afterwards costs a killed worker and, for an
+# upload, a PENDING dataset with nothing in it that someone has to delete by hand.
+OBSERVED_TRANSFER_BYTES_PER_S = 2.3 * 1024 * 1024
+
+
+def _too_big_to_finish(total_bytes: int, verb: str) -> Optional[str]:
+    """A warning when the transfer cannot plausibly complete, or None."""
+    seconds = (total_bytes or 0) / OBSERVED_TRANSFER_BYTES_PER_S
+    if seconds <= runner.TRANSFER_TIMEOUT:
+        return None
+    return (f"At the ~{OBSERVED_TRANSFER_BYTES_PER_S / 1024 ** 2:.1f} MB/s this plugin "
+            f"has measured, {S.human_bytes(total_bytes)} would take about "
+            f"{seconds / 3600:.1f} h, and the worker is stopped at "
+            f"{runner.TRANSFER_TIMEOUT // 3600} h. {verb} fewer files at a time, or "
+            f"use the Cirro web UI.")
+
+
 def plan_upload_dataset(reader: reads.Reader, args: dict) -> Draft:
     # `source_dir` is the local directory; `folder` is the Cirro folder the dataset
     # lands in. Both were once called `folder`, which made one of the two a footgun.
@@ -395,6 +414,9 @@ def plan_upload_dataset(reader: reads.Reader, args: dict) -> Draft:
         "  Files:",
     ]
     lines += [f"    {p['template']}  x{p['n']}" for p in patterns]
+    over_budget = _too_big_to_finish(total_bytes, "Upload")
+    if over_budget:
+        warnings.append(over_budget)
     return Draft(
         args={"project_id": project["id"], "process_id": process["id"],
               "name": args["name"], "description": args.get("description", ""),
@@ -588,6 +610,9 @@ def plan_download_files(reader: reads.Reader, args: dict) -> Draft:
     lines += [f"    {p['template']}  x{p['n']}" for p in patterns]
     lines += ["", "This writes to the local filesystem, not to Cirro."]
 
+    over_budget = _too_big_to_finish(total_bytes, "Download")
+    if over_budget:
+        warnings.append(over_budget)
     return Draft(args={"project_id": project["id"], "dataset_id": row["id"],
                        "destination": str(destination),
                        "files": [e["path"] for e in entries] if glob else None,

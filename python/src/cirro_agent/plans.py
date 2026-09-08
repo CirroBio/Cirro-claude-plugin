@@ -154,6 +154,25 @@ def _plan_path(session: Session, plan_id: str) -> Path:
     return session.path / "plans" / f"{plan_id}.json"
 
 
+def stored_op(session: Session, plan_id: str) -> Optional[str]:
+    """The operation a stored plan names, or None if there is no readable record.
+
+    Deliberately not `load`: this only sizes the worker's timeout, and choosing a
+    time budget is not an authorization decision. A plan too broken to read here must
+    still reach the worker, which is what refuses it with the right error.
+    """
+    if not PLAN_ID_PATTERN.match(plan_id or ""):
+        return None
+    path = session.path / "plans" / f"{plan_id}.json"
+    if not path.is_file():
+        return None
+    try:
+        record = json.loads(path.read_text())
+    except ValueError:
+        return None
+    return record.get("op") if isinstance(record, dict) else None
+
+
 def create(session: Session, *, op: str, args: dict, summary: str,
            username: Optional[str], risk: str = "cirro_write",
            warnings: Optional[list] = None,
