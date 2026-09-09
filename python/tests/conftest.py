@@ -86,11 +86,13 @@ def _user_payload(username="sminot", email="sminot@cirro.test", notifications=Tr
     ).to_dict()
 
 
-def _process_payload(pid, name, executor, category, pipeline_type, description=""):
+def _process_payload(pid, name, executor, category, pipeline_type, description="",
+                     parents=(), children=()):
     from cirro_api_client.v1.models import Process, Executor
     return Process(
         id=pid, name=name, description=description, data_type="paired_dnaseq",
-        executor=Executor(executor), child_process_ids=[], parent_process_ids=[],
+        executor=Executor(executor), child_process_ids=list(children),
+        parent_process_ids=list(parents),
         linked_project_ids=[], is_tenant_wide=True, allow_multiple_sources=True,
         uses_sample_sheet=True, is_archived=False, tags=[],
         category=category, pipeline_type=pipeline_type,
@@ -237,12 +239,20 @@ def fake_tenant(monkeypatch):
         _project_payload("proj_b", "Sandbox", "scratch"),
     ]
     processes = [
+        # Both pipelines consume ingested data, which is what makes an empty source
+        # list a mistake for them and not for `proc_fetch` -- but Cirro records that
+        # relationship from either end, so one of each is here on purpose.
         _process_payload("proc_rnaseq", "nf-core/rnaseq v3.14", "NEXTFLOW",
-                         "Transcriptomics", "nf-core", "RNA-seq"),
+                         "Transcriptomics", "nf-core", "RNA-seq",
+                         parents=("proc_ingest",)),
         _process_payload("proc_sarek", "nf-core/sarek v3.4", "NEXTFLOW",
                          "Genomics", "nf-core", "WGS"),
         _process_payload("proc_ingest", "Paired DNA sequencing", "INGEST",
-                         "Upload", "ingest", "upload"),
+                         "Upload", "ingest", "upload", children=("proc_sarek",)),
+        # Nothing feeds this one, after `process-nf-core-fetchngs`: it downloads from
+        # a public archive and is launched with no input dataset at all.
+        _process_payload("proc_fetch", "Public Download", "NEXTFLOW",
+                         "Data Download", "nf-core", "fetch from SRA"),
     ]
 
     with responses_lib.RequestsMock(assert_all_requests_are_fired=False) as rsps:
@@ -286,8 +296,13 @@ def fake_tenant(monkeypatch):
 LAUNCHED_DATASET = "ds_new_0001"
 
 PARAMETER_SPEC = {
+    # `genome` carries its meaning in the key; `aligner` carries it in the labels, the
+    # way a bare `command` string does. Both shapes are here so process_params is
+    # tested against a parameter it cannot explain from the name alone.
     "form": {"type": "object",
-             "properties": {"aligner": {"type": "string", "default": "star"},
+             "properties": {"aligner": {"type": "string", "default": "star",
+                                        "title": "Alignment tool",
+                                        "description": "Which aligner to run"},
                             "genome": {"type": "string"}},
              "required": ["genome"]},
     "ui": {},

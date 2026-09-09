@@ -185,9 +185,39 @@ def test_plan_refuses_a_dataset_name_and_hands_back_the_id(writable_tenant, sess
     assert result["error"]["remediation"]["candidates"][0]["id"] == "ds_0000"
 
 
-def test_plan_requires_an_input_dataset(writable_tenant, session_dir):
+def test_plan_requires_an_input_dataset_for_a_pipeline_something_feeds(
+        writable_tenant, session_dir):
     result = plan_run(writable_tenant, session_dir, source_dataset_ids=[])
     assert result["error"]["code"] == "INVALID_QUERY"
+
+
+def test_a_pipeline_nothing_feeds_launches_with_no_input_dataset(
+        writable_tenant, session_dir):
+    """The platform allows it at every layer -- `sourceDatasetIds` is @NotNull rather
+    than @NotEmpty, the only server check is `size() > 1 && !allowMultipleSources()`,
+    and the portal gates submit on `hasParentProcesses && !sourceDatasets.length`.
+    Demanding an input here made every parentless pipeline, `fetchngs` among them,
+    unlaunchable through the plugin."""
+    result = plan_run(writable_tenant, session_dir, process="proc_fetch",
+                      source_dataset_ids=[], params={})
+    assert result["ok"], result
+    # The approval text is the only thing the person reads, so it has to say that no
+    # input is the deliberate case rather than render "0 dataset(s), 0 files, 0 B".
+    assert "Inputs       none" in result["rendered"]
+    record = json.loads(
+        (session_dir.path / "plans" / f"{result['plan_id']}.json").read_text())
+    assert record["args"]["source_dataset_ids"] == []
+
+
+def test_the_parentless_rule_counts_both_directions(writable_tenant, session_dir):
+    """Cirro records "this process can feed that one" from either end: `proc_rnaseq`
+    declares `parent_process_ids`, and `proc_sarek` is named in `proc_ingest`'s
+    `child_process_ids`. The portal unions the two before deciding, and a check that
+    read only the first would let an empty input through for half the pipelines."""
+    for process in ("proc_rnaseq", "proc_sarek"):
+        result = plan_run(writable_tenant, session_dir, process=process,
+                          source_dataset_ids=[], params={})
+        assert result["error"]["code"] == "INVALID_QUERY", process
 
 
 def test_plan_writes_a_private_single_use_record(writable_tenant, session_dir):

@@ -74,7 +74,8 @@ def do_process_params(request: dict) -> dict:
 
     fields = spec_shape(reader, match["id"])
     parameters = [
-        {"path": f["path"], "type": f["type"], "required": f["required"],
+        {"path": f["path"], "type": f["type"], "title": f["title"],
+         "description": f["description"], "required": f["required"],
          "conditional": f["conditional"], "is_group": f["is_group"],
          "default": f["default"], "has_default": f["has_default"]}
         for f in (fields or [])

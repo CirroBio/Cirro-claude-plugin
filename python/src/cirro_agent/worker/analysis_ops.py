@@ -30,7 +30,15 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
     source_ids = args.get("source_dataset_ids") or []
     if not source_ids and args.get("dataset_id"):
         source_ids = [args["dataset_id"]]
-    if not source_ids:
+    # A pipeline nothing can feed takes no input dataset, and the platform supports
+    # that at every layer: `sourceDatasetIds` is @NotNull rather than @NotEmpty, the
+    # only server-side check is `size() > 1 && !allowMultipleSources()`, and the portal
+    # gates submit on `hasParentProcesses && !sourceDatasets.length`. Demanding one
+    # here made every parentless pipeline unlaunchable through the plugin -- including
+    # the shipped `process-nf-core-fetchngs`, which downloads from SRA and has no input
+    # by design. Where the process does have parents an empty selection is still a
+    # mistake, and still refused.
+    if not source_ids and reader.has_parent_processes(process["id"]):
         raise errors.InvalidQuery(
             "run_analysis needs at least one input dataset.",
             what="Name the dataset(s) to analyze.", field="source_dataset_ids",
@@ -92,12 +100,18 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
         f"  Output name  {args['name']}",
         f"  Into folder  {', '.join(resolved['folders']) or '(none)'}",
         f"  Compute      {compute_label}",
-        f"  Inputs       {len(inputs)} dataset(s), {total_files} files, "
-        f"{S.human_bytes(total_bytes)}",
     ]
-    for item in inputs:
-        lines.append(f"                 - {item['name']} ({item['id']}, "
-                     f"{item['file_count']} files, {item['size_human']})")
+    if inputs:
+        lines.append(f"  Inputs       {len(inputs)} dataset(s), {total_files} files, "
+                     f"{S.human_bytes(total_bytes)}")
+        for item in inputs:
+            lines.append(f"                 - {item['name']} ({item['id']}, "
+                         f"{item['file_count']} files, {item['size_human']})")
+    else:
+        # "0 dataset(s), 0 files, 0 B" reads like a mistake. This is the deliberate
+        # case, and the approval should say so.
+        lines.append("  Inputs       none -- nothing feeds this pipeline, so it runs "
+                     "with no input dataset, as it would from the web UI")
     if resolved["resume_dataset_id"]:
         lines.append(f"  Resume from  {resolved['resume_dataset_id']}")
     # Printed unconditionally: mail is sent by default now, and a default nobody reads

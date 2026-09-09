@@ -60,6 +60,17 @@ workflow_version                                    string   no        no
 Send each value at its declared `type` — an `array` is a list, not a comma-separated
 string.
 
+**Read `title` and `description` when the key name does not explain itself.** A
+`command` string means nothing without the description saying where the inputs are
+mounted and where output has to be written; the spec is the only place that is stated.
+
+**A parameter that wants a dataset's location, not its ID, needs the S3 root.** It is a
+detail-tier field, so ask for it:
+
+```bash
+cirro-agent read dataset <id> -p <project> --include s3
+```
+
 **`required` being short does not mean a group can be half-filled.** The groups
 themselves are usually optional, so almost nothing is required outright — but sending
 `analysis_type` at all obliges you to include `wes`. The response's `required_shape`

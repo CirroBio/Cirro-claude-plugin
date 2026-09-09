@@ -170,12 +170,23 @@ def check_form(document: dict) -> list:
                     "error", f"{where}.pathType",
                     f"pathType must be one of {PATH_TYPES}, not {path_type!r}"))
             # `process` makes it a dataset picker -- the user selects a whole dataset
-            # produced by those processes, so no file glob applies.
+            # produced by those processes, so no file glob applies. Its absence widens
+            # the picker rather than emptying it: `configure.fn.ts` starts from every
+            # completed dataset in the project, narrows only `if ('process' in field)`,
+            # and sets `readOnly` when nothing matches. So a bare dataset picker is
+            # legal and this is a warning; a bare references picker resolves nothing
+            # and stays an error.
             if not any(field.get(k) for k in ("file", "folder", "process")):
-                problems.append(Problem(
-                    "error", f"{where}.file",
-                    "a picker needs a `file` glob to select files, or `process` to "
-                    "select a whole dataset; with neither it offers nothing"))
+                if path_type == "references":
+                    problems.append(Problem(
+                        ERROR, f"{where}.file",
+                        "a references picker needs a `file` glob to select files; "
+                        "with none it offers nothing"))
+                else:
+                    problems.append(Problem(
+                        WARNING, f"{where}.process",
+                        "this picker offers every completed dataset in the project; "
+                        "add `process` to narrow it to the ones that can be used"))
             declared = field.get("type")
             # Some production pickers omit `type` entirely, and a multi-select picker
             # is an array; only an outright wrong scalar type is an error.

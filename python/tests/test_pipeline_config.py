@@ -234,11 +234,26 @@ def test_production_extensions_are_accepted():
     assert not [p for p in formcheck.check_form(doc) if p.level == "error"]
 
 
-def test_a_picker_with_neither_glob_nor_process_offers_nothing():
+def test_a_references_picker_with_no_glob_offers_nothing():
+    doc = {"ui": {}, "form": {"type": "object", "properties": {
+        "g": {"type": "object", "properties": {
+            "x": {"type": "string", "pathType": "references"}}}}}}
+    assert any(p.level == "error" for p in formcheck.check_form(doc))
+
+
+def test_an_unfiltered_dataset_picker_is_a_warning_not_an_error():
+    """`process` narrows a dataset picker; its absence widens it to every completed
+    dataset in the project, which the portal renders and handles. Erroring here made
+    a legal hand-written config impossible to upload -- `upload_process_config`
+    refuses on errors -- while no production form exercised the case, so the
+    calibration corpus never caught it."""
     doc = {"ui": {}, "form": {"type": "object", "properties": {
         "g": {"type": "object", "properties": {
             "x": {"type": "string", "pathType": "dataset"}}}}}}
-    assert any(p.level == "error" for p in formcheck.check_form(doc))
+    problems = formcheck.check_form(doc)
+    assert not [p for p in problems if p.level == "error"]
+    assert any(p.level == "warning" and "every completed dataset" in p.message
+               for p in problems)
 
 
 def test_a_dataset_picker_needs_no_glob():

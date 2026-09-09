@@ -238,6 +238,29 @@ class Reader:
             missing_what="Pick an available process.",
         )
 
+    def has_parent_processes(self, process_id: str) -> bool:
+        """Whether anything can feed this process -- the portal's `hasParentProcesses`.
+
+        Two halves, and both are load-bearing: a process may declare its own
+        `parent_process_ids`, or be named in another process's `child_process_ids`.
+        `pipeline.context.tsx` unions the two and gates submit on
+        `hasParentProcesses && !sourceDatasets.length`, so a process with neither is
+        launched from the UI with an empty source list.
+
+        Deliberately not the invokability rule from `pipeline-row-data.tsx`, which
+        additionally drops parents carrying no `dataType`. That one decides whether to
+        offer a pipeline in a list; this one decides whether an empty input is legal,
+        and reading the looser of the two would accept a launch the platform gates.
+
+        The listing is already fetched by `resolve_process`, so this costs no call.
+        """
+        for row in self.processes(include_archived=True):
+            if row["id"] == process_id and row["parent_process_ids"]:
+                return True
+            if process_id in row["child_process_ids"]:
+                return True
+        return False
+
     def scope_project_ids(self, scope: dict) -> list:
         if scope.get("project_ids"):
             return list(scope["project_ids"])
@@ -629,13 +652,14 @@ def spec_shape(reader: Reader, process_id: Optional[str]) -> Optional[list]:
     process that declares nothing: the first means "unknown", the second "no
     parameters", and only the first should suppress an undeclared-key warning.
 
-    A record is {"path", "type", "required", "conditional", "is_group", "default",
-    "has_default"}. The path is what makes this usable: real Cirro forms group their
-    parameters, so `wes` is submitted as `analysis_type.wes` and never at the top
-    level. Reporting the leaf name alone described a flat parameter surface that no
-    form has -- and because a form does not set `additionalProperties: false`, the
-    flat object a caller then built validated cleanly, was ignored by the pipeline,
-    and surfaced minutes into a billed run as defaults nobody chose.
+    A record is {"path", "type", "title", "description", "required", "conditional",
+    "is_group", "default", "has_default"}. The path is what makes this usable: real
+    Cirro forms group their parameters, so `wes` is submitted as `analysis_type.wes`
+    and never at the top level. Reporting the leaf name alone described a flat
+    parameter surface that no form has -- and because a form does not set
+    `additionalProperties: false`, the flat object a caller then built validated
+    cleanly, was ignored by the pipeline, and surfaced minutes into a billed run as
+    defaults nobody chose.
 
     Groups are records too, typed `object` and flagged `is_group`. They are the keys
     actually submitted at the top level, so omitting them made a correct run's
@@ -675,6 +699,11 @@ def spec_shape(reader: Reader, process_id: Optional[str]) -> Optional[list]:
         fields.append({
             "path": record["path"],
             "type": field.get("type") or ("object" if is_group else None),
+            # The key name carries the meaning for most parameters and carries none
+            # for some: a `command` string means nothing without the description
+            # saying where the inputs are mounted and where output must be written.
+            "title": field.get("title"),
+            "description": field.get("description"),
             "required": record["required"],
             "conditional": record["conditional"],
             "is_group": is_group,

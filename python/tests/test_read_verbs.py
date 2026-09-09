@@ -171,6 +171,19 @@ def test_process_params_reports_declared_keys_and_defaults(writable_tenant, sess
     assert result["next_calls"][0]["call"]["op"] == "run_analysis"
 
 
+def test_process_params_carries_the_labels_a_key_name_cannot(
+        writable_tenant, session_dir):
+    """For most pipelines the key names carry the meaning. For some they carry none --
+    a `command` string means nothing without the description saying where inputs are
+    mounted and where output must go -- and this is the only read that states it."""
+    out = _read(writable_tenant, session_dir, "process_params", id="proc_rnaseq")
+    by_path = {p["path"]: p for p in out["result"]["parameters"]}
+    assert by_path["aligner"]["title"] == "Alignment tool"
+    assert by_path["aligner"]["description"] == "Which aligner to run"
+    # Absent rather than omitted, so a caller can tell "no label" from "not reported".
+    assert by_path["genome"]["title"] is None
+
+
 def test_process_params_accepts_a_name_and_refuses_a_stranger(writable_tenant, session_dir):
     by_name = _read(writable_tenant, session_dir, "process_params", id="nf-core/rnaseq v3.14")
     assert by_name["ok"], by_name
