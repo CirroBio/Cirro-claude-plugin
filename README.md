@@ -396,6 +396,14 @@ Pipeline configuration is built and its generated output is checked against the
 configuration of 213 pipelines already running in Cirro, but the same caveat applies:
 registering a pipeline has not yet been done against a live tenant.
 
+**Signing in for a tenant is new in 0.9.0 and has not been through a real login.** The
+folder is created, found, listed and removed correctly — that much is exercised on a
+real filesystem — but no device-code login has yet landed in one, and `session_remove`
+has only been called directly rather than through the MCP server. Signing in for a
+single directory is the older path and is unaffected. If a tenant login misbehaves,
+`cirro-agent read tenants` will show you what exists without needing a credential, and
+deleting the folder it names is always a safe reset.
+
 ## For maintainers
 
 See [CLAUDE.md](CLAUDE.md) for the standing rules, the architecture and the traps.
