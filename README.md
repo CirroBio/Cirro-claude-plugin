@@ -157,7 +157,9 @@ turn it off.
 
 **1. Claude works out exactly what would happen.** This step touches nothing. It resolves
 names to IDs, checks parameters against what the pipeline actually accepts, counts the
-files and bytes involved, and looks for consequences you might not have considered.
+files and bytes involved, and looks for consequences you might not have considered. An
+instruction the operation does not understand stops it here rather than being quietly
+ignored, so what you read is what would run.
 
 **2. You see it, then approve it.** Something like:
 
@@ -403,6 +405,14 @@ operation not named above as untested and pick something disposable.
 Pipeline configuration is built and its generated output is checked against the
 configuration of 213 pipelines already running in Cirro, but the same caveat applies:
 registering a pipeline has not yet been done against a live tenant.
+
+**Targeting AWS HealthOmics is new in 0.10.0 and has not been through a real run.**
+The argument is validated, the approval text names the target, and the field is
+asserted on the serialized request -- but no launch has yet reached HealthOmics through
+the plugin. The Batch default is the older path and is unchanged. After a run lands,
+`cirro-agent read dataset <id> -p <project> --include info` is the reliable check:
+`info.omicsRunUuid` and `info.jobId` are present exactly when the run reached
+HealthOmics, and dataset status is not a substitute.
 
 **Signing in for a tenant has now been through a real login.** On 2026-09-09 a
 device-code login landed in a tenant folder against a development tenant, and plans
