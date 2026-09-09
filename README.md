@@ -400,11 +400,12 @@ Pipeline configuration is built and its generated output is checked against the
 configuration of 213 pipelines already running in Cirro, but the same caveat applies:
 registering a pipeline has not yet been done against a live tenant.
 
-**Signing in for a tenant is new in 0.9.0 and has not been through a real login.** The
-folder is created, found, listed and removed correctly — that much is exercised on a
-real filesystem — but no device-code login has yet landed in one, and `session_remove`
-has only been called directly rather than through the MCP server. Signing in for a
-single directory is the older path and is unaffected. If a tenant login misbehaves,
+**Signing in for a tenant has now been through a real login.** On 2026-09-09 a
+device-code login landed in a tenant folder against a development tenant, and plans
+were created and changes applied from it. `session_remove` is the half that remains
+untested: it has only ever been called directly, never through the MCP server, so
+deleting a tenant folder is still a path nobody has walked. Signing in for a single
+directory is the older path and is unaffected. If a tenant login misbehaves,
 `cirro-agent read tenants` will show you what exists without needing a credential, and
 deleting the folder it names is always a safe reset.
 
