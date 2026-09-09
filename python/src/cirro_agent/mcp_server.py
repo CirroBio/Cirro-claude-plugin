@@ -1,6 +1,6 @@
 """The MCP surface: authentication, and the gated write path.
 
-Seven tools. Six are ordinary; `apply` carries
+Eight tools. Six are ordinary; `apply` and `session_remove` carry
 `_meta["anthropic/requiresUserInteraction"]`, which is the one enforcement
 primitive a plugin author actually has -- it prompts on every call in every
 permission mode, is not skipped by an allow rule, is not suppressed by a hook
@@ -14,6 +14,7 @@ This process must never import cirro. `cirro.config.Constants` freezes CIRRO_HOM
 at import time, so a long-lived server could only ever serve one session folder.
 Every operation is a fresh subprocess instead.
 """
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -223,6 +224,45 @@ def whoami(directory: Optional[str] = None) -> dict:
 def logout(directory: Optional[str] = None) -> dict:
     """Forget this folder's credential."""
     return runner.call({"verb": "logout"}, start=_start(directory))
+
+
+@server.tool(
+    name="session_remove",
+    title="Delete a tenant's Cirro session folder",
+    description=(
+        "Remove the session folder for one tenant, with its credential, its cached "
+        "listings and its record of every change made from it. Irreversible, and it "
+        "prompts every time.\n\n"
+        "The tenant is named by `base_url` and the path is derived from it, so this "
+        "reaches only a tenant folder -- never a `.cirro/` bound to a working "
+        "directory, which you delete yourself. List what exists, with what each folder "
+        "holds, using `cirro-agent read tenants`. To discard a credential but keep the "
+        "folder and its history, use logout instead."
+    ),
+    meta={"anthropic/requiresUserInteraction": True},
+)
+def session_remove(base_url: str) -> dict:
+    """Delete one tenant's session folder, after approval.
+
+    Not a `plan` operation, unlike everything else that deletes: planning resolves a
+    session and forces authentication, so a folder could not be removed once its
+    credential stopped working -- which is the state that makes people want to remove
+    one. It carries the same `requiresUserInteraction` prompt `apply` relies on, and
+    it belongs to the session-folder lifecycle (`session_init`, `login_start`,
+    `logout`), which has always sat outside the plan path.
+    """
+    try:
+        removed = session_mod.remove_tenant(base_url)
+    except errors.AgentError as exc:
+        return exc.to_dict()
+    note = None
+    if sys.platform.startswith("darwin"):
+        note = ("On macOS the token bytes lived in your login Keychain, keyed by the "
+                "folder's path, and deleting the folder orphans that entry rather "
+                "than removing it. To erase it as well, run: security "
+                "delete-generic-password -s cirro-client")
+    return {"ok": True, **removed, "note": note,
+            "remaining": [found.parent.name for found in session_mod.bound_tenants()]}
 
 
 @server.tool(

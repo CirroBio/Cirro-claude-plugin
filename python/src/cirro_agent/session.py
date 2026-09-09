@@ -10,8 +10,11 @@ credential. Every rule here exists to make falling back there impossible.
 """
 import json
 import os
+import re
+import shutil
 import subprocess
 from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +24,11 @@ SESSION_DIRNAME = ".cirro"
 SESSION_FILE = "session.json"
 AUTH_DEVICE_CODE = "device_code"
 TENANTS_DIRNAME = "tenants"
+
+# A tenant folder is named after its host, and that name is used to both create and
+# delete a directory. `_normalize_base_url` strips the scheme and path but would
+# return `..` for `../..` quite happily, which as a tenant path is the virtualenv.
+TENANT_HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]*(:[0-9]{1,5})?$")
 
 # Session resolution runs on the way to every operation, so it waits only briefly on
 # git. Callers already inside a user's checkout pass their own, longer bound.
@@ -80,9 +88,71 @@ def tenants_root() -> Path:
     return plugin_data() / TENANTS_DIRNAME
 
 
+def tenant_host(base_url: str) -> str:
+    """The directory name for a tenant, refused unless it is a plausible hostname.
+
+    This is where a "host" that is not a host stops, before it becomes a path that
+    something creates or deletes.
+    """
+    host = _normalize_base_url(base_url)
+    if not TENANT_HOST.match(host):
+        raise errors.InvalidQuery(
+            f"{base_url!r} does not name a Cirro host.",
+            what="A tenant folder is named after the hostname it serves.",
+            field="base_url", given=base_url,
+            retry_with=[{"base_url": "app.cirro.bio"}],
+        )
+    return host
+
+
 def tenant_dir(base_url: str) -> Path:
     """The working directory for one tenant. Its `.cirro/` is the session folder."""
-    return tenants_root() / _normalize_base_url(base_url)
+    return tenants_root() / tenant_host(base_url)
+
+
+def tenant_contents(session_dir: Path) -> dict:
+    """What a session folder holds: a credential, an audit trail, and how stale it is.
+
+    One implementation, so the figures a person is shown by a listing are the figures
+    they approve a removal against.
+    """
+    def count(sub: str, pattern: str) -> int:
+        folder = session_dir / sub
+        return len(list(folder.glob(pattern))) if folder.is_dir() else 0
+
+    newest = max((found.stat().st_mtime for found in session_dir.rglob("*")
+                  if found.is_file()), default=None)
+    return {
+        # Presence only. Nothing here reads a credential, on any code path.
+        "credential": "present" if any(session_dir.glob("*.token.dat")) else "none",
+        "plans": count("plans", "plan_*.json"),
+        "runs": count("runs", "*.jsonl"),
+        "last_used": (datetime.fromtimestamp(newest, timezone.utc).isoformat()
+                      if newest else None),
+    }
+
+
+def remove_tenant(base_url: str) -> dict:
+    """Delete one tenant's session folder, with its credential and its audit trail.
+
+    The path is derived from the host and never supplied, so this can only ever reach
+    a direct child of `tenants_root()` -- a host resolving anywhere else, through `..`
+    or through a symlinked tenant folder, is refused before anything is removed.
+    """
+    target = tenant_dir(base_url)
+    session_dir = target / SESSION_DIRNAME
+    if (target.resolve().parent != tenants_root().resolve()
+            or not (session_dir / SESSION_FILE).is_file()):
+        raise errors.NotFound(
+            f"No tenant folder is signed in for {tenant_host(base_url)}.",
+            what="Only a tenant folder can be removed here, by the host it serves.",
+            field="base_url", given=base_url,
+            candidates=[found.parent.name for found in bound_tenants()],
+            retry_with=[{"note": "list them with `cirro-agent read tenants`"}],
+        )
+    contents = tenant_contents(session_dir)
+    shutil.rmtree(target)
+    return {"host": target.name, "removed": str(target), **contents}
 
 
 def is_tenant_dir(session_dir: Path) -> bool:

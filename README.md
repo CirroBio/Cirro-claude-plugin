@@ -70,6 +70,24 @@ directory you are working in has nothing bound nearer, Claude will not pick betw
 them — it names both and asks. You can always say which to use, without moving:
 `cirro-agent read ... --dir <path>` does the same on the command line.
 
+#### Seeing and removing what is signed in
+
+```bash
+cirro-agent read tenants
+```
+
+Lists every tenant you are signed in to, where its folder is, whether it still holds a
+credential, when it was last used, and how many plans and change records it has kept —
+and says which one an unbound directory will resolve to, or that there are too many to
+choose from. It reads the filesystem and nothing else, so it still answers when a login
+has expired.
+
+To get rid of one, ask Claude to remove it. That deletes the folder outright — the
+credential, the cache, and the record of every change made from it — so it asks first
+and tells you what was in it. Removing the credential but keeping the folder and its
+history is what signing out does instead. Folders bound to a single directory are not
+listed and are not removable this way; delete those yourself.
+
 #### If you sign in for a directory
 
 Two things to avoid, both of which have bitten people.
@@ -108,7 +126,7 @@ cirro-agent read tasks -p "My Project" -d ds_123
 
 | Area | What you can read |
 |---|---|
-| Structure | `projects`, `project`, `folders`, `describe`, `whoami`, `doctor` |
+| Structure | `projects`, `project`, `folders`, `describe`, `whoami`, `tenants`, `doctor` |
 | Datasets | `datasets`, `dataset`, `files`, `params`, `analysis-status` |
 | Runs | `logs`, `tasks`, `task-logs`, `trace`, `chain-status` |
 | Pipelines | `processes`, `process`, `process-params`, `process-config`, `workflow-spec`, `check-config` |
@@ -259,9 +277,11 @@ safely from here — use the web UI.
 
 Commands: `/cirro:setup` and `/cirro:doctor`.
 
-Behind the approval gate sit seven tools: `session_init`, `login_start`, `login_wait`,
-`whoami`, `logout`, `plan` and `apply`. You will rarely name them — Claude uses them —
-but `apply` is the only one that can change anything, and it always prompts.
+Behind the approval gate sit eight tools: `session_init`, `login_start`, `login_wait`,
+`whoami`, `logout`, `session_remove`, `plan` and `apply`. You will rarely name them —
+Claude uses them — and only two can change anything: `apply`, which makes every change
+in Cirro, and `session_remove`, which deletes a tenant's login folder on your own
+machine. Both prompt every time.
 
 ## Adding a pipeline to Cirro
 

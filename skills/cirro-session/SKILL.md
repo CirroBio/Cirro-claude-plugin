@@ -102,6 +102,30 @@ first. From then on a directory with nothing bound nearer is ambiguous, and
 mean rather than picking. Do not attempt to repoint an existing folder at a different
 host.
 
+To see what exists:
+
+```
+cirro-agent read tenants
+```
+
+Each one reports its host, folder, whether a credential is still there, when it was
+last used, and how many plans and change records it holds — plus which one an unbound
+directory resolves to, or that there are too many to choose from. It reads the
+filesystem only, so run it when a login is broken or the user has lost track; it needs
+no session and will never prompt.
+
+To remove one:
+
+```
+session_remove(base_url="old.cirro.bio")
+```
+
+This deletes the folder outright — credential, cache and the record of every change
+made from it. It prompts every time and cannot be applied to a directory-bound
+`.cirro/`. Show the user what `tenants` reported for that host before calling it, and
+prefer `logout` when they only want to force a fresh login: that keeps the folder and
+its history.
+
 You do not have to move the session to use another folder. Every tool that resolves a
 session takes `directory`, and every read takes `--dir`:
 

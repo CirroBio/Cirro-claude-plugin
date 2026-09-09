@@ -16,6 +16,7 @@ HANDLERS = {
     "process_config": read_process.do_process_config,
     "workflow_spec": local_reads.do_workflow_spec,
     "check_config": local_reads.do_check_config,
+    "tenants": local_reads.do_tenants,
     "task_logs": read_summaries.do_task_logs,
     "chain_status": read_chains.do_chain_status,
     "login_start": auth.login_start,

@@ -1,12 +1,13 @@
 """Reads that need no session, no credential and no network.
 
 describe answers from the static catalog, workflow_spec parses a checkout on disk,
-check_config validates a configuration folder. They run in the parent process, so
-they live outside worker/ -- the boundary that says only the child imports cirro.
+check_config validates a configuration folder, tenants lists the folders that have
+been signed in to. They run in the parent process, so they live outside worker/ --
+the boundary that says only the child imports cirro.
 """
 from pathlib import Path
 
-from . import errors, formcheck, formgen, query as Q, schema
+from . import errors, formcheck, formgen, query as Q, schema, session as session_mod
 from .envelope import (DEFAULT_MAX_TOKENS, DETAIL_BUDGET, NO_API_COST, estimate_tokens,
                        shrink_to_fit, wrap)
 
@@ -266,3 +267,47 @@ def _restate_the_cut(envelope: dict, kept: int, total: int, max_tokens: int) -> 
         f"{max_tokens}. Errors were kept in preference to warnings, and what remains "
         "is in the report's own order; `n_errors` and `n_warnings` count every problem, "
         "shown or not. `problems_truncated_to` records the cut.")
+
+
+def do_tenants(request: dict) -> dict:
+    """List the tenant folders that have been signed in to.
+
+    Local only, and deliberately so: this is what you read when a credential is
+    broken or you no longer know which tenants exist, so it must not need one. It
+    reports whether a credential is present and never what it contains.
+    """
+    found = session_mod.bound_tenants()
+    tenants = [
+        {"host": session_dir.parent.name,
+         "session_dir": str(session_dir),
+         **session_mod.tenant_contents(session_dir)}
+        for session_dir in found
+    ]
+    if len(tenants) == 1:
+        tenants[0]["resolves_by_default"] = True
+
+    if not tenants:
+        resolution = ("No tenant is signed in, so a directory with no .cirro/ of its "
+                      "own has nothing to fall back to.")
+    elif len(tenants) == 1:
+        resolution = (f"{tenants[0]['host']} is the only one signed in, so every "
+                      "directory with no .cirro/ of its own resolves to it.")
+    else:
+        resolution = (f"{len(tenants)} are signed in, so a directory with no .cirro/ "
+                      "of its own is ambiguous and must name one with --dir (or "
+                      "`directory` on an MCP tool).")
+
+    return wrap(
+        query={"verb": "tenants"},
+        result={
+            "tenants_root": str(session_mod.tenants_root()),
+            "n_tenants": len(tenants),
+            "tenants": tenants,
+            "resolution": resolution,
+            "note": ("A tenant folder is signed in with login_start, and removed with "
+                     "the session_remove MCP tool, which asks first. Folders bound to "
+                     "a single directory are not listed here -- they live in that "
+                     "directory."),
+        },
+        cost={**NO_API_COST, "note": "reads the local filesystem only"},
+        max_tokens=int(request.get("max_tokens") or DEFAULT_MAX_TOKENS["tenants"]))

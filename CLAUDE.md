@@ -18,6 +18,19 @@ cannot quietly introduce an ungated mutation. Do not work around it; update it.
 broad `Bash(cirro-agent *)` permission is harmless, and that only holds while the binary
 cannot mutate anything. Two tests enforce it.
 
+**One capability is gated without being an op, and it is the only one.**
+`session_remove` deletes a tenant's session folder -- credential, cache and audit
+trail. It cannot be a `plan` operation, because `do_plan` reads `reader.username` and
+so authenticates: a folder would become unremovable exactly once its credential
+stopped working, which is the state that makes people want to remove one. It uses the
+same enforcement primitive `apply` does, `requiresUserInteraction`, which no allow
+rule or permission mode defeats, and it belongs to the session-folder lifecycle
+(`session_init`, `login_start`, `logout`) that has always sat outside the plan path.
+`test_tenants.py` asserts those two tools are the *only* ones carrying that flag, so
+neither the exception nor the rule can widen unnoticed. Nothing that touches the Cirro
+API may follow this precedent -- `test_write_coverage.py` still fails on any SDK write
+method that is not in `GATED` or `UNSUPPORTED`, and this reaches no SDK method at all.
+
 ## Keep the README current
 
 **The README is part of the change, not follow-up work.** On any change that makes it
@@ -47,7 +60,7 @@ The README is for users and deliberately does not carry this. Keep it here.
 ```
 reads   (ungated) ──▶ bin/cirro-agent ─┐
                                         ├──▶ worker subprocess ──▶ .cirro/ (CIRRO_HOME)
-writes  (gated)   ──▶ MCP server (7) ──┘         the only code importing cirro
+writes  (gated)   ──▶ MCP server (8) ──┘         the only code importing cirro
 ```
 
 **The gate judges execution, never authoring.** A `Write|Edit` matcher used to `ask` on
@@ -106,8 +119,8 @@ verbs live in `read_query` (query, get),
 `read_summaries` (summarize, task_logs), `read_listings` (list), `read_process`
 (process_params, process_config) and `read_chains` (chain_status, which reads plan
 records and the audit and touches no API); each imports from `reads` and nothing
-imports them but `dispatch`. The three reads that need no session, credential or network --
-describe, workflow_spec, check_config -- live in `cirro_agent/local_reads.py`, outside
+imports them but `dispatch`. The four reads that need no session, credential or network --
+describe, workflow_spec, check_config, tenants -- live in `cirro_agent/local_reads.py`, outside
 `worker/`, and the CLI runs them in the parent process; that is the only read path that
 does not go through the subprocess, and it must stay cirro-free. The gated write path
 (`do_plan`, `do_apply`, re-planning at apply) is `worker/gated.py`; `dispatch.py` is
@@ -140,7 +153,17 @@ captures every project below it, because `_search_ceiling` falls back to home.
 
 The fallback finds and never creates, the walk-up still wins, and `bound_tenants()`
 returning more than one is an error listing them in `candidates` -- choosing between
-tenants is the one thing this resolver has never done. One consequence to keep in
+tenants is the one thing this resolver has never done.
+
+`tenant_host` is where a "host" that is not a host stops. `_normalize_base_url` strips
+the scheme and the path but returns `..` for `../..`, and a tenant path is used to both
+create and delete a directory -- so `tenants_root()/".."` is the folder holding the
+virtualenv, and `remove_tenant` would have handed it to `rmtree`. Validating the name
+in the one place both callers derive their path from is why the removal takes a
+hostname and never a path. `remove_tenant` then re-checks that the resolved parent is
+the tenants root, which is what stops it following a symlinked tenant folder out of
+the tree. `tenant_contents` is the one implementation of what a folder holds, so the
+figures the `tenants` read shows are the figures the removal discloses. One consequence to keep in
 view: two projects sharing a tenant folder share a `session_dir`, so a plan made while
 in one can be applied while in the other. That was already true of any two directories
 under one bound folder; the tenant folder makes it the common case rather than the

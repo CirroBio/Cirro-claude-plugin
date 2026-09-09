@@ -35,6 +35,7 @@ DEFAULT_MAX_TOKENS = {
     "process_config": 8000,
     "workflow_spec": 12000,
     "check_config": 6000,
+    "tenants": 1500,
 }
 
 # `include` on a detail-or-worse tier costs one call per row, so it is gated. Here

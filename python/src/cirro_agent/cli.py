@@ -16,7 +16,7 @@ from . import errors, formgen, runner
 # The complete set of verbs this binary may ask the worker for.
 READ_VERBS = frozenset({"query", "get", "summarize", "describe", "list",
                         "process_params", "process_config", "workflow_spec", "check_config",
-                        "task_logs", "chain_status", "whoami"})
+                        "task_logs", "chain_status", "whoami", "tenants"})
 
 
 def _emit(payload: dict) -> int:
@@ -229,6 +229,8 @@ def build_parser() -> argparse.ArgumentParser:
         ).add_argument("path", help="folder holding process-form.json and friends")
     add("describe", "field catalog, tiers and query grammar for an entity").add_argument(
         "entity", nargs="?", default="dataset")
+    add("tenants", "tenant folders signed in on this machine, and which one a "
+                   "directory with none of its own resolves to")
     add("whoami", "identity, tenant and runtime")
     read.add_parser("doctor", help="diagnose session, runtime and auth").add_argument(
         "--dir", help="resolve the session folder from this directory")
@@ -393,6 +395,15 @@ def main(argv=None) -> int:
         request = _common({"verb": "describe", "entity": args.entity}, args)
         try:
             return _emit(local_reads.do_describe(request))
+        except errors.AgentError as exc:
+            return _emit(exc.to_dict())
+
+    if command == "tenants":
+        # The local filesystem only. This is what you read when a credential is
+        # broken, so it must not resolve a session or need one.
+        from . import local_reads
+        try:
+            return _emit(local_reads.do_tenants(_common({"verb": "tenants"}, args)))
         except errors.AgentError as exc:
             return _emit(exc.to_dict())
 
