@@ -8,7 +8,7 @@ why the registration lives on this side.
 from .. import errors
 from . import mutations, reads, rows as R
 from .mutations import (Draft, Op, RISK_DESTRUCTIVE, RISK_WRITE, _inv, _need, _project,
-                        _tag_models)
+                        _tag_models, PROJECT_ARGS)
 
 
 def plan_create_project(reader: reads.Reader, args: dict) -> Draft:
@@ -319,16 +319,23 @@ def apply_update_project_schema(reader: reads.Reader, args: dict) -> dict:
 
 PROJECT_OPS = [
     Op("create_project", RISK_WRITE, plan_create_project, apply_create_project,
-       outputs=("created_project_id",)),
+       outputs=("created_project_id",),
+       accepts=("name", "description", "billing_account_id", "budget_amount",
+                "budget_period", "classification_ids", "contacts", "tags")),
     Op("update_project_tags", RISK_WRITE, plan_update_project_tags,
-       apply_update_project_tags),
-    Op("archive_project", RISK_DESTRUCTIVE, plan_archive_project, apply_archive_project),
-    Op("unarchive_project", RISK_WRITE, plan_unarchive_project, apply_archive_project),
-    Op("set_user_role", RISK_WRITE, plan_set_user_role, apply_set_user_role),
-    Op("invite_user", RISK_WRITE, plan_invite_user, apply_invite_user),
-    Op("update_sample", RISK_WRITE, plan_update_sample, apply_update_sample),
+       apply_update_project_tags, accepts=PROJECT_ARGS + ("tags",)),
+    Op("archive_project", RISK_DESTRUCTIVE, plan_archive_project, apply_archive_project,
+       accepts=PROJECT_ARGS),
+    Op("unarchive_project", RISK_WRITE, plan_unarchive_project, apply_archive_project,
+       accepts=PROJECT_ARGS),
+    Op("set_user_role", RISK_WRITE, plan_set_user_role, apply_set_user_role,
+       accepts=PROJECT_ARGS + ("username", "role", "suppress_notification")),
+    Op("invite_user", RISK_WRITE, plan_invite_user, apply_invite_user,
+       accepts=("email", "name", "organization")),
+    Op("update_sample", RISK_WRITE, plan_update_sample, apply_update_sample,
+       accepts=PROJECT_ARGS + ("sample_id", "name", "metadata", "replace_metadata")),
     Op("update_project_schema", RISK_WRITE, plan_update_project_schema,
-       apply_update_project_schema),
+       apply_update_project_schema, accepts=PROJECT_ARGS + ("schema",)),
 ]
 
 mutations.OPS.update({op.name: op for op in PROJECT_OPS})

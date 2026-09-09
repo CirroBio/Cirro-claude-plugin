@@ -180,3 +180,83 @@ def test_the_read_cli_module_does_not_import_the_mutations_registry():
             imported.update(alias.name for alias in node.names)
     assert not any("mutations" in name for name in imported), \
         "cli.py must not import the mutations registry; it is read-only by construction"
+
+
+# --- an argument nobody reads must not be dropped in silence -----------------
+#
+# A planner reads the arguments it knows by name and nothing looked at the rest, so
+# `execution_mode`, or a typo'd `enviroment_type`, vanished and the run went somewhere
+# the approved text did not describe. `Op.accepts` closes that, and these two keep the
+# declaration honest: every op has one, and no planner reads a key outside it.
+
+def _op_modules():
+    from cirro_agent.worker import mutations  # noqa: F401  (loads every family)
+    import pathlib
+    from cirro_agent.worker import (analysis_ops, chain_ops, dataset_ops,
+                                    pipeline_ops, project_ops, share_ops)
+    modules = [mutations, analysis_ops, chain_ops, dataset_ops, pipeline_ops,
+               project_ops, share_ops]
+    return {m.__name__.rsplit(".", 1)[-1]: pathlib.Path(m.__file__) for m in modules}
+
+
+def _functions():
+    import ast
+    found = {}
+    for name, path in _op_modules().items():
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.FunctionDef):
+                found.setdefault(node.name, node)
+    return found
+
+
+def _keys_read(node, functions, seen):
+    """Argument keys this function reads, following the helpers it hands `args` to."""
+    import ast
+    keys, called = set(), set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            func = sub.func
+            if (isinstance(func, ast.Attribute) and func.attr == "get"
+                    and isinstance(func.value, ast.Name) and func.value.id == "args"
+                    and sub.args and isinstance(sub.args[0], ast.Constant)):
+                keys.add(sub.args[0].value)
+            if isinstance(func, ast.Name) and func.id == "_need":
+                keys.update(a.value for a in sub.args[2:]
+                            if isinstance(a, ast.Constant))
+            if isinstance(func, ast.Name) and any(
+                    isinstance(a, ast.Name) and a.id == "args" for a in sub.args):
+                called.add(func.id)
+        if (isinstance(sub, ast.Subscript) and isinstance(sub.value, ast.Name)
+                and sub.value.id == "args" and isinstance(sub.slice, ast.Constant)):
+            keys.add(sub.slice.value)
+    for name in called:
+        if name in functions and name not in seen:
+            keys |= _keys_read(functions[name], functions, seen | {name})
+    return keys
+
+
+def test_every_op_declares_the_arguments_it_accepts():
+    from cirro_agent.worker import mutations
+    undeclared = sorted(name for name, op in mutations.OPS.items() if not op.accepts)
+    assert not undeclared, \
+        f"these ops accept no arguments, so every call is refused: {undeclared}"
+
+
+def test_no_planner_reads_an_argument_its_op_does_not_declare():
+    """The declaration is by hand, so this checks it against the code that reads args.
+
+    A key the planner reads but does not declare is refused before the planner runs --
+    the argument becomes unusable rather than silently ignored, which is a louder bug
+    than the one this replaced but a bug all the same.
+    """
+    from cirro_agent.worker import mutations
+    functions = _functions()
+    missing = {}
+    for name, op in mutations.OPS.items():
+        planner = getattr(op.plan, "__name__", None)
+        if planner not in functions:
+            continue  # a test double or a closure; the declaration test still covers it
+        gap = _keys_read(functions[planner], functions, {planner}) - set(op.accepts)
+        if gap:
+            missing[name] = sorted(gap)
+    assert not missing, f"planners read arguments their op does not accept: {missing}"

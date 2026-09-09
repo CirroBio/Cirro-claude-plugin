@@ -41,6 +41,13 @@ class Draft:
     risk: Optional[str] = None
 
 
+# The argument keys shared resolvers read, named once so an op that uses a resolver
+# cannot declare half of it. `_project` takes either spelling; `_target_folders` reads
+# all three, because a tag write that forgets one silently drops folder membership.
+PROJECT_ARGS = ("project", "project_id")
+FOLDER_ARGS = ("folder", "folders", "remove_from_folder")
+
+
 @dataclass
 class Op:
     name: str
@@ -51,6 +58,29 @@ class Op:
     # inferred, so a reference to a field an operation does not produce is refused at
     # plan time instead of failing halfway through an approved chain.
     outputs: tuple = ()
+    # Every top-level argument key the planner reads. Declared rather than inferred
+    # because a planner reads what it knows by name and nothing looked at the rest:
+    # `execution_mode`, or a typo'd `enviroment_type`, vanished without a trace and
+    # the run went somewhere the approved text did not say. The plan/apply split
+    # exists so a person approves exactly what runs, and an argument dropped in
+    # silence defeats it. `test_write_coverage.py` requires every op to declare this.
+    accepts: tuple = ()
+
+    def planned(self, reader, args: dict) -> Draft:
+        """Check the argument surface, then plan. Every planner call comes through
+        here -- `do_plan`, the re-plan at apply, and both chain-step paths -- so a
+        step buried in an approved chain is held to the same rule as a bare plan."""
+        unknown = sorted(set(args) - set(self.accepts))
+        if unknown:
+            raise errors.InvalidQuery(
+                f"{self.name} does not accept {unknown}.",
+                what="Remove the argument, or correct its spelling. An argument this "
+                     "operation does not read would be dropped in silence, and the "
+                     "plan you approved would not describe the run.",
+                field=unknown[0], given=args, accepted=sorted(self.accepts),
+                retry_with=[{k: v for k, v in args.items() if k not in unknown}],
+            )
+        return self.plan(reader, args)
 
 
 def _inv(kind: str, project_id: Optional[str] = None) -> dict:

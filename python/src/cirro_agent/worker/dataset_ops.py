@@ -12,7 +12,8 @@ from typing import Optional
 from .. import errors, runner, summarize as S
 from . import mutations, reads, rows as R
 from .mutations import (Draft, Op, RISK_DESTRUCTIVE, RISK_LOCAL, RISK_WRITE, _dataset, _inv,
-                        _need, _project, _tag_models, _target_folders, _wire_tags)
+                        _need, _project, _tag_models, _target_folders, _wire_tags,
+                        FOLDER_ARGS, PROJECT_ARGS)
 
 
 # How many lines of a samplesheet diff the approval quotes before saying how many
@@ -631,15 +632,26 @@ def apply_download_files(reader: reads.Reader, args: dict) -> dict:
 
 
 DATASET_OPS = [
-    Op("update_dataset", RISK_WRITE, plan_update_dataset, apply_update_dataset),
-    Op("update_samplesheet", RISK_WRITE, plan_update_samplesheet, apply_update_samplesheet),
-    Op("delete_dataset", RISK_DESTRUCTIVE, plan_delete_dataset, apply_delete_dataset),
+    Op("update_dataset", RISK_WRITE, plan_update_dataset, apply_update_dataset,
+       accepts=PROJECT_ARGS + FOLDER_ARGS + (
+           "dataset_id", "dataset_ids", "name", "description", "tags")),
+    Op("update_samplesheet", RISK_WRITE, plan_update_samplesheet, apply_update_samplesheet,
+       accepts=PROJECT_ARGS + (
+           "dataset_id", "contents", "file_path", "ingest_samples")),
+    Op("delete_dataset", RISK_DESTRUCTIVE, plan_delete_dataset, apply_delete_dataset,
+       accepts=PROJECT_ARGS + ("dataset_id",)),
     Op("upload_dataset", RISK_WRITE, plan_upload_dataset, apply_upload_dataset,
-       outputs=("dataset_id", "uploaded_to_project")),
-    Op("upload_reference", RISK_WRITE, plan_upload_reference, apply_upload_reference),
+       outputs=("dataset_id", "uploaded_to_project"),
+       accepts=PROJECT_ARGS + FOLDER_ARGS + (
+           "source_dir", "name", "process", "description", "tags", "include_hidden")),
+    Op("upload_reference", RISK_WRITE, plan_upload_reference, apply_upload_reference,
+       accepts=PROJECT_ARGS + ("name", "files", "reference_type")),
     Op("import_public", RISK_WRITE, plan_import_public, apply_import_public,
-       outputs=("created_dataset_id",)),
-    Op("download_files", RISK_LOCAL, plan_download_files, apply_download_files),
+       outputs=("created_dataset_id",),
+       accepts=PROJECT_ARGS + (
+           "name", "public_ids", "description", "download_method")),
+    Op("download_files", RISK_LOCAL, plan_download_files, apply_download_files,
+       accepts=PROJECT_ARGS + ("dataset_id", "destination", "glob")),
 ]
 
 mutations.OPS.update({op.name: op for op in DATASET_OPS})

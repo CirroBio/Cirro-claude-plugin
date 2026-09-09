@@ -16,7 +16,7 @@ def do_plan(request: dict) -> dict:
     from . import mutations
     op = mutations.get_op(request["op"])
     reader = reads.Reader(request)
-    draft = op.plan(reader, request.get("args") or {})
+    draft = op.planned(reader, request.get("args") or {})
     session = reader.session
     record = plans.create(session, op=op.name, args=draft.args, summary=draft.summary,
                           username=reader.username, risk=draft.risk or op.risk,
@@ -100,7 +100,7 @@ def _revalidated(reader: reads.Reader, op, record) -> dict:
         # arguments at all. Nothing to re-plan from; the digest still applies.
         return record.args
     try:
-        draft = op.plan(reader, dict(record.request_args))
+        draft = op.planned(reader, dict(record.request_args))
     except errors.AgentError as exc:
         raise errors.PlanStale(
             f"{record.op} no longer plans cleanly: {exc.message}",

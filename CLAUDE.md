@@ -278,6 +278,24 @@ Putting the registration on the `mutations` side reintroduces a circular-import 
 for whoever imports an op module before `mutations`. A new op goes in the family it
 belongs to, not in `mutations.py`.
 
+**Every op declares `accepts`, and `Op.planned` is the only way to reach a planner.**
+A planner reads the arguments it knows by name, and for a long time nothing looked at
+the rest: an unknown key was dropped in silence. That is not a cosmetic gap. `plan(op=
+"run_analysis", args={..., "execution_mode": "HEALTHOMICS"})` returned `ok` with no
+warning, rendered "Compute      Cirro default (AWS Batch)", and ran on Batch -- a plan
+that read as approved for one thing and executed another, which is precisely what the
+plan/apply split exists to prevent. A typo does the same thing more quietly still.
+`Op.planned` refuses an undeclared key and lists the accepted ones; all four planner
+call sites go through it -- `do_plan`, the re-plan at apply, and both chain-step paths
+-- so a step buried inside one approval is held to the same rule as a bare plan.
+`PROJECT_ARGS` and `FOLDER_ARGS` exist so an op that uses a shared resolver cannot
+declare half of its keys. Two tests in `test_write_coverage.py` keep the declarations
+honest: every op has a non-empty one, and an AST pass over each planner (following the
+helpers it hands `args` to) asserts no planner reads a key its op does not declare.
+`resume_analysis` is the case that shows why the declaration is by hand rather than
+inferred -- it copies the caller's args and delegates to `plan_run_analysis`, so its
+surface is run_analysis' whole surface and no scan of its own body would say so.
+
 **Cirro reports spend, just not in advance.** `metrics.get_for_project` returns two
 series in one call -- dollars by AWS service by month, and storage by tier by day -- and
 `get_all_metrics` returns them for every visible project in a single request, the one

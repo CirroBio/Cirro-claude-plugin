@@ -28,6 +28,13 @@ def _plan(**overrides):
     return chain_ops.plan_chain(None, _steps(**overrides))
 
 
+# The stand-in ops these tests register declare an argument surface like any
+# other op: `Op.planned` refuses an undeclared key, so a double that declared
+# nothing would reject every step before the behaviour under test ran.
+FAKE_ARGS = ("tag", "uses", "after", "name", "process", "process_id", "project_id",
+             "dataset_id", "design_spec", "source_dir", "tags")
+
+
 @pytest.fixture(autouse=True)
 def fake_ops(monkeypatch):
     """Two chainable ops plus a local-write one, registered for every test here."""
@@ -36,7 +43,8 @@ def fake_ops(monkeypatch):
     monkeypatch.setitem(mutations.OPS, "local_producer", mutations.Op(
         "local_producer", mutations.RISK_WRITE_LOCAL,
         lambda reader, a: mutations.Draft(args=dict(a), summary="write locally"),
-        lambda reader, a: {"made_id": "local"}, outputs=("made_id",)))
+        lambda reader, a: {"made_id": "local"}, outputs=("made_id",),
+        accepts=FAKE_ARGS))
     return log
 
 
@@ -430,9 +438,10 @@ def _fake_ops(monkeypatch, log, *, fail_at=None, fail_with=None):
 
     monkeypatch.setitem(mutations.OPS, "producer", mutations.Op(
         "producer", mutations.RISK_WRITE, plan_producer, apply_producer,
-        outputs=("made_id",)))
+        outputs=("made_id",), accepts=FAKE_ARGS))
     monkeypatch.setitem(mutations.OPS, "consumer", mutations.Op(
-        "consumer", mutations.RISK_WRITE, plan_consumer, apply_consumer))
+        "consumer", mutations.RISK_WRITE, plan_consumer, apply_consumer,
+        accepts=FAKE_ARGS))
 
 
 def test_the_executor_feeds_each_step_what_the_one_before_it_produced(fake_ops):
@@ -545,9 +554,11 @@ def test_a_chain_drops_the_snapshots_its_own_earlier_steps_made_stale(
     for kind in ("datasets", "processes"):
         monkeypatch.setitem(mutations.OPS, f"stales_{kind}", mutations.Op(
             f"stales_{kind}", mutations.RISK_WRITE, stales(kind),
-            lambda reader, args, kind=kind: {"made_id": kind}, outputs=("made_id",)))
+            lambda reader, args, kind=kind: {"made_id": kind}, outputs=("made_id",),
+            accepts=FAKE_ARGS))
     monkeypatch.setitem(mutations.OPS, "observer", mutations.Op(
-        "observer", mutations.RISK_WRITE, plan_observer, lambda reader, args: {}))
+        "observer", mutations.RISK_WRITE, plan_observer, lambda reader, args: {},
+        accepts=FAKE_ARGS))
 
     made = {"from_step": 0, "field": "made_id"}
     draft = chain_ops.plan_chain(reader, {"steps": [

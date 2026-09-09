@@ -12,7 +12,17 @@ from typing import Optional, Tuple
 from .. import errors, summarize as S
 from . import mutations, reads, rows as R
 from .mutations import (_tag_models, Draft, Op, RISK_WRITE, _inv, _need, _project, _dataset,
-                        _target_folders, _wire_tags)
+                        _target_folders, _wire_tags, FOLDER_ARGS, PROJECT_ARGS)
+
+# run_analysis' whole argument surface, shared with resume_analysis: that planner
+# copies the caller's args, fills in whatever the previous run implies, and hands the
+# merged dict to plan_run_analysis -- so anything a launch accepts, a resume accepts.
+RUN_ANALYSIS_ARGS = PROJECT_ARGS + FOLDER_ARGS + (
+    "name", "process", "description", "params", "tags",
+    "source_dataset_ids", "dataset_id", "source_sample_ids",
+    "notification_emails", "compute_environment", "environment_type",
+    "resume_dataset_id",
+)
 
 
 # Where a run executes. These are `EnvironmentType` values from the API, and they are
@@ -295,11 +305,12 @@ def apply_stop_analysis(reader: reads.Reader, args: dict) -> dict:
 
 ANALYSIS_OPS = [
     Op("run_analysis", RISK_WRITE, plan_run_analysis, apply_run_analysis,
-       outputs=("created_dataset_id",)),
+       outputs=("created_dataset_id",), accepts=RUN_ANALYSIS_ARGS),
     # Shares run_analysis's executor, so a resume records a created dataset too.
     Op("resume_analysis", RISK_WRITE, plan_resume_analysis, apply_run_analysis,
-       outputs=("created_dataset_id",)),
-    Op("stop_analysis", RISK_WRITE, plan_stop_analysis, apply_stop_analysis),
+       outputs=("created_dataset_id",), accepts=RUN_ANALYSIS_ARGS),
+    Op("stop_analysis", RISK_WRITE, plan_stop_analysis, apply_stop_analysis,
+       accepts=PROJECT_ARGS + ("dataset_id",)),
 ]
 
 mutations.OPS.update({op.name: op for op in ANALYSIS_OPS})

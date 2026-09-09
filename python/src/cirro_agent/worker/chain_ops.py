@@ -242,7 +242,7 @@ def _pre_plan(reader: reads.Reader, steps: list) -> list:
         if _has_reference(step.get("args") or {}):
             drafts.append(None)
             continue
-        draft = get_op(step["op"]).plan(reader, dict(step.get("args") or {}))
+        draft = get_op(step["op"]).planned(reader, dict(step.get("args") or {}))
         step["resolved_args"] = draft.args
         step["invalidates"] = draft.invalidates
         drafts.append(draft)
@@ -638,7 +638,7 @@ def apply_chain(reader: reads.Reader, args: dict) -> dict:
                 made_stale = step.get("invalidates") or []
             else:
                 resolved = _resolve_references(step.get("args") or {}, outputs)
-                draft = op.plan(reader, resolved)
+                draft = op.planned(reader, resolved)
                 applied, made_stale = draft.args, draft.invalidates
             result = op.apply(reader, applied)
             if op.outputs and not isinstance(result, dict):
@@ -683,7 +683,11 @@ def apply_chain(reader: reads.Reader, args: dict) -> dict:
 
 
 CHAIN_OPS = [
-    Op("chain", RISK_WRITE, plan_chain, apply_chain),
+    # A step's own arguments are checked against that step's op, not against this
+    # list -- `planned` runs on every step too, so one approval cannot smuggle an
+    # argument past the op it belongs to.
+    Op("chain", RISK_WRITE, plan_chain, apply_chain,
+       accepts=("steps", "retry", "restart_from")),
 ]
 
 mutations.OPS.update({op.name: op for op in CHAIN_OPS})

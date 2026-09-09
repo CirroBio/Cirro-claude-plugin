@@ -7,7 +7,8 @@ why the registration lives on this side.
 
 from .. import errors
 from . import mutations, reads, rows as R
-from .mutations import (Draft, Op, RISK_WRITE, RISK_DESTRUCTIVE, _inv, _need, _project)
+from .mutations import (Draft, Op, RISK_WRITE, RISK_DESTRUCTIVE, _inv, _need, _project,
+                        PROJECT_ARGS)
 
 
 def _share(reader: reads.Reader, project_id: str, share_id: str) -> dict:
@@ -260,16 +261,31 @@ def apply_workspace_action(reader: reads.Reader, args: dict) -> dict:
     return {"workspace_id": args["workspace_id"], "action": action}
 
 
+WORKSPACE_ACTION_ARGS = PROJECT_ARGS + ("workspace_id",)
+SHARE_ACTION_ARGS = PROJECT_ARGS + ("share_id",)
+
 SHARE_OPS = [
-    Op("create_share", RISK_WRITE, plan_create_share, apply_create_share),
-    Op("delete_share", RISK_DESTRUCTIVE, plan_delete_share, apply_delete_share),
-    Op("subscribe_share", RISK_WRITE, plan_subscribe_share, apply_share_subscription),
-    Op("unsubscribe_share", RISK_WRITE, plan_unsubscribe_share, apply_share_subscription),
-    Op("create_workspace", RISK_WRITE, plan_create_workspace, apply_create_workspace),
-    Op("start_workspace", RISK_WRITE, plan_start_workspace, apply_workspace_action),
-    Op("stop_workspace", RISK_WRITE, plan_stop_workspace, apply_workspace_action),
+    Op("create_share", RISK_WRITE, plan_create_share, apply_create_share,
+       accepts=PROJECT_ARGS + (
+           "name", "description", "keywords", "conditions", "classification_ids",
+           "is_view_restricted", "shared_project_ids")),
+    Op("delete_share", RISK_DESTRUCTIVE, plan_delete_share, apply_delete_share,
+       accepts=SHARE_ACTION_ARGS),
+    Op("subscribe_share", RISK_WRITE, plan_subscribe_share, apply_share_subscription,
+       accepts=SHARE_ACTION_ARGS),
+    Op("unsubscribe_share", RISK_WRITE, plan_unsubscribe_share, apply_share_subscription,
+       accepts=SHARE_ACTION_ARGS),
+    Op("create_workspace", RISK_WRITE, plan_create_workspace, apply_create_workspace,
+       accepts=PROJECT_ARGS + (
+           "name", "description", "container_image_uri", "environment_id",
+           "cpu", "memory_gi_b", "gpu", "volume_size_gi_b", "auto_stop_timeout",
+           "mounted_datasets", "sharing_type")),
+    Op("start_workspace", RISK_WRITE, plan_start_workspace, apply_workspace_action,
+       accepts=WORKSPACE_ACTION_ARGS),
+    Op("stop_workspace", RISK_WRITE, plan_stop_workspace, apply_workspace_action,
+       accepts=WORKSPACE_ACTION_ARGS),
     Op("delete_workspace", RISK_DESTRUCTIVE, plan_delete_workspace,
-       apply_workspace_action),
+       apply_workspace_action, accepts=WORKSPACE_ACTION_ARGS),
 ]
 
 mutations.OPS.update({op.name: op for op in SHARE_OPS})

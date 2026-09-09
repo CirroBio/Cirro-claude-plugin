@@ -3,6 +3,7 @@
 Covers the property the whole gate exists for: the operation that runs is the one
 whose rendered text was approved, and nothing else can be substituted for it.
 """
+import dataclasses
 import json
 import time
 
@@ -742,10 +743,12 @@ def test_a_warnings_only_change_counts_as_stale(writable_tenant, session_dir,
         draft = original(reader, args)
         draft.warnings = list(draft.warnings) + ["something new to know"]
         return draft
+    # Built from the real op so it differs in exactly one thing, the warnings. Stating
+    # the fields by hand dropped its declared argument surface, and the re-plan then
+    # failed on the arguments rather than on the disclosure this test is about.
+    real = dataset_ops.mutations.OPS["update_dataset"]
     monkeypatch.setitem(dataset_ops.mutations.OPS, "update_dataset",
-                        dataset_ops.mutations.Op("update_dataset", "cirro_write",
-                                                 louder,
-                                                 dataset_ops.apply_update_dataset))
+                        dataclasses.replace(real, plan=louder))
     applied = apply_from(writable_tenant, session_dir, planned)
     assert applied["error"]["code"] == "PLAN_STALE"
     assert applied["error"]["detail"]["changed"] == "disclosure"
@@ -953,3 +956,45 @@ def test_a_transfer_that_cannot_finish_is_flagged_before_the_approval():
     warning = dataset_ops._too_big_to_finish(int(budget * 3), "Upload")
     assert warning is not None
     assert "web UI" in warning and "Upload fewer files" in warning
+
+
+# --- an argument the operation does not read is refused, never dropped -------
+
+def test_an_argument_the_operation_does_not_read_is_refused(
+        writable_tenant, session_dir):
+    """`execution_mode` is the real case: it planned ok with no warning, rendered
+    "Cirro default (AWS Batch)", and the run went to Batch. The plan read as approved
+    and described something else."""
+    result = plan_run(writable_tenant, session_dir, execution_mode="HEALTHOMICS")
+    assert result["error"]["code"] == "INVALID_QUERY"
+    assert "execution_mode" in result["error"]["message"]
+    # The accepted keys are listed, so the caller can find the one it meant.
+    assert "environment_type" in result["error"]["detail"]["accepted"]
+
+
+def test_a_misspelled_argument_is_refused_rather_than_ignored(
+        writable_tenant, session_dir):
+    result = plan_run(writable_tenant, session_dir, enviroment_type="AWS_OMICS")
+    assert result["error"]["code"] == "INVALID_QUERY"
+    assert result["error"]["field"] == "enviroment_type"
+
+
+def test_the_refusal_offers_the_call_without_the_unknown_argument(
+        writable_tenant, session_dir):
+    result = plan_run(writable_tenant, session_dir, nonsense=1)
+    retry = result["error"]["remediation"]["retry_with"][0]
+    assert "nonsense" not in retry
+    assert retry["name"] == "RNAseq batch 32"
+
+
+def test_a_chain_step_is_held_to_its_own_ops_arguments(writable_tenant, session_dir):
+    """One approval covers several steps, so a step's arguments are checked against
+    the op that step names -- not against `chain`, and not waved through because the
+    chain as a whole was approved."""
+    result = call(writable_tenant, session_dir, "plan", op="chain", args={"steps": [
+        {"op": "update_dataset",
+         "args": {"project_id": "proj_a", "dataset_id": "ds_0000",
+                  "execution_mode": "HEALTHOMICS"}},
+    ]})
+    assert result["error"]["code"] == "INVALID_QUERY"
+    assert "execution_mode" in result["error"]["message"]
