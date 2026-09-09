@@ -11,9 +11,15 @@ resolve_plugin_root() {
 # into every install -- no .gitignore, no exclude list -- so a virtualenv left there
 # is shipped with the plugin. Three of them once made a 1.2 MB plugin a 536 MB one.
 # runner.plugin_data() is the other half of this and must agree; a test asserts it.
+#
+# CLAUDE_PLUGIN_DATA is deliberately not consulted, though the host does set it. It
+# reaches the MCP server and nothing else: `scripts/setup` runs over Bash, where it is
+# unset, so setup built the runtime under the XDG default while the server looked for
+# it under the host's path, found nothing, and died. Only a value every context can
+# name works here. CIRRO_AGENT_PLUGIN_DATA is set by whoever wants to override, and is
+# therefore set everywhere at once or not at all.
 resolve_plugin_data() {
   if [ -n "${CIRRO_AGENT_PLUGIN_DATA:-}" ]; then printf '%s' "$CIRRO_AGENT_PLUGIN_DATA"; return; fi
-  if [ -n "${CLAUDE_PLUGIN_DATA:-}" ]; then printf '%s' "$CLAUDE_PLUGIN_DATA"; return; fi
   printf '%s' "${XDG_DATA_HOME:-$HOME/.local/share}/cirro-agent"
 }
 

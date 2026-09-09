@@ -7,11 +7,17 @@ ROOT="${CIRRO_AGENT_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$(cd "$HERE/.." && pwd)}}
 # shellcheck source=/dev/null
 source "$ROOT/scripts/_resolve-python.sh"
 CIRRO_AGENT_PLUGIN_ROOT="$ROOT"; export CIRRO_AGENT_PLUGIN_ROOT
-if ! PY="$(resolve_python)"; then
-  # A missing runtime must not kill the server: the tools report it instead, so the
-  # user gets a usable message rather than a silent MCP connection failure.
-  PY="$(command -v python3 || true)"
-  if [ -z "$PY" ]; then exit 1; fi
-fi
 export PYTHONPATH="$ROOT/python/src${PYTHONPATH:+:$PYTHONPATH}"
-exec "$PY" -m cirro_agent.mcp_server
+
+if PY="$(resolve_python)"; then
+  exec "$PY" -m cirro_agent.mcp_server
+fi
+
+# A missing runtime must not kill the server: the tools report it instead, so the user
+# gets a usable message rather than a silent MCP connection failure. It cannot be
+# `mcp_server` under the ambient interpreter -- that module imports the third-party
+# `mcp` package at module scope and dies before any tool exists, which is the failure
+# this stanza is here to prevent. `mcp_unavailable` is stdlib-only for that reason.
+PY="$(command -v python3 || true)"
+if [ -z "$PY" ]; then exit 1; fi
+exec "$PY" -m cirro_agent.mcp_unavailable

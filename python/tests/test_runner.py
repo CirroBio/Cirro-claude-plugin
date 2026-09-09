@@ -72,28 +72,65 @@ def test_the_runtime_never_defaults_inside_the_plugin_root(tmp_path, monkeypatch
     honouring no .gitignore and taking no exclude list. Three virtualenvs left in
     the tree once turned a 1.2 MB plugin into a 536 MB one."""
     monkeypatch.setenv("CIRRO_AGENT_PLUGIN_ROOT", str(tmp_path))
-    for var in ("CIRRO_AGENT_PLUGIN_DATA", "CLAUDE_PLUGIN_DATA"):
-        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("CIRRO_AGENT_PLUGIN_DATA", raising=False)
     data = runner.plugin_data()
     assert tmp_path != data and tmp_path not in data.parents, \
         f"{data} is inside the plugin root and would ship with the plugin"
     assert tmp_path not in (runner.plugin_data() / runner.DEV_VENV).parents
 
 
-def test_the_shell_resolver_and_the_runner_agree_on_the_runtime_location(monkeypatch):
-    """Two mirrors of one path: scripts/setup builds where the shell says, and the
-    worker is launched from where the runner says. Drift means setup silently
-    installs somewhere nothing looks."""
+# --- the two resolvers, in the environments they are really called in --------
+#
+# scripts/setup builds where the shell resolver says; the worker and the MCP server
+# launch from where the runner says. Asking both in one environment cannot detect the
+# drift that matters, because the drift is in the environments themselves.
+
+HOST_PLUGIN_DATA = "/tmp/cirro-host-managed-plugin-data"
+
+
+def _shell_plugin_data(env: dict) -> Path:
     import subprocess
     root = Path(__file__).resolve().parents[2]
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("CIRRO_AGENT_PLUGIN_DATA", "CLAUDE_PLUGIN_DATA")}
-    shell = subprocess.run(
+    out = subprocess.run(
         ["bash", "-c", f'source "{root}/scripts/_resolve-python.sh"; resolve_plugin_data'],
         capture_output=True, text=True, env=env, check=True).stdout.strip()
-    for var in ("CIRRO_AGENT_PLUGIN_DATA", "CLAUDE_PLUGIN_DATA"):
-        monkeypatch.delenv(var, raising=False)
-    assert Path(shell) == runner.plugin_data()
+    return Path(out)
+
+
+def _env_without_data_vars() -> dict:
+    return {k: v for k, v in os.environ.items()
+            if k not in ("CIRRO_AGENT_PLUGIN_DATA", "CLAUDE_PLUGIN_DATA")}
+
+
+def test_a_host_managed_data_dir_cannot_split_the_two_resolvers(monkeypatch):
+    """CLAUDE_PLUGIN_DATA reaches the MCP server and nothing else.
+
+    While it was honoured, `/cirro:setup` -- which runs over Bash, where the host
+    does not set it -- built the runtime under the XDG default, and the server looked
+    for it under the host's path, found nothing, fell back to an interpreter that
+    cannot import `mcp`, and died. A fresh install that had just run setup correctly
+    reported only "MCP server failed to connect".
+    """
+    monkeypatch.delenv("CIRRO_AGENT_PLUGIN_DATA", raising=False)
+    over_bash = _shell_plugin_data(_env_without_data_vars())
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", HOST_PLUGIN_DATA)
+    in_the_mcp_server = runner.plugin_data()
+
+    assert over_bash == in_the_mcp_server, \
+        "setup installs where the shell says and the server launches from where the " \
+        "runner says; a value only one of them can see puts them in different places"
+    assert HOST_PLUGIN_DATA not in str(in_the_mcp_server)
+    assert _shell_plugin_data(
+        {**_env_without_data_vars(), "CLAUDE_PLUGIN_DATA": HOST_PLUGIN_DATA}) == over_bash
+
+
+def test_the_explicit_override_still_redirects_both_resolvers(tmp_path, monkeypatch):
+    """CIRRO_AGENT_PLUGIN_DATA is the override that replaced it: nothing sets it
+    behind your back, so it is set for every context at once or for none."""
+    monkeypatch.setenv("CIRRO_AGENT_PLUGIN_DATA", str(tmp_path))
+    env = {**_env_without_data_vars(), "CIRRO_AGENT_PLUGIN_DATA": str(tmp_path)}
+    assert _shell_plugin_data(env) == runner.plugin_data() == tmp_path
 
 
 # --- a transfer is bounded by bandwidth, not by the API ----------------------

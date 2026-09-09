@@ -176,15 +176,45 @@ list inside Claude Code. There is a `mode: "link"` source that copies nothing, b
 exists only for `command` sources, not the relative path a marketplace entry uses. So
 both virtualenvs default outside the root -- `${XDG_DATA_HOME:-~/.local/share}/cirro-agent`,
 holding `venv` and `dev-venv` -- and `test_runner.py` asserts the default is outside
-the root and that the shell resolver and `runner.plugin_data()` still agree. They had
-drifted inside it once: 1.2 MB of tracked content installed as 536 MB, three copies of
-one virtualenv, one of them in a git worktree nobody had removed.
+the root. They had drifted inside it once: 1.2 MB of tracked content installed as
+536 MB, three copies of one virtualenv, one of them in a git worktree nobody had
+removed.
 
 The same rule covers the session folder, and there the stake is not disk. Binding this
 repo's own directory to a tenant puts `.cirro/` in the plugin root, so the tenant URL,
 the username and the SDK's token cache are copied into the plugin cache on every
 install. The token file happened to be empty when this was found; it is not always.
 Bind a scratch directory for testing, not the checkout.
+
+**One data directory, named identically in every context.** `runner.plugin_data()`
+and the shell's `resolve_plugin_data` locate the runtime, and `tenants_root()` hangs
+off the same answer. Neither consults `CLAUDE_PLUGIN_DATA`, though the host sets it,
+and that is the whole point: the host sets it *for the MCP server and for nothing
+else*. `scripts/setup`, `bin/cirro-agent` and the hook all run over Bash, where it is
+absent. While it was honoured the plugin resolved to two different directories at
+once -- setup built the runtime under the XDG default, the server looked for it under
+the host's path, found nothing, fell back to an interpreter that cannot import `mcp`
+and died, so a fresh install that had just run setup *correctly* reported nothing but
+"MCP server failed to connect". The credential half had not been reached yet and was
+worse: a login through `login_start` would have written the tenant folder under the
+host's path, where no read over Bash would ever look, and every one of them would
+have said no tenant was signed in. `CIRRO_AGENT_PLUGIN_DATA` stays as the override
+precisely because nothing sets it behind your back -- it is set for every context at
+once or for none. `test_runner.py` now asks the two resolvers *in the environments
+they are really called in*; the test it replaces asked both in one environment and
+therefore could not fail.
+
+**The missing-runtime fallback cannot be `mcp_server` under the ambient interpreter.**
+That module imports the third-party `mcp` package at module scope, so it dies before
+a single tool exists and the host reports only a connection failure -- the exact
+outcome the fallback was written to prevent, and what every install looks like between
+`claude plugin install` and `/cirro:setup`. `mcp_unavailable` stands in instead:
+stdlib only, so any `python3` can run it, advertising the same eight tools and
+answering every call with the RUNTIME_NOT_INSTALLED payload -- carrying `looked_in`,
+which is the one fact separating "never installed" from "installed somewhere else".
+Its tool list is duplicated from `mcp_server` because importing that module is what it
+exists to avoid; `test_mcp_unavailable.py` pins the two together and drives
+`scripts/mcp-server` end to end against a data directory with no virtualenv in it.
 
 **`CIRRO_HOME` is frozen at import time.** `cirro.config.Constants` reads it in a class
 body, so it must be in a child process's environment *before* Python starts. Setting

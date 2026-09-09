@@ -27,6 +27,10 @@ This builds an isolated Python environment containing the Cirro SDK. It needs
 runs it behind your back — a silent two-minute install inside something that looks
 instant is a bad surprise.
 
+Until it has run, the Cirro tools load but decline every call, saying the runtime is
+missing and naming this command. That is what a fresh install looks like, not a broken
+one.
+
 Now go to whatever directory you want to work in and ask Claude to connect to Cirro.
 It will ask for your Cirro hostname (something like `app.cirro.bio`), then hand you a
 link to sign in with. After that, just ask for what you want:

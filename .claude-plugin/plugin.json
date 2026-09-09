@@ -22,8 +22,7 @@
       "command": "${CLAUDE_PLUGIN_ROOT}/scripts/mcp-server",
       "args": [],
       "env": {
-        "CIRRO_AGENT_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}",
-        "CIRRO_AGENT_PLUGIN_DATA": "${CLAUDE_PLUGIN_DATA}"
+        "CIRRO_AGENT_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
       }
     }
   }

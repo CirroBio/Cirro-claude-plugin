@@ -42,11 +42,16 @@ def plugin_data() -> Path:
     A directory marketplace copies that tree verbatim into every install -- no
     .gitignore, no exclude list -- so a virtualenv left there is shipped with the
     plugin. `scripts/_resolve-python.sh` is the other half of this and must agree.
+
+    CLAUDE_PLUGIN_DATA is deliberately not consulted; the reason is on the shell
+    side. It is set for the MCP server and for nothing else, so honouring it split
+    this path in two -- setup and `cirro-agent` naming one directory, the server and
+    its workers another. Tenant folders hang off here too, so the split reached
+    credentials: a login through the server was invisible to a read over Bash.
     """
-    for var in ("CIRRO_AGENT_PLUGIN_DATA", "CLAUDE_PLUGIN_DATA"):
-        value = os.environ.get(var)
-        if value:
-            return Path(value)
+    value = os.environ.get("CIRRO_AGENT_PLUGIN_DATA")
+    if value:
+        return Path(value)
     share = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
     return Path(share) / "cirro-agent"
 
