@@ -176,9 +176,29 @@ def project(obj) -> dict:
     }
 
 
+def execution_modes(obj) -> list:
+    """Which execution environments a process declares: STANDARD, HEALTHOMICS, or both.
+
+    `executionModes` is in the API spec and the pinned cirro-api-client's `Process`
+    does not model it, so the server's value arrives in `additional_properties`. The
+    modeled attribute is preferred and checked first, so this reverts to an ordinary
+    field read the moment the client catches up -- and then this helper goes away.
+
+    Absent is not the same as empty: the spec makes the array nullable with minItems 1,
+    and the portal reads a missing value as [STANDARD]. Doing the same here keeps a
+    process that predates the field runnable rather than silently HealthOmics-incapable.
+    """
+    declared = plain(getattr(obj, "execution_modes", None))
+    if not declared:
+        extra = getattr(obj, "additional_properties", None) or {}
+        declared = extra.get("executionModes")
+    return [str(m) for m in declared] if declared else ["STANDARD"]
+
+
 def process(obj) -> dict:
     owner = plain(getattr(obj, "owner", None))
     return {
+        "execution_modes": execution_modes(obj),
         "owner": owner,
         # A blank owner means Cirro curated it; anything else was user-registered.
         "is_custom": bool(owner),

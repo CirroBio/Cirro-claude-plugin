@@ -87,9 +87,9 @@ def _user_payload(username="sminot", email="sminot@cirro.test", notifications=Tr
 
 
 def _process_payload(pid, name, executor, category, pipeline_type, description="",
-                     parents=(), children=()):
+                     parents=(), children=(), modes=()):
     from cirro_api_client.v1.models import Process, Executor
-    return Process(
+    payload = Process(
         id=pid, name=name, description=description, data_type="paired_dnaseq",
         executor=Executor(executor), child_process_ids=list(children),
         parent_process_ids=list(parents),
@@ -97,6 +97,12 @@ def _process_payload(pid, name, executor, category, pipeline_type, description="
         uses_sample_sheet=True, is_archived=False, tags=[],
         category=category, pipeline_type=pipeline_type,
     ).to_dict()
+    # The pinned client does not model `executionModes`, so the server's value arrives
+    # as an extra property. Setting it here rather than on the model is what the wire
+    # actually looks like, and is what `rows.execution_modes` has to cope with.
+    if modes:
+        payload["executionModes"] = list(modes)
+    return payload
 
 
 def _detail_payload(base):
@@ -244,7 +250,9 @@ def fake_tenant(monkeypatch):
         # relationship from either end, so one of each is here on purpose.
         _process_payload("proc_rnaseq", "nf-core/rnaseq v3.14", "NEXTFLOW",
                          "Transcriptomics", "nf-core", "RNA-seq",
-                         parents=("proc_ingest",)),
+                         parents=("proc_ingest",),
+                         modes=("STANDARD", "HEALTHOMICS")),
+        # Declares no modes at all, which is the older shape and means Batch only.
         _process_payload("proc_sarek", "nf-core/sarek v3.4", "NEXTFLOW",
                          "Genomics", "nf-core", "WGS"),
         _process_payload("proc_ingest", "Paired DNA sequencing", "INGEST",

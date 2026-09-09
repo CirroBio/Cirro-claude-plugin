@@ -15,6 +15,73 @@ from .mutations import (_tag_models, Draft, Op, RISK_WRITE, _inv, _need, _projec
                         _target_folders, _wire_tags)
 
 
+# Where a run executes. These are `EnvironmentType` values from the API, and they are
+# deliberately not the `executionModes` vocabulary a process declares: a pipeline says
+# HEALTHOMICS, a request says AWS_OMICS. Conflating the two is what makes a wrong value
+# look plausible, so `HEALTHOMICS` is rejected by name rather than quietly accepted.
+AWS_OMICS = "AWS_OMICS"
+AWS_BATCH = "AWS_BATCH"
+ENVIRONMENT_TYPES = (AWS_OMICS, AWS_BATCH)
+HEALTHOMICS_MODE = "HEALTHOMICS"
+
+
+def _environment_type(args: dict, process: dict) -> Optional[str]:
+    """Which execution environment to ask for, or None to let Cirro choose.
+
+    None is what the portal sends for Batch -- `resolveEnvironmentType` returns
+    undefined rather than AWS_BATCH -- so an explicit AWS_BATCH is normalized to it.
+    """
+    given = args.get("environment_type")
+    if not given:
+        return None
+    value = str(given).strip().upper()
+    if value == HEALTHOMICS_MODE:
+        raise errors.InvalidQuery(
+            f"{HEALTHOMICS_MODE!r} is a process execution mode, not an environment "
+            f"type; the run request wants {AWS_OMICS!r}.",
+            what="Name the environment the run executes in.", field="environment_type",
+            given=given, retry_with=[{"environment_type": AWS_OMICS}],
+        )
+    if value not in ENVIRONMENT_TYPES:
+        # NONE and LOCAL_AGENT are real EnvironmentType values and are still refused:
+        # the backend rejects NONE outright, and a local-agent run is not something
+        # this operation can set up.
+        raise errors.InvalidQuery(
+            f"environment_type {given!r} is not one this operation accepts.",
+            what=f"Use one of {list(ENVIRONMENT_TYPES)}, or omit it for Cirro's "
+                 "default.",
+            field="environment_type", given=given,
+            retry_with=[{"environment_type": v} for v in ENVIRONMENT_TYPES],
+        )
+    if value == AWS_BATCH:
+        return None
+    if args.get("compute_environment"):
+        # The backend 400s on this combination, and that arrives after approval. A
+        # customer compute environment already names where it runs, which is why the
+        # portal sends no environmentType whenever one is selected.
+        raise errors.InvalidQuery(
+            "environment_type and compute_environment cannot both be set.",
+            what="A compute environment already names where the run executes; drop "
+                 "one of the two.",
+            field="environment_type", given=given,
+            retry_with=[{"compute_environment": None, "environment_type": AWS_OMICS},
+                        {"environment_type": None}],
+        )
+    modes = process.get("execution_modes") or []
+    if HEALTHOMICS_MODE not in modes:
+        # The backend refuses this too, but refusing it here keeps the failure on the
+        # read-only side of the approval gate.
+        raise errors.InvalidQuery(
+            f"{process['name']!r} does not declare {HEALTHOMICS_MODE} and cannot run "
+            "on AWS HealthOmics.",
+            what="Pick a pipeline that declares HEALTHOMICS, or omit environment_type "
+                 "to run on Cirro's default.",
+            field="environment_type", given=given, declared_modes=modes,
+            retry_with=[{"environment_type": None}],
+        )
+    return AWS_OMICS
+
+
 def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
     _need(args, "run_analysis", "name", "process")
     project = _project(reader, args)
@@ -61,8 +128,11 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
     notify, notify_shown, notify_warnings = _notify(reader, args)
     warnings += notify_warnings
 
+    environment_type = _environment_type(args, process)
+
     compute = args.get("compute_environment")
-    compute_label = "Cirro default (AWS Batch)"
+    compute_label = ("AWS HealthOmics" if environment_type == AWS_OMICS
+                     else "Cirro default (AWS Batch)")
     if compute:
         environments = reader.compute_environments(project["id"])
         match = next((e for e in environments if compute in (e["id"], e["name"])), None)
@@ -85,6 +155,10 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
         "params": params,
         "notification_emails": notify,
         "compute_environment_id": compute,
+        # None means "omit", which is how the portal asks for Batch. Sending AWS_BATCH
+        # explicitly is a different request and interacts differently with the
+        # backend's compute-environment conflict check.
+        "environment_type": environment_type,
         "resume_dataset_id": args.get("resume_dataset_id"),
         "source_sample_ids": args.get("source_sample_ids") or [],
         "tags": args.get("tags") or [],
@@ -142,6 +216,17 @@ def apply_run_analysis(reader: reads.Reader, args: dict) -> dict:
                      "source_sample_ids"):
         if args.get(optional):
             setattr(request, optional, args[optional])
+    if args.get("environment_type"):
+        # `environmentType` is in the API spec but the pinned cirro-api-client does not
+        # model it on this request. `to_dict` merges additional_properties, so the
+        # field reaches the wire either way -- and the modeled attribute is preferred,
+        # so this whole branch collapses to a setattr when the client catches up.
+        # The generated models are attrs, not dataclasses, so this asks the instance
+        # rather than reading __dataclass_fields__, which they do not have.
+        if hasattr(request, "environment_type"):
+            request.environment_type = args["environment_type"]
+        else:
+            request.additional_properties["environmentType"] = args["environment_type"]
     # Folders are tags, and RunAnalysisRequest carries tags -- so the output dataset
     # is filed at launch, in the same call, instead of needing an update afterwards.
     combined = _wire_tags(args.get("folders"), args.get("tags"))

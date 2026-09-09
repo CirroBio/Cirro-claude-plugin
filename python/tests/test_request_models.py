@@ -30,7 +30,7 @@ APPLY_CASES = {
         # asked otherwise, so a resolved launch normally carries one.
         "description": "", "notification_emails": ["sminot@cirro.test"],
         "compute_environment_id": None, "resume_dataset_id": None,
-        "source_sample_ids": []},
+        "environment_type": None, "source_sample_ids": []},
     # Shares apply_run_analysis, so its request construction was only ever covered
     # transitively -- and the chain guard that checks a declared output is really
     # returned skips any op absent from here, so resume_analysis' `created_dataset_id`
@@ -165,6 +165,28 @@ def test_run_analysis_sends_the_notification_address():
     request = reader.client.execution.run_analysis.call_args.kwargs["request"]
     assert request.notification_emails == ["sminot@cirro.test"]
     assert request.to_dict()["notificationEmails"] == ["sminot@cirro.test"]
+
+
+def test_run_analysis_puts_the_environment_type_on_the_wire():
+    """`environmentType` is in the API spec and the pinned cirro-api-client does not
+    model it on this request, so it travels as an extra property that `to_dict` merges.
+    Asserting the serialized body, not the attribute, is the point: an attribute the
+    model drops on the floor is exactly the silent redirect this feature exists to
+    prevent."""
+    reader = _reader()
+    args = dict(APPLY_CASES["run_analysis"], environment_type="AWS_OMICS")
+    mutations.OPS["run_analysis"].apply(reader, args)
+    request = reader.client.execution.run_analysis.call_args.kwargs["request"]
+    assert request.to_dict()["environmentType"] == "AWS_OMICS"
+
+
+def test_run_analysis_omits_the_environment_type_for_batch():
+    """Batch is an absent field, not AWS_BATCH: that is what the portal sends, and an
+    explicit value interacts differently with the compute-environment conflict check."""
+    reader = _reader()
+    mutations.OPS["run_analysis"].apply(reader, dict(APPLY_CASES["run_analysis"]))
+    request = reader.client.execution.run_analysis.call_args.kwargs["request"]
+    assert "environmentType" not in request.to_dict()
 
 
 def test_create_project_sends_the_budget():

@@ -165,6 +165,8 @@ PROCESS = EntitySpec(
         "documentation_url": (LIST, "external docs"),
         "child_process_ids": (LIST, "processes that can consume this one's output"),
         "parent_process_ids": (LIST, "processes whose output this one can consume"),
+        "execution_modes": (LIST, "STANDARD (AWS Batch) | HEALTHOMICS; a run_analysis"
+                                  " with environment_type AWS_OMICS needs HEALTHOMICS"),
         "file_requirements_message": (LIST, "human description of required input files"),
         "is_tenant_wide": (LIST, "shared with the whole tenant"),
         "owner": (LIST, "username of the creator; blank means Cirro-curated"),

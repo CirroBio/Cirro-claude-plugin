@@ -130,6 +130,20 @@ output dataset straight into a Cirro folder. Folder membership lives in the data
 tag list and the launch request carries tags, so it costs no extra call and no second
 approval. Launching and then moving is two approvals for one intention.
 
+**Running on AWS HealthOmics.** Pass `environment_type: "AWS_OMICS"`. Omit it for
+Cirro's default, which is AWS Batch — that is what the web UI sends, and `AWS_BATCH`
+is accepted as a synonym for omitting it. Two things to keep straight:
+
+- `AWS_OMICS` is the *request* vocabulary. `HEALTHOMICS` is what a **pipeline**
+  declares in `execution_modes`, and passing it as `environment_type` is an error.
+  Check the pipeline first: `cirro-agent read process <id>` shows `execution_modes`,
+  and a pipeline without `HEALTHOMICS` is refused at plan time.
+- It cannot be combined with `compute_environment`. A customer compute environment
+  already names where the run executes, so pick one or the other.
+
+The plan's `Compute` line states the target. Read it out — it is the only place the
+person sees which service will actually run the workflow.
+
 ## 5. Show the plan to the user, then apply
 
 **Put the `rendered` text in your own message to the user.** Do not summarize it, do

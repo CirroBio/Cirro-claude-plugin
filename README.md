@@ -232,6 +232,10 @@ A few things worth knowing:
   approve it. Pass `notification_emails` to notify someone else, or an empty list to
   notify nobody. If your address cannot be looked up the plan says so and notifies
   nobody, rather than holding up the launch.
+- **A run can target AWS HealthOmics** instead of Cirro's default AWS Batch, if the
+  pipeline supports it. Ask for it and the plan's `Compute` line names the target
+  before you approve. A pipeline that does not declare HealthOmics is refused while
+  the plan is still read-only, rather than after you have said yes.
 - **Some things are deliberately not offered** — renaming or re-billing a project,
   editing a live share's conditions, billing changes. Those belong in the Cirro web UI
   where their effects are visible.

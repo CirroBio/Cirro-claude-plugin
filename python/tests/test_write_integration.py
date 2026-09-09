@@ -191,6 +191,84 @@ def test_plan_requires_an_input_dataset_for_a_pipeline_something_feeds(
     assert result["error"]["code"] == "INVALID_QUERY"
 
 
+# --- which cloud service executes the run ------------------------------------
+
+def test_healthomics_is_named_in_the_approval_text(writable_tenant, session_dir):
+    """The rendered text is the only thing the person reads. While environment_type
+    was silently dropped it said "Cirro default (AWS Batch)" for a run the caller had
+    asked to send to HealthOmics -- a plan that reads as approved for one thing and
+    runs as another."""
+    result = plan_run(writable_tenant, session_dir, environment_type="AWS_OMICS")
+    assert result["ok"], result
+    assert "Compute      AWS HealthOmics" in result["rendered"]
+    record = json.loads(
+        (session_dir.path / "plans" / f"{result['plan_id']}.json").read_text())
+    assert record["args"]["environment_type"] == "AWS_OMICS"
+
+
+def test_batch_is_an_omitted_field_not_an_explicit_value(writable_tenant, session_dir):
+    """`resolveEnvironmentType` returns undefined for Batch rather than AWS_BATCH, and
+    an explicit value interacts differently with the backend's compute-environment
+    conflict check. Asking for AWS_BATCH normalizes to omitting it."""
+    for given in (None, "AWS_BATCH"):
+        result = plan_run(writable_tenant, session_dir, environment_type=given)
+        assert result["ok"], result
+        assert "Compute      Cirro default (AWS Batch)" in result["rendered"]
+        record = json.loads(
+            (session_dir.path / "plans" / f"{result['plan_id']}.json").read_text())
+        assert record["args"]["environment_type"] is None
+
+
+def test_a_pipeline_that_does_not_declare_healthomics_is_refused_in_plan(
+        writable_tenant, session_dir):
+    """The backend refuses it too, but after approval. Refusing in plan keeps the
+    failure on the read-only side of the gate."""
+    result = plan_run(writable_tenant, session_dir, process="proc_sarek",
+                      environment_type="AWS_OMICS")
+    assert result["error"]["code"] == "INVALID_QUERY"
+    assert "HEALTHOMICS" in result["error"]["message"]
+
+
+def test_the_process_mode_vocabulary_is_not_the_request_vocabulary(
+        writable_tenant, session_dir):
+    """A pipeline declares HEALTHOMICS; a run request asks for AWS_OMICS. Accepting
+    the former quietly is how a wrong value looks plausible, so it is named and
+    redirected instead."""
+    result = plan_run(writable_tenant, session_dir, environment_type="HEALTHOMICS")
+    assert result["error"]["code"] == "INVALID_QUERY"
+    assert result["error"]["remediation"]["retry_with"] == [
+        {"environment_type": "AWS_OMICS"}]
+
+
+def test_an_environment_this_operation_cannot_set_up_is_refused(
+        writable_tenant, session_dir):
+    """NONE and LOCAL_AGENT are real EnvironmentType values; the backend rejects the
+    first outright and the second is not something run_analysis can arrange."""
+    for given in ("NONE", "LOCAL_AGENT", "AWS_LAMBDA"):
+        result = plan_run(writable_tenant, session_dir, environment_type=given)
+        assert result["error"]["code"] == "INVALID_QUERY", given
+
+
+def test_an_environment_type_and_a_compute_environment_conflict_in_plan(
+        writable_tenant, session_dir):
+    """A customer compute environment already names where the run executes, which is
+    why the portal sends no environmentType when one is selected. The backend 400s on
+    the combination, and that arrives after approval."""
+    result = plan_run(writable_tenant, session_dir, environment_type="AWS_OMICS",
+                      compute_environment="HPC test")
+    assert result["error"]["code"] == "INVALID_QUERY"
+    assert "cannot both be set" in result["error"]["message"]
+
+
+def test_a_process_declaring_no_modes_still_runs_on_batch(writable_tenant, session_dir):
+    """The spec makes executionModes nullable and the portal reads a missing value as
+    STANDARD. Treating absent as "declares nothing" would strand every process that
+    predates the field."""
+    result = plan_run(writable_tenant, session_dir, process="proc_sarek")
+    assert result["ok"], result
+    assert "Compute      Cirro default (AWS Batch)" in result["rendered"]
+
+
 def test_a_pipeline_nothing_feeds_launches_with_no_input_dataset(
         writable_tenant, session_dir):
     """The platform allows it at every layer -- `sourceDatasetIds` is @NotNull rather
