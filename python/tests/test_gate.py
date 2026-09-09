@@ -5,12 +5,21 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 import pytest
 
 GATE = Path(__file__).resolve().parents[2] / "scripts" / "gate.py"
+
+# The gate resolves a signed-in tenant folder under `plugin_data()`, and every test
+# here runs it as a subprocess -- where conftest's in-process redirect of
+# `tenants_root` cannot reach. Left on the developer's own data directory, two tests
+# flip from ask to deny the moment that developer signs in to a tenant, which is the
+# machine-dependence that fixture exists to prevent. CI only stayed green because it
+# points the variable at a fresh runner temp directory.
+ISOLATED_DATA = Path(tempfile.mkdtemp(prefix="cirro-gate-tests-"))
 
 ALLOW, ASK, DENY = "allow", "ask", "deny"
 
@@ -20,6 +29,7 @@ def decide(event: dict, env: dict | None = None) -> tuple:
     child = dict(os.environ)
     # It bounds the session resolver's upward walk, so a test that cares sets it.
     child.pop("CLAUDE_PROJECT_DIR", None)
+    child["CIRRO_AGENT_PLUGIN_DATA"] = str(ISOLATED_DATA)
     child.update(env or {})
     done = subprocess.run([sys.executable, str(GATE)], input=json.dumps(event),
                           capture_output=True, text=True, timeout=30, env=child)
