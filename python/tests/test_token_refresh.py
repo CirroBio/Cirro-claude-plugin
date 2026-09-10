@@ -110,3 +110,67 @@ def test_the_lock_holds_between_processes(session_dir, tmp_path):
     assert second_in >= first_out, (
         f"the refreshes overlapped ({first_in:.3f}-{first_out:.3f} and "
         f"{second_in:.3f}-...); the lock is not serializing across processes")
+
+
+class FakeKeychainError(OSError):
+    """`msal_extensions.osx.KeychainError`, which is what actually reaches us.
+
+    Reproduced rather than imported so the mapping is pinned to the shape that
+    caused the bug -- `super().__init__()` with no arguments, so `str()` is empty
+    and `exit_status` carries the whole diagnosis. `test_runtime_contract.py`
+    holds the real class to this shape.
+    """
+
+    __module__ = "msal_extensions.osx"
+
+    def __init__(self, exit_status):
+        super().__init__()
+        self.exit_status = exit_status
+
+
+def test_a_locked_keychain_is_not_a_cirro_fault():
+    """An 8-step chain outlives its access token, so the SDK refreshes mid-run and
+    rewrites the Keychain. A login keychain that re-locked refuses with -25308, and
+    that arrived as `UPSTREAM_ERROR: "KeychainError: "` -- retryable severity, an
+    empty message, and advice to check Cirro's service status for a local fault."""
+    wrapped = portal.wrap_upstream(FakeKeychainError(exit_status=-25308),
+                                   what="run_analysis failed during execution.")
+    assert wrapped.code == "CREDENTIAL_STORE_UNAVAILABLE"
+    assert wrapped.severity == "user_action", "retrying cannot unlock a keychain"
+    assert "-25308" in wrapped.message and "locked" in wrapped.message
+    assert wrapped.detail["exit_status"] == -25308
+    assert "service status" not in (wrapped.user_action or "")
+
+
+def test_a_dismissed_prompt_is_not_answered_with_unlock_your_keychain():
+    """-128 is the person clicking Deny, not a locked keychain, so the two cannot
+    share advice: telling them to unlock what is already unlocked explains nothing."""
+    wrapped = portal.wrap_upstream(FakeKeychainError(exit_status=-128), what="w")
+    assert "Allow" in wrapped.user_action and "Unlock" not in wrapped.user_action
+
+
+def test_a_missing_keychain_item_sends_the_person_to_log_in_again():
+    """The credential is gone rather than unreachable, so unlocking cannot help."""
+    wrapped = portal.wrap_upstream(FakeKeychainError(exit_status=-25300),
+                                   what="w")
+    assert wrapped.code == "CREDENTIAL_STORE_UNAVAILABLE"
+    assert "login_start" in wrapped.user_action
+
+
+def test_an_unnamed_keychain_status_still_reports_its_number():
+    """The table cannot cover every MacErrors.h code, but the number is the one
+    fact that lets a person look the failure up."""
+    wrapped = portal.wrap_upstream(FakeKeychainError(exit_status=-26276), what="w")
+    assert "-26276" in wrapped.message
+    assert wrapped.detail["exit_status"] == -26276
+
+
+def test_an_exception_with_no_message_does_not_render_a_dangling_colon():
+    """The general form of the bug, for whatever raises it next: an exception built
+    with no arguments has an empty `str()`, and name-colon-nothing reads as a message
+    that got truncated on the way out."""
+    class Silent(RuntimeError):
+        pass
+
+    assert portal.wrap_upstream(Silent(), what="w").message == "Silent"
+    assert portal.wrap_upstream(Silent("it said"), what="w").message == "Silent: it said"

@@ -488,6 +488,26 @@ def test_a_chain_that_fails_at_its_first_step_is_an_error_because_nothing_change
     assert log == [], "the planner refused, so apply never ran"
 
 
+def test_a_chain_that_ran_nothing_says_so_even_when_the_step_had_its_own_advice(
+        monkeypatch):
+    """The steps are launches, so whether anything ran decides whether planning again
+    would run it twice. `user_action or "Nothing was changed."` said nothing in exactly
+    the case that needs it: a wrapped upstream fault always carries a user_action, so
+    the fallback never fired and the reader could not tell a failed launch from a
+    launch whose response was lost."""
+    _fake_ops(monkeypatch, [], fail_at="consumer",
+              fail_with=errors.Forbidden("not yours", what="w",
+                                         user_action="ask for access"))
+    with pytest.raises(errors.AgentError) as caught:
+        chain_ops.apply_chain(MagicMock(), {"steps": [
+            {"op": "consumer", "args": {"uses": "made-a"}},
+            {"op": "consumer", "args": {"uses": "made-b"}},
+        ]})
+    assert "No step ran" in caught.value.user_action
+    assert "ask for access" in caught.value.user_action, "the step's own advice stands"
+    assert caught.value.detail["n_completed"] == 0
+
+
 def test_a_typed_refusal_mid_chain_keeps_its_code(monkeypatch):
     log = []
     _fake_ops(monkeypatch, log,

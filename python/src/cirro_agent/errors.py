@@ -85,6 +85,9 @@ RuntimeNotInstalled = _err("RUNTIME_NOT_INSTALLED", USER_ACTION)
 AuthRequired = _err("AUTH_REQUIRED", USER_ACTION)
 AuthExpired = _err("AUTH_EXPIRED", USER_ACTION)
 Forbidden = _err("FORBIDDEN", USER_ACTION)
+# The credential is fine; the OS store holding it refused. Distinct from AUTH_EXPIRED
+# because logging in again writes to the same store and fails the same way.
+CredentialStoreUnavailable = _err("CREDENTIAL_STORE_UNAVAILABLE", USER_ACTION)
 
 # Resolution. The agent can fix all of these from the payload we hand back.
 AmbiguousName = _err("AMBIGUOUS_NAME", AGENT_ACTION)

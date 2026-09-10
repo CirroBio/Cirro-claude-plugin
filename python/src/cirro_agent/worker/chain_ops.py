@@ -675,11 +675,17 @@ def apply_chain(reader: reads.Reader, args: dict) -> dict:
     if done:
         return response
     # Nothing changed, so the caller gets the step's own typed refusal -- a NotFound
-    # or InvalidQuery is something to fix, not something to retry.
+    # or InvalidQuery is something to fix, not something to retry. That nothing ran is
+    # stated alongside the step's own advice rather than instead of it: a wrapped
+    # upstream fault always carries a user_action, so as an `or` fallback this said
+    # nothing in exactly the case where the steps are launches and the reader has to
+    # decide whether planning again would run them twice.
+    nothing_ran = "No step ran, so nothing was changed."
+    action = f"{nothing_ran} {exc.user_action}" if exc.user_action else nothing_ran
     raise type(exc)(exc.message, what=exc.what, field=exc.field, given=exc.given,
                     candidates=exc.candidates, retry_with=exc.retry_with,
-                    user_action=exc.user_action or "Nothing was changed.",
-                    failed_at=failure, **exc.detail)
+                    user_action=action,
+                    **{**exc.detail, "failed_at": failure, "n_completed": 0})
 
 
 CHAIN_OPS = [

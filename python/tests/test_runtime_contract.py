@@ -176,3 +176,30 @@ def test_device_code_auth_still_exposes_what_the_refresh_lock_drives():
     for attribute in ("_token_info", "access_token_expiry"):
         assert f"self.{attribute} =" in source, (
             f"DeviceCodeAuth no longer sets {attribute}; portal._refresh_due reads it")
+
+
+def test_the_token_store_still_raises_what_the_credential_mapping_reads():
+    """`portal._credential_store_failure` turns a refusal from the OS credential store
+    into CREDENTIAL_STORE_UNAVAILABLE, and it has only two things to work from: the
+    exception's module, and `exit_status`. Neither is public API.
+
+    On macOS the SDK persists the token through msal_extensions' `KeychainPersistence`
+    and rewrites it on every lazy refresh, so any operation outliving its access token
+    writes to the Keychain mid-run -- which is where a re-locked keychain refuses. If
+    `exit_status` is ever renamed the mapping still fires but reports `status None`,
+    losing the only fact that distinguishes a locked keychain from a missing one.
+    """
+    import inspect
+    from cirro.auth import device_code
+    from msal_extensions.osx import KeychainError
+
+    assert KeychainError.__module__.startswith("msal_extensions"), (
+        "the mapping recognises a store failure by module")
+    assert "exit_status" in inspect.signature(KeychainError.__init__).parameters, (
+        "KeychainError no longer carries exit_status; the mapping would report None")
+    assert str(KeychainError(exit_status=-25308)) == "", (
+        "KeychainError now has a message of its own -- portal.describe can stop "
+        "standing in for it, and the mapping should carry the SDK's own text")
+
+    assert "KeychainPersistence" in inspect.getsource(device_code), (
+        "cirro no longer stores the token in the OS keychain on macOS")

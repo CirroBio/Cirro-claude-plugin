@@ -114,7 +114,11 @@ moment, one renews it and the other waits and picks up the result, rather than b
 asking Cirro at once — which used to risk being throttled, and a throttled refresh
 discards the stored login. A token that expires in the middle of a long upload is
 still renewed the old way, so a transfer running for hours alongside another session
-remains the one case worth staggering.
+remains the one case worth staggering. That renewal rewrites the token in your OS
+keychain, so an operation long enough to outlive its token — the longest chains, and
+uploads — fails if the keychain has re-locked meanwhile. That reports as
+`CREDENTIAL_STORE_UNAVAILABLE` naming the OS status code, and it is not a Cirro
+outage: unlock the login keychain and run it again.
 
 ## Looking at things
 

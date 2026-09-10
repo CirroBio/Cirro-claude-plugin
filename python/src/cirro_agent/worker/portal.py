@@ -198,10 +198,60 @@ def identity(auth) -> Optional[str]:
         return None
 
 
+# What the OS credential store said, for the codes that need different actions from
+# the human. msal_extensions names the first four; -25308 is the one a long operation
+# actually provokes, because a login keychain that re-locks mid-run refuses with it.
+KEYCHAIN_CODES = {
+    -128: ("the keychain prompt was dismissed", "allow"),
+    -25294: ("no such keychain", "repair"),
+    -25300: ("the stored credential is gone", "login"),
+    -25307: ("no default keychain", "repair"),
+    -25308: ("the login keychain is locked", "unlock"),
+}
+KEYCHAIN_ACTIONS = {
+    "unlock": ("Unlock your login keychain (Keychain Access, or log out and back in), "
+               "then run this again."),
+    "repair": ("Your login keychain is missing or is not the default. Repair it in "
+               "Keychain Access, then run this again."),
+    "allow": ("Run this again and choose Allow when macOS asks for keychain "
+              "access."),
+    "login": "Log in again with the cirro-session skill or the login_start MCP tool.",
+}
+
+
+def _credential_store_failure(exc: Exception):
+    """A refusal from the OS store the SDK keeps the token in, not from Cirro.
+
+    On macOS `DeviceCodeAuth` persists through `KeychainPersistence`, and the SDK
+    rewrites the token on every lazy refresh -- so any operation outliving its access
+    token writes to the Keychain mid-run, where a re-locked keychain refuses. Left to
+    the generic branch that is an UPSTREAM_ERROR reading `KeychainError: `, because
+    `KeychainError.__init__` calls `super().__init__()` with no arguments and so
+    stringifies to nothing: retryable severity, an empty message, and advice to check
+    Cirro's service status for a fault that is entirely local. `exit_status` is the
+    only thing that says what happened, and it is the one field the format drops.
+    """
+    if not type(exc).__module__.startswith("msal_extensions"):
+        return None
+    status = getattr(exc, "exit_status", None)
+    said, action = KEYCHAIN_CODES.get(status, (None, "unlock"))
+    detail = f"{said} ({status})" if said else f"status {status}"
+    return errors.CredentialStoreUnavailable(
+        f"The OS credential store refused: {detail}.",
+        what=("The Cirro credential is held by the operating system's keychain, and "
+              "the keychain -- not Cirro -- refused to read or write it."),
+        user_action=KEYCHAIN_ACTIONS[action],
+        exit_status=status,
+    )
+
+
 def wrap_upstream(exc: Exception, *, what: str, retry_with=None):
     """Map an SDK exception onto the taxonomy, including auth frames."""
     from cirro.sdk.exceptions import DataPortalAssetNotFound, DataPortalInputError
 
+    local = _credential_store_failure(exc)
+    if local is not None:
+        return local
     if isinstance(exc, DataPortalAssetNotFound):
         return errors.NotFound(
             str(exc), what=what,
@@ -220,8 +270,12 @@ def wrap_upstream(exc: Exception, *, what: str, retry_with=None):
         if any(name.startswith("cirro.auth") for name in frames):
             return errors.AuthExpired(
                 str(exc), what="Re-authentication is required.", user_action=_LOGIN_HINT)
+    # `str(exc)` is empty for an exception built with no arguments, and the name plus
+    # a dangling colon reads as a truncated message -- which is how `KeychainError: `
+    # reached a user before the branch above caught that one by name.
+    said = str(exc)
     return errors.UpstreamError(
-        f"{type(exc).__name__}: {exc}", what=what,
+        f"{type(exc).__name__}: {said}" if said else type(exc).__name__, what=what,
         retry_with=retry_with or [{"note": "retry once"}],
         user_action="If this persists, check the Cirro web UI for service status.",
     )

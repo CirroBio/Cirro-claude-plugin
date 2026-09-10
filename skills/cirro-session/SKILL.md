@@ -1,6 +1,6 @@
 ---
 name: cirro-session
-description: Set up a Cirro session folder and authenticate, or repair a broken one. Use when the user asks to connect to Cirro, log in, switch tenants, or check who they are logged in as — and whenever any Cirro operation returns no_session_folder, not_authenticated, AUTH_REQUIRED, AUTH_EXPIRED, TENANT_MISMATCH, or RUNTIME_NOT_INSTALLED.
+description: Set up a Cirro session folder and authenticate, or repair a broken one. Use when the user asks to connect to Cirro, log in, switch tenants, or check who they are logged in as — and whenever any Cirro operation returns no_session_folder, not_authenticated, AUTH_REQUIRED, AUTH_EXPIRED, CREDENTIAL_STORE_UNAVAILABLE, TENANT_MISMATCH, or RUNTIME_NOT_INSTALLED.
 ---
 
 # Connect to Cirro
@@ -87,6 +87,7 @@ work through `cirro-agent read` and writes through `plan` / `apply`.
 | What you saw | What it means | What to do |
 |---|---|---|
 | `AUTH_EXPIRED` | The SDK discards a cached token once its refresh token is within 12h of expiring | `login_start`, relay the link, `login_wait` |
+| `CREDENTIAL_STORE_UNAVAILABLE` | The OS keychain holding the token refused, usually because it re-locked during an operation long enough to outlive its access token | Not a Cirro fault and not a login problem. Have the user unlock their login keychain, then run it again. `detail.exit_status` is the OS code |
 | `TENANT_MISMATCH` | `CIRRO_BASE_URL` is set to a different host than this folder is bound to, or a plan was made elsewhere | One folder serves one tenant. Either unset the variable or work in a directory with its own session folder |
 | `NETWORK_UNAVAILABLE` | DNS or TCP to the Cirro host failed | A VPN or hostname problem. The message distinguishes "cannot resolve" from "cannot connect" — pass that on |
 | `no_session_folder` | Nothing is bound near the working directory and no tenant is signed in | `login_start` with the hostname creates it |
