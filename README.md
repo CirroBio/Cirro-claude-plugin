@@ -401,8 +401,15 @@ approval text, a re-used plan, and a plan whose facts had moved underneath it. F
 membership survived every tag write, and fields left out of a request — a description
 the caller never mentioned — survived rather than being blanked.
 
-That is two operations out of the coverage table, on one tenant. **Every other operation
-has still only run against a simulated tenant.** Four bugs found on 2026-08-27 were
+**`run_analysis` and `chain` have now launched against a live tenant** — on 2026-09-09,
+against a development tenant. Several chains of up to eight `run_analysis` steps were
+approved and applied, and the launches were accepted. Whether the resulting analyses ran
+to completion is not recorded here, so treat the launch path as exercised and the rest as
+untested.
+
+That is three operations out of the coverage table, on one tenant, plus the `chain`
+wrapper that carried the third. **Every other operation has still only run against a
+simulated tenant.** Four bugs found on 2026-08-27 were
 exactly the kind that surface only on a real call, so treat your first use of any
 operation not named above as untested and pick something disposable.
 
