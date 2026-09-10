@@ -189,17 +189,37 @@ def test_the_token_store_still_raises_what_the_credential_mapping_reads():
     `exit_status` is ever renamed the mapping still fires but reports `status None`,
     losing the only fact that distinguishes a locked keychain from a missing one.
     """
+    import ast
+    import importlib.util
     import inspect
     from cirro.auth import device_code
-    from msal_extensions.osx import KeychainError
-
-    assert KeychainError.__module__.startswith("msal_extensions"), (
-        "the mapping recognises a store failure by module")
-    assert "exit_status" in inspect.signature(KeychainError.__init__).parameters, (
-        "KeychainError no longer carries exit_status; the mapping would report None")
-    assert str(KeychainError(exit_status=-25308)) == "", (
-        "KeychainError now has a message of its own -- portal.describe can stop "
-        "standing in for it, and the mapping should carry the SDK's own text")
 
     assert "KeychainPersistence" in inspect.getsource(device_code), (
         "cirro no longer stores the token in the OS keychain on macOS")
+
+    # Read rather than import: `msal_extensions.osx` loads Security.framework in its
+    # module body, so importing it is an OSError anywhere but macOS -- and CI is Linux,
+    # which is exactly where this pin has to hold.
+    spec = importlib.util.find_spec("msal_extensions.osx")
+    assert spec and spec.origin, "msal_extensions is gone; cirro persists through it"
+    tree = ast.parse(Path(spec.origin).read_text())
+    keychain_error = next(
+        (node for node in tree.body
+         if isinstance(node, ast.ClassDef) and node.name == "KeychainError"), None)
+    assert keychain_error is not None, (
+        "msal_extensions.osx no longer defines KeychainError")
+
+    init = next(node for node in keychain_error.body
+                if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+    assert "exit_status" in [arg.arg for arg in init.args.args], (
+        "KeychainError no longer carries exit_status; the mapping would report None")
+
+    # The empty `str()` that made this arrive as `KeychainError: `. The double in
+    # test_token_refresh.py reproduces it, so it has to stay true here.
+    parent = next(call for call in ast.walk(init)
+                  if isinstance(call, ast.Call)
+                  and isinstance(call.func, ast.Attribute)
+                  and call.func.attr == "__init__")
+    assert not parent.args and not parent.keywords, (
+        "KeychainError now passes a message up to OSError, so it stringifies to "
+        "something -- carry the SDK's own text instead of the exit_status table")
