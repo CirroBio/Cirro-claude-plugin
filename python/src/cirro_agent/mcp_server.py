@@ -317,18 +317,28 @@ def plan(op: str, args: Optional[dict] = None,
         "Execute a plan created by `plan`. Takes no operation arguments -- everything "
         "comes from the stored plan, so what the person approved is exactly what runs. "
         "Refuses an expired, already-used, tampered, or different-user plan. Show the "
-        "plan's `rendered` text to the person before calling this."
+        "plan's `rendered` text to the person before calling this.\n\n"
+        "Leave `change` alone: the approval hook fills it from the stored plan. It is "
+        "shown to the person and read by nothing."
     ) + DIRECTORY_DOC,
     meta={"anthropic/requiresUserInteraction": True},
 )
 def apply(plan_id: str, digest: str, approved_summary: str = "",
-          directory: Optional[str] = None) -> dict:
+          change: str = "", directory: Optional[str] = None) -> dict:
     """Perform the change a plan describes, after approval.
 
     `approved_summary` is supplied by the approval hook, which reads it from the
     stored plan -- so the value that proves the approved text matches the executed
     plan does not travel through the model's context. Passing it explicitly still
     works, and is the fallback when hooks are disabled.
+
+    `change` is display-only and deliberately unused: the approval dialog renders the
+    arguments of this call and nothing else -- not this description, and not the
+    hook's explanation, which goes to the model. A one-line statement of what is
+    about to happen therefore has to be an argument to be seen at all, and the hook
+    overwrites whatever arrives here with `plans.headline` of the stored plan. It
+    authorizes nothing and is never read back; `approved_summary` and `digest` remain
+    what bind the approval to the plan.
     """
     return runner.call({"verb": "apply", "plan_id": plan_id, "digest": digest,
                         "approved_summary": approved_summary},

@@ -219,3 +219,68 @@ def test_both_phases_of_one_apply_land_in_one_file(session_dir, monkeypatch):
     assert len(files) == 1, [f.name for f in files]
     phases = [json.loads(line)["phase"] for line in files[0].read_text().splitlines()]
     assert phases == ["intent", "outcome"]
+
+
+# --- the approval dialog's headline ---
+#
+# The dialog renders the arguments of the apply call and nothing else: not the tool
+# description, not the hook's reason, which goes to the model. These pin the one
+# argument that exists to be read by a person.
+
+def test_the_headline_is_the_summarys_first_line(sess):
+    plan = make(sess)
+    assert plans.headline(plan.to_dict()) == "DELETE dataset ds_9 (18 files, 39.3 MB)."
+
+
+def test_the_headline_is_never_multiline(sess):
+    """A newline in an argument renders as a literal \\n in the dialog, which is the
+    whole reason a one-line field exists alongside the summary."""
+    plan = make(sess, summary="Move 3 datasets.\n\n  folder\n    to  QC\n")
+    line = plans.headline(plan.to_dict())
+    assert "\n" not in line and line == "Move 3 datasets."
+
+
+def test_a_destructive_plan_says_so_in_the_headline(sess):
+    plan = make(sess, risk=plans.DESTRUCTIVE_RISK)
+    assert plans.headline(plan.to_dict()).startswith("DESTRUCTIVE -- ")
+
+
+def test_the_headline_counts_warnings_that_nothing_else_shows(sess):
+    """`approval_warnings` reaches the hook's reason and the CLI, neither of which the
+    desktop approver sees. Without the count a warning is invisible there."""
+    plan = make(sess, warnings=["tags are replaced wholesale"])
+    assert plans.headline(plan.to_dict()).endswith("(1 warning)")
+    plan = make(sess, warnings=["one", "two"])
+    assert plans.headline(plan.to_dict()).endswith("(2 warnings)")
+
+
+def test_the_headline_is_bounded(sess):
+    plan = make(sess, summary="Delete " + "x" * 400, risk=plans.DESTRUCTIVE_RISK)
+    line = plans.headline(plan.to_dict())
+    assert len(line) <= plans.HEADLINE_CHARS and line.endswith("...")
+
+
+def test_the_headline_names_the_op_when_there_is_no_summary(sess):
+    assert plans.headline({"op": "create_project"}) == "Apply create_project."
+    assert plans.headline({}) == "Apply an operation."
+
+
+def test_the_headline_reads_only_digested_fields():
+    """It describes an approval, so every field it derives from must be inside the
+    tamper check -- otherwise the line a person reads could be edited on disk while
+    the digest stayed valid, which is exactly what put `summary` in DIGEST_FIELDS."""
+    for field in ("op", "summary", "risk", "warnings"):
+        assert field in plans.DIGEST_FIELDS, field
+
+
+def test_editing_a_warning_on_disk_invalidates_the_plan(sess):
+    """Warnings are approval text. While they sat outside the digest, dropping one
+    from the file left the plan verifiable and the approver unwarned."""
+    plan = make(sess, warnings=["this deletes 18 files"])
+    path = sess.path / "plans" / f"{plan.plan_id}.json"
+    stored = json.loads(path.read_text())
+    stored["warnings"] = []
+    path.write_text(json.dumps(stored))
+    with pytest.raises(errors.AgentError) as caught:
+        claim(sess, plan)
+    assert "does not match its own digest" in caught.value.message
