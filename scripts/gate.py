@@ -243,6 +243,17 @@ CONTINUATION = re.compile(r"\\\n")
 # each other: the file an interpreter reads from stdin is named in another stage.
 PIPELINES = re.compile(r"(?:\|\||&&|[;&\n])")
 
+# The stage separator within one pipeline, split quote-aware like every other operator.
+SINGLE_PIPE = re.compile(r"\|")
+
+# A heredoc operator, and the word that ends its body. The operator is located on the
+# masked command, so one inside an argument is not an operator; the delimiter is then
+# read off the original, where its own quotes are still there to be stripped. `<<<` is
+# a here-string, whose operand is on the same line and is not a body at all.
+HEREDOC_OPERATOR = re.compile(r"(?<!<)<<-?(?!<)")
+HEREDOC_DELIMITER = re.compile(
+    r"<<-?\s*(?:'([^']*)'|\"([^\"]*)\"|\\?([A-Za-z_][\w.-]*))")
+
 # shlex expands no parameter, and unlike `$(...)` there is no substitution pass for
 # one, so in `PY=python3; $PY drive.py` the program name stayed the literal `$PY`.
 ASSIGNMENT = re.compile(r"^([A-Za-z_]\w*)=(.*)$")
@@ -284,12 +295,106 @@ def passthrough() -> NoReturn:
 # --------------------------------------------------------------------------- bash
 
 
+def unquoted(text: str) -> str:
+    """The command with every quoted span blanked, character for character.
+
+    Operators are only operators where the shell would act on them, and a `;` inside
+    an argument is part of that argument. Splitting on it read the rest of the string
+    as a command of its own, so `git commit -m "parser fix; scripts/gate.py reads
+    heredocs"` was blocked as though the path after the semicolon were being run.
+    The mask is the same length as the input, so a match's offsets index the original.
+    """
+    masked = []
+    quote = ""
+    escaped = False
+    for character in text:
+        if escaped:
+            escaped = False
+            masked.append(" ")
+        elif quote != "'" and character == "\\":
+            escaped = True
+            masked.append(" ")
+        elif quote:
+            masked.append("\n" if character == "\n" else " ")
+            if character == quote:
+                quote = ""
+        elif character in "'\"":
+            quote = character
+            masked.append(" ")
+        else:
+            masked.append(character)
+    return "".join(masked)
+
+
+def split_unquoted(text: str, pattern) -> list:
+    """Split on `pattern`, but only where it falls outside quotes."""
+    parts = []
+    last = 0
+    for match in pattern.finditer(unquoted(text)):
+        parts.append(text[last:match.start()])
+        last = match.end()
+    parts.append(text[last:])
+    return parts
+
+
+def strip_heredocs(command: str) -> tuple:
+    """Separate heredoc bodies from the command lines that carry them.
+
+    A body is a payload, not a run of commands: text written to a file, or a program
+    handed to something. Reading it as commands is the authoring/execution confusion
+    this gate exists to avoid -- `cat >> test_x.py <<'PY'` whose body merely names a
+    .py path was blocked as though the path were being executed.
+
+    Returns the command with the bodies removed, and each body paired with the line
+    that consumes it, so a body that really is a program can still be judged.
+    """
+    lines = command.split("\n")
+    kept, bodies = [], []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        kept.append(line)
+        index += 1
+        for operator in HEREDOC_OPERATOR.finditer(unquoted(line)):
+            match = HEREDOC_DELIMITER.match(line, operator.start())
+            if match is None:
+                continue
+            delimiter = (match.group(1) or match.group(2) or match.group(3) or "")
+            stripped = operator.group(0).endswith("-")
+            body = []
+            while index < len(lines):
+                candidate = lines[index]
+                index += 1
+                if (candidate.strip() if stripped else candidate.rstrip()) == delimiter:
+                    break
+                body.append(candidate)
+            bodies.append((line, "\n".join(body)))
+    return "\n".join(kept), bodies
+
+
+def consumes_commands(line: str) -> bool:
+    """Does this line feed its heredoc body to a shell, which runs every line of it?
+
+    `bash <<'EOF'` and `cat <<'EOF' | sh` do; `cat > notes.md <<'EOF'` writes it. A
+    body fed to a Python interpreter is source rather than commands, and the SDK
+    markers are searched over the whole command text before any of this.
+    """
+    for segment in split_unquoted(line, SPLITTERS):
+        words = tokens_of(segment)
+        if not words:
+            continue
+        index = program_index(words)
+        if index < len(words) and SHELLS.match(Path(words[index]).name or ""):
+            return True
+    return False
+
+
 def segments(command: str) -> list:
     """Split into independently-executed commands, including substituted ones."""
     command = CONTINUATION.sub(" ", command)
     extra = [m.group(1) or m.group(2) for m in SUBSTITUTIONS.finditer(command)]
     flattened = SUBSTITUTIONS.sub(" ", command)
-    parts = SPLITTERS.split(flattened) + extra
+    parts = split_unquoted(flattened, SPLITTERS) + extra
     return [s.strip() for s in parts if s and s.strip()]
 
 
@@ -465,8 +570,9 @@ def piped_scripts(command: str, values: dict, cwd: str) -> list:
     the code that is about to run.
     """
     fed = []
-    for pipeline in PIPELINES.split(CONTINUATION.sub(" ", command)):
-        stages = [expand(tokens_of(s), values) for s in pipeline.split("|")]
+    for pipeline in split_unquoted(CONTINUATION.sub(" ", command), PIPELINES):
+        stages = [expand(tokens_of(s), values)
+                  for s in split_unquoted(pipeline, SINGLE_PIPE)]
         if not any(takes_program_from_stdin(s, cwd) for s in stages):
             continue
         for words in stages:
@@ -483,6 +589,7 @@ def inspect_bash(command: str, cwd: str = "", depth: int = 0) -> None:
 
     # Unconditional: this one guards secrets rather than the approval gate, and a
     # command that reads token storage is never incidental to ordinary development.
+    # Searched over the raw text, heredoc bodies included, like the SDK markers above.
     if TOKEN_SNOOPING.search(command):
         block("Blocked by the Cirro plugin: this command reads Cirro credential storage "
               "or the machine-wide ~/.cirro. The plugin keeps credentials in a "
@@ -490,6 +597,13 @@ def inspect_bash(command: str, cwd: str = "", depth: int = 0) -> None:
 
     if not _ARMED:
         return
+
+    # A body handed to a shell is a command payload like a `-c` argument, so it
+    # re-enters the parser. A body written to a file is not, and is left alone.
+    command, heredocs = strip_heredocs(command)
+    for line, body in heredocs:
+        if depth < MAX_NESTING and consumes_commands(line):
+            inspect_bash(body, cwd, depth + 1)
 
     values = assignments(command)
     for target in piped_scripts(command, values, cwd):

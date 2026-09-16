@@ -72,6 +72,16 @@ a bare `./x.py`, or a shell script, which re-enters the parser as the command pa
 is -- and blocks on that instead. Do not reintroduce a write-time prompt; if a new
 bypass appears, it is an execution the parser is not reading yet.
 
+The same rule governs text the parser is handed. A quoted argument is an argument:
+operators are found on `unquoted()`, which blanks quoted spans, so a commit message
+naming a .py path after a `;` is not two commands. A heredoc body is a payload:
+`strip_heredocs` sets it aside before segments are cut, and `consumes_commands`
+re-enters the parser on it only when the line feeds it to a shell -- `bash <<'EOF'`
+runs its body, `cat > notes.md <<'EOF'` writes it. Both reached the same wrong answer
+from opposite directions: a docstring naming the gate was blocked as though the gate
+were being run. The SDK markers are still searched over the raw command, bodies
+included, so `python3 <<EOF ... import cirro` is unaffected.
+
 **The bypass checks arm; they do not run from the start of every session.** The first
 use of a Cirro skill, MCP tool or `cirro-agent` writes a marker under
 `plugin_data()/armed-sessions/<session_id>`, and that session is gated from then on.

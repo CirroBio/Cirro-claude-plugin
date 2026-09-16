@@ -211,6 +211,74 @@ def test_pointing_a_tool_at_sdk_code_is_not_running_it(tmp_path):
         assert run(bash(command)) == ALLOW, command
 
 
+@pytest.mark.parametrize("template", [
+    # The verification command this repo documents, which passes the gate's own
+    # source to a linter along with two directories.
+    "flake8 src tests {path}",
+    "ruff check src {path}",
+    "black --check {path}",
+    "mypy {path}",
+    "python3 -m flake8 {path}",
+])
+def test_a_linter_given_a_python_file_is_not_running_it(tmp_path, template):
+    """A linter reads the file it is pointed at; it executes nothing.
+
+    The documented `flake8 python/src python/tests scripts/gate.py` has to pass, or
+    the repo's own verification step is unrunnable while the plugin is installed.
+    """
+    path = _script(tmp_path, "gate_like.py", SDK_SCRIPT)
+    assert run(bash(template.format(path=path), cwd=tmp_path)) == ALLOW
+
+
+def test_a_heredoc_body_is_a_payload_not_a_run_of_commands(tmp_path):
+    """Writing a file whose text names a script is authoring, not executing it.
+
+    The body was split into segments like any other line, so a docstring line
+    beginning with a path was read as that path being run -- and a test whose
+    docstring names the gate could not be written at all.
+    """
+    path = _script(tmp_path, "analyse.py", SDK_SCRIPT)
+    written = tmp_path / "test_coverage.py"
+    for body in (f'    """\n    {path} is named here.\n    """',
+                 f"# {path}",
+                 f"{path} drives the SDK, which is why it is gated."):
+        command = f"cat >> {written} <<'PY'\ndef test_x():\n{body}\nPY"
+        assert run(bash(command, cwd=tmp_path)) == ALLOW, body
+    # Writing a shell script is not running it either, whatever is in it.
+    command = f"cat > {tmp_path / 'run.sh'} <<'SH'\ncirro upload -p X -n Y\nSH"
+    assert run(bash(command, cwd=tmp_path)) == ALLOW
+
+
+def test_a_heredoc_body_fed_to_a_shell_is_still_judged(tmp_path):
+    """The other direction: a body handed to a shell is a program, like a `-c`
+    payload, and every detector still reaches it."""
+    path = _script(tmp_path, "analyse.py", SDK_SCRIPT)
+    for command in ("bash <<'EOF'\ncirro upload -p X -n Y\nEOF",
+                    f"cat <<'EOF' | sh\npython3 {path}\nEOF",
+                    "bash <<-EOF\n\tcirro upload -p X\n\tEOF",
+                    "python3 <<EOF\nfrom cirro import DataPortal\nEOF"):
+        assert run(bash(command, cwd=tmp_path)) == DENY, command
+    # A command after the body's terminator is a command again.
+    assert run(bash(f"cat > {tmp_path / 'x.txt'} <<'X'\nhi\nX\ncirro upload -p Y",
+                    cwd=tmp_path)) == DENY
+
+
+def test_quoted_text_is_not_split_into_commands(tmp_path):
+    """A `;` inside an argument belongs to the argument.
+
+    Splitting on it read the rest of the string as a command of its own, so a commit
+    message naming a .py path after a semicolon was blocked as though the path were
+    being executed.
+    """
+    path = _script(tmp_path, "analyse.py", SDK_SCRIPT)
+    for command in (f'git commit -m "parser fix; {path} is parsed now"',
+                    f"echo 'see {path}; it drives the SDK'",
+                    f'grep -rn "x && {path}" .'):
+        assert run(bash(command, cwd=tmp_path)) == ALLOW, command
+    # An operator outside quotes still separates two commands.
+    assert run(bash(f'echo "one thing"; python3 {path}', cwd=tmp_path)) == DENY
+
+
 def test_a_missing_script_path_is_not_an_error(tmp_path):
     assert run(bash(f"python3 {tmp_path / 'gone.py'}")) == ALLOW
 
