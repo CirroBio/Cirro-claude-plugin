@@ -191,6 +191,16 @@ say yes. A plan is good for one change, and if the underlying facts move between
 planning and approving, it is refused rather than applied against figures you never
 saw.
 
+Claude shows you that text in the conversation. The approval prompt itself is drawn by
+Claude Code, and what it can show is the arguments of the call it is asking about — so
+the plan arrives there as one long argument with its line breaks escaped, which is
+readable in the terminal and cramped in the desktop app. The first argument, `change`,
+is a one-line version for that reason: the operation, what it acts on, `DESTRUCTIVE`
+where that applies, and a count of any warnings. It is filled in from the stored plan,
+not written by Claude, and it authorizes nothing — the full text above it is still what
+binds the approval. Read the plan in the conversation; treat `change` as the label on
+the prompt, and if the two ever disagree, refuse.
+
 **Multi-step work gets one prompt.** Configuring a pipeline, uploading test data and
 launching a run can be approved together as a chain. Values a later step cannot know
 yet — the ID of a dataset the upload is about to create — appear as exactly that, not

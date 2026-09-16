@@ -132,6 +132,15 @@ def test_every_registered_operation_has_a_planner_and_an_executor():
                            mutations.RISK_LOCAL, mutations.RISK_WRITE_LOCAL), name
 
 
+def test_the_destructive_risk_name_is_one_string():
+    """`plans` carries a copy because the PreToolUse gate reads a plan with it and
+    cannot import `mutations`, which imports cirro. Two spellings would mean a
+    destructive plan the gate had quietly stopped marking as one."""
+    from cirro_agent import plans
+    from cirro_agent.worker import mutations
+    assert plans.DESTRUCTIVE_RISK == mutations.RISK_DESTRUCTIVE
+
+
 def test_the_read_cli_cannot_reach_a_mutating_verb():
     from cirro_agent import cli
     from cirro_agent.worker import dispatch

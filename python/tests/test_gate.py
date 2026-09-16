@@ -647,3 +647,55 @@ def test_credential_snooping_is_blocked_even_unarmed(tmp_path):
     # Assembled from parts so this file does not itself trip the pattern under test.
     snoop = "cat {}/.{}/{}.dat".format("~", "cirro", "token")
     assert decide(sess(bash(snoop)), armed_env(tmp_path))[0] == DENY
+
+
+def test_the_dialog_leads_with_the_headline(workdir):
+    """The desktop approval dialog renders this call's arguments and nothing else --
+    not the reason above, which reaches only the model. So the readable line has to be
+    an argument, and the order is what a person reads top to bottom: the headline
+    first, then the plan text, and `directory` last because it is the longest value in
+    the call and says nothing about what will happen."""
+    plan = make_plan(workdir, risk="cirro_destructive",
+                     summary="DELETE ds_9 (18 files, 39.3 MB).\n\n  irreversible",
+                     warnings=["the files are not recoverable"])
+    event = apply_event(workdir, plan_id=plan.plan_id, digest=plan.digest,
+                        directory=str(workdir.path.parent))
+    done = subprocess.run([sys.executable, str(GATE)], input=json.dumps(event),
+                          capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0
+    updated = json.loads(done.stdout)["hookSpecificOutput"]["updatedInput"]
+    assert list(updated) == ["change", "plan_id", "digest", "approved_summary",
+                             "directory"], list(updated)
+    assert updated["change"] == ("DESTRUCTIVE -- DELETE ds_9 (18 files, 39.3 MB)."
+                                 "  (1 warning)")
+    # The functional arguments still arrive, sourced from the plan rather than echoed,
+    # and `directory` is moved rather than dropped -- it still resolves the session.
+    assert updated["plan_id"] == plan.plan_id
+    assert updated["digest"] == plan.digest
+    assert updated["approved_summary"] == plan.summary
+    assert updated["directory"] == str(workdir.path.parent)
+
+
+def test_the_headline_never_carries_a_newline_into_the_dialog(workdir):
+    """A newline in an argument is shown as a literal \\n where the dialog renders it,
+    which is what makes the summary itself unreadable there."""
+    plan = make_plan(workdir, summary="Move 3 datasets.\n\n  folder\n    to  QC")
+    done = subprocess.run([sys.executable, str(GATE)],
+                          input=json.dumps(apply_event(workdir, plan_id=plan.plan_id,
+                                                       digest=plan.digest)),
+                          capture_output=True, text=True, timeout=30)
+    updated = json.loads(done.stdout)["hookSpecificOutput"]["updatedInput"]
+    assert "\n" not in updated["change"]
+    assert updated["change"] == "Move 3 datasets."
+
+
+def test_the_headline_the_model_supplies_is_overwritten(workdir):
+    """It is display-only, so a value arriving from the model must not reach the
+    person: the gate replaces it with the stored plan's own line."""
+    plan = make_plan(workdir)
+    event = apply_event(workdir, plan_id=plan.plan_id, digest=plan.digest,
+                        change="Adds a harmless tag")
+    done = subprocess.run([sys.executable, str(GATE)], input=json.dumps(event),
+                          capture_output=True, text=True, timeout=30)
+    updated = json.loads(done.stdout)["hookSpecificOutput"]["updatedInput"]
+    assert updated["change"] == "DELETE ds_9"

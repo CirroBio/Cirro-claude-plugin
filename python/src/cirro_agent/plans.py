@@ -40,8 +40,23 @@ PLAN_ID_PATTERN = re.compile(r"^plan_\d{10,}_[0-9a-f]{8}$")
 # The summary is in here deliberately. Covering only op/args/base_url left the approval
 # TEXT outside the integrity check, so editing it on disk kept the digest valid and a
 # human could approve a rename while a delete executed.
+#
+# `warnings` is here for the same reason and was missed: it is approval text too, shown
+# by `approval_warnings` and counted by `headline`, so while it sat outside the digest a
+# warning could be deleted on disk and the plan still verified. Adding it stales every
+# plan already written, which is the safe direction -- they live an hour at most, and a
+# stale one is refused rather than admitted.
 DIGEST_FIELDS = ("op", "args", "request_args", "base_url", "summary", "username",
-                 "expires_at", "session_dir", "risk")
+                 "expires_at", "session_dir", "risk", "warnings")
+
+# `mutations.RISK_DESTRUCTIVE` is the definition; this is a copy, because that module
+# imports cirro and this one is what `scripts/gate.py` reads a plan with. A test pins
+# the two together.
+DESTRUCTIVE_RISK = "cirro_destructive"
+
+# Long enough for an operation and its object, short enough to stay a headline. It
+# wraps on spaces where it is shown, so this is a budget rather than a hard width.
+HEADLINE_CHARS = 200
 
 PENDING = "pending"
 APPLYING = "applying"
@@ -494,6 +509,39 @@ def approval_warnings(plan: dict) -> list:
     if not isinstance(warnings, (list, tuple)) or not warnings:
         return []
     return ["Warnings:"] + [f"  - {warning}" for warning in warnings]
+
+
+def headline(plan: dict) -> str:
+    """One line naming what is about to happen, for the approval dialog.
+
+    That dialog shows the tool's arguments and nothing else -- not the tool's
+    description, and not the PreToolUse hook's explanation, which reaches the model
+    instead of the person. So the one line saying what is being approved has to
+    travel as an argument, which is the only reason `apply` accepts one.
+
+    Single-line by construction. A newline inside an argument renders there as a
+    literal `\\n`, which is what makes the summary unreadable in that dialog however
+    well it reads everywhere else.
+
+    Derived wholly from digested fields -- summary, risk and warnings are all in
+    `DIGEST_FIELDS` -- so it cannot describe a plan other than the one it came from.
+    """
+    summary = (plan.get("summary") or "").strip()
+    first = next((line.strip() for line in summary.splitlines() if line.strip()),
+                 f"Apply {plan.get('op') or 'an operation'}.")
+    line = f"DESTRUCTIVE -- {first}" if plan.get("risk") == DESTRUCTIVE_RISK else first
+    warnings = plan.get("warnings")
+    if isinstance(warnings, (list, tuple)) and warnings:
+        # The count, not the prose: inlining warning text rebuilds the wall of
+        # characters this line exists to replace. Saying how many there are is what
+        # keeps one from being invisible, since the dialog shows no other trace of
+        # them -- `approval_warnings` reaches only the hook's reason and the CLI.
+        # Counting them is also what put `warnings` inside DIGEST_FIELDS.
+        plural = "s" if len(warnings) > 1 else ""
+        line = f"{line}  ({len(warnings)} warning{plural})"
+    if len(line) > HEADLINE_CHARS:
+        line = line[:HEADLINE_CHARS - 3].rstrip() + "..."
+    return line
 
 
 def render(plan: dict) -> str:

@@ -62,7 +62,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python" / "src"))
 from cirro_agent.errors import NoSessionFolder  # noqa: E402
 from cirro_agent.plans import (DIGEST_MISMATCH, DIGEST_TAMPERED,  # noqa: E402
                                EXPIRED, NOT_PENDING, PLAN_ID_PATTERN,
-                               approval_header, approval_warnings, preflight)
+                               approval_header, approval_warnings, headline,
+                               preflight)
 from cirro_agent.runner import plugin_data  # noqa: E402
 from cirro_agent.session import find_session_dir  # noqa: E402
 
@@ -646,11 +647,30 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
     # Supplied from the stored plan rather than echoed by the model. apply requires
     # the approved text to match the plan byte for byte; sourcing it here means that
     # check costs nothing in context, and the value cannot be the model's paraphrase.
-    respond("ask", "\n".join(lines),
-            {"updatedInput": {**tool_input,
-                              "plan_id": plan_id,
-                              "digest": plan.get("digest") or "",
-                              "approved_summary": plan.get("summary") or ""}})
+    #
+    # `change` is first because the desktop approval dialog lists the arguments in the
+    # order they appear here and shows nothing else -- none of the text above reaches
+    # the person there, only the model. Everything below it is either an identifier or
+    # a value too long to read, so a headline placed last is a headline nobody sees.
+    #
+    # `change` and `directory` are dropped from the incoming input before being
+    # re-added, because re-assigning a key keeps the position of its first appearance
+    # -- and for `change` the spread would also let a model-supplied value win on a key
+    # whose whole point is that the person reads it from the plan. Every other key
+    # keeps the order it arrived in.
+    supplied = {key: value for key, value in tool_input.items()
+                if key not in ("change", "directory")}
+    ordered = {"change": headline(plan),
+               **supplied,
+               "plan_id": plan_id,
+               "digest": plan.get("digest") or "",
+               "approved_summary": plan.get("summary") or ""}
+    # Last, because it is the longest value in the call and says nothing about what
+    # will happen. Sitting between the headline and the plan text, a session folder
+    # wraps over several lines in the middle of what a person is trying to read.
+    if "directory" in tool_input:
+        ordered["directory"] = tool_input["directory"]
+    respond("ask", "\n".join(lines), {"updatedInput": ordered})
 
 
 def main() -> None:
