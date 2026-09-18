@@ -998,3 +998,156 @@ def test_a_chain_step_is_held_to_its_own_ops_arguments(writable_tenant, session_
     ]})
     assert result["error"]["code"] == "INVALID_QUERY"
     assert "execution_mode" in result["error"]["message"]
+
+
+def test_retyping_a_dataset_runs_the_transforms_and_the_sample_ingest(
+        writable_tenant, session_dir):
+    """The retype is not finished when the record is written.
+
+    ds_0000 is typed as a pipeline, which is exactly the record someone wants to
+    correct -- so the type it comes from is unrestricted even though the type it
+    becomes must be an ingest process. What the new type derives from the files, and
+    the samples read out of them, both have to be redone or the dataset ends up
+    claiming a type that nothing about it reflects.
+    """
+    planned = call(writable_tenant, session_dir, "plan", op="update_dataset",
+                   args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                         "process": "Paired DNA sequencing"})
+    assert planned["ok"], planned
+    rendered = planned["rendered"]
+    assert "process" in rendered
+    assert "nf-core/sarek v3.4 (proc_sarek)" in rendered, \
+        "the approval must name the type it is leaving, not just its id"
+    assert "Paired DNA sequencing (proc_ingest)" in rendered
+    assert "re-run the data transforms" in rendered
+    assert "re-ingest samples" in rendered
+
+    stored = plans.load(session_dir, planned["plan_id"])
+    edit, = stored.args["edits"]
+    assert edit["process_id"] == "proc_ingest"
+    assert edit["rerun_transform"] is True
+    assert edit["ingest_samples"] is True
+    assert any(scope.get("kind") == "samples" for scope in stored.invalidates)
+    assert any("does not re-validate the files" in w for w in planned["warnings"])
+    assert any("cannot be undone from here" in w for w in planned["warnings"]), \
+        "ds_0000 is typed as a pipeline, which this operation will not write back"
+
+
+def test_a_retype_between_two_ingest_types_is_not_called_one_way(
+        writable_tenant, session_dir):
+    """The reverse of the above: ds_0001 arrives typed as a pipeline too, so the
+    warning must key off the type each dataset actually has and not off retyping."""
+    planned = call(writable_tenant, session_dir, "plan", op="update_dataset",
+                   args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                         "process": "proc_ingest"})
+    assert any("cannot be undone" in w for w in planned["warnings"])
+
+    # Retyping it back is what the warning says cannot be done.
+    refused = call(writable_tenant, session_dir, "plan", op="update_dataset",
+                   args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                         "process": "proc_sarek"})
+    assert refused["ok"] is False
+    assert refused["error"]["code"] == "INVALID_QUERY"
+
+
+def test_a_dataset_cannot_be_retyped_to_a_pipeline(writable_tenant, session_dir):
+    """A pipeline id on a dataset asserts that pipeline produced it."""
+    planned = call(writable_tenant, session_dir, "plan", op="update_dataset",
+                   args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                         "process": "nf-core/rnaseq v3.14"})
+    assert planned["ok"] is False
+    assert planned["error"]["code"] == "INVALID_QUERY"
+    assert "not a data type" in planned["error"]["message"]
+
+
+def test_the_retype_follow_ups_can_be_declined(writable_tenant, session_dir):
+    """Opting out must say so in the text the person approves, not just omit a line."""
+    planned = call(writable_tenant, session_dir, "plan", op="update_dataset",
+                   args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                         "process": "proc_ingest", "ingest_samples": False,
+                         "rerun_transform": False})
+    assert planned["ok"], planned
+    assert "data transforms will NOT be re-run" in planned["rendered"]
+    assert "sample metadata will NOT be updated" in planned["rendered"]
+    stored = plans.load(session_dir, planned["plan_id"])
+    edit, = stored.args["edits"]
+    assert edit["rerun_transform"] is False
+    assert edit["ingest_samples"] is False
+    assert not any(scope.get("kind") == "samples" for scope in stored.invalidates)
+
+
+def test_retype_follow_ups_run_only_for_the_datasets_that_were_retyped(monkeypatch):
+    """Driven directly: both follow-ups are queued routes the fake tenant does not serve.
+
+    A batch that moves three datasets and retypes one must not re-ingest the other
+    two -- their samples are correct and the ingest would overwrite hand-edited
+    values.
+    """
+    from unittest.mock import MagicMock
+    from cirro_api_client.v1.api.datasets import ingest_samples, rerun_transform
+    from cirro_agent.worker import dataset_ops
+    queued = []
+    monkeypatch.setattr(ingest_samples, "sync_detailed",
+                        lambda **kw: queued.append(("ingest", kw["dataset_id"])))
+    monkeypatch.setattr(rerun_transform, "sync_detailed",
+                        lambda **kw: queued.append(("transform", kw["dataset_id"])))
+
+    def edit(dataset_id, **flags):
+        return {"dataset_id": dataset_id, "dataset_name": dataset_id, "name": "n",
+                "description": "d", "process_id": "proc_ingest", "folders": [],
+                "tags": [], "ingest_samples": False, "rerun_transform": False, **flags}
+
+    result = dataset_ops.apply_update_dataset(
+        MagicMock(), {"project_id": "proj_a",
+                      "edits": [edit("ds_1", ingest_samples=True, rerun_transform=True),
+                                edit("ds_2")]})
+    assert queued == [("transform", "ds_1"), ("ingest", "ds_1")], \
+        "the transforms are queued before the ingest that reads what they regenerate"
+    by_id = {entry["dataset_id"]: entry for entry in result["updated"]}
+    assert by_id["ds_1"]["rerun_transform"] is True
+    assert by_id["ds_1"]["ingest_samples"] is True
+    assert "ingest_samples" not in by_id["ds_2"]
+    assert "asynchronously" in result["followups_note"]
+
+
+def test_a_failed_follow_up_does_not_report_the_retype_as_failed(monkeypatch):
+    """The record is already written; calling the operation failed would be untrue."""
+    from unittest.mock import MagicMock
+    from cirro_api_client.v1.api.datasets import ingest_samples, rerun_transform
+    from cirro_agent.worker import dataset_ops
+
+    def explode(**kw):
+        raise RuntimeError("503 from the ingest queue")
+
+    monkeypatch.setattr(ingest_samples, "sync_detailed", explode)
+    monkeypatch.setattr(rerun_transform, "sync_detailed", lambda **kw: None)
+
+    result = dataset_ops.apply_update_dataset(
+        MagicMock(), {"project_id": "proj_a",
+                      "edits": [{"dataset_id": "ds_1", "dataset_name": "ds_1",
+                                 "name": "n", "description": "d",
+                                 "process_id": "proc_ingest", "folders": [], "tags": [],
+                                 "ingest_samples": True, "rerun_transform": True}]})
+    entry, = result["updated"]
+    assert entry["rerun_transform"] is True
+    assert "503" in entry["followups_failed"]["ingest_samples"]
+    assert "did not start" in result["followups_note"]
+
+
+def test_the_last_tag_can_be_taken_off_a_project(writable_tenant, session_dir):
+    """`[]` is a value, not an omission.
+
+    The shared required-argument check reads an empty list as a missing argument, so
+    a project that had been given a tag could not be put back the way it was -- found
+    on 2026-09-18 by the live smoke test, which left its own tag behind when the
+    restoring half of it was refused.
+    """
+    planned = call(writable_tenant, session_dir, "plan", op="update_project_tags",
+                   args={"project_id": "proj_a", "tags": []})
+    assert planned["ok"], planned
+    assert "to    []" in planned["rendered"]
+
+    missing = call(writable_tenant, session_dir, "plan", op="update_project_tags",
+                   args={"project_id": "proj_a"})
+    assert missing["ok"] is False
+    assert missing["error"]["code"] == "INVALID_QUERY"

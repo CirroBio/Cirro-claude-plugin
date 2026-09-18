@@ -30,7 +30,8 @@ GATED = {
     "DatasetService.update": "update_dataset",
     "DatasetService.delete": "delete_dataset",
     "DatasetService.update_samplesheet": "update_samplesheet",
-    "DeveloperHelper.rerun_sample_ingest_for_dataset": "update_samplesheet",
+    "DeveloperHelper.rerun_sample_ingest_for_dataset":
+        "update_samplesheet, update_dataset",
     "DataPortalDataset.update_samplesheet": "update_samplesheet",
     "DatasetService.import_public": "import_public",
     "ReferenceService.upload_reference": "upload_reference",

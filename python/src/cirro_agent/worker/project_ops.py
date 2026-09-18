@@ -87,7 +87,16 @@ def apply_create_project(reader: reads.Reader, args: dict) -> dict:
 
 
 def plan_update_project_tags(reader: reads.Reader, args: dict) -> Draft:
-    _need(args, "update_project_tags", "tags")
+    # Not _need: an empty list is the value that takes the last tag off a project, and
+    # _need reads [] as absent. Without this there is no way back from a tag write.
+    if args.get("tags") is None:
+        raise errors.InvalidQuery(
+            "update_project_tags requires tags.",
+            what="Supply the full tag list the project should end up with; [] removes "
+                 "every tag.",
+            field="tags", given=args,
+            retry_with=[{"op": "update_project_tags", "args": {"tags": []}}],
+        )
     project = _project(reader, args)
     lines = [f"Replace the tags on project {project['name']} ({project['id']}).", "",
              f"  from  {project.get('tags')}", f"  to    {args['tags']}"]

@@ -1,6 +1,6 @@
 ---
 name: cirro-dataset-admin
-description: Rename, retag, or delete a Cirro dataset, or replace its samplesheet. Use when the user wants to change a dataset's name, description or tags, fix or update a samplesheet, or remove a dataset. Requires the user's approval before any change.
+description: Rename, retag, retype, or delete a Cirro dataset, or replace its samplesheet. Use when the user wants to change a dataset's name, description, tags or data type (process), fix or update a samplesheet, or remove a dataset. Requires the user's approval before any change.
 ---
 
 # Modify or remove a Cirro dataset
@@ -49,6 +49,53 @@ merged: read the current tags first and include the ones being kept.
 
 The plan shows each field as `from` → `to`. If nothing would actually change, the plan
 refuses rather than doing a no-op write.
+
+## Change the data type
+
+```
+plan(op="update_dataset", args={
+  "project_id": "proj_...", "dataset_id": "ds_...",
+  "process": "Paired DNA sequencing"})
+```
+
+The type it becomes must be an **ingest process**. A pipeline id on a dataset says
+that pipeline produced it, so writing one is refused with `INVALID_QUERY`. The type it
+comes from is unrestricted — an analysis output wrongly typed is exactly the record
+people need to correct. `cirro-agent read processes -f "executor:INGEST"` lists what
+is available.
+
+**A retype away from a pipeline type is one-way.** An analysis output carries the id
+of the pipeline that produced it, and this operation will not write a pipeline id
+back — so once such a dataset is retyped, the plugin cannot restore it and only the
+web UI can. The plan warns when this applies. Say it to the user *before* they
+approve, not after.
+
+Retyping a dataset changes what it claims to be; it does not touch the files. They are
+not re-validated against the new type, so a dataset can end up typed as something its
+files do not satisfy. Say that to the user rather than letting the plan's warning go
+past.
+
+### Two things run behind the retype
+
+1. The **data transforms and web optimization** are re-run, regenerating what Cirro
+   derives from the files under the new type.
+2. The dataset's samples are **re-ingested**, so the project's sample metadata is
+   re-derived from the file names under the new type.
+
+Both are on by default, because a retype without them leaves the dataset's derived
+files and its samples describing the type it no longer is. Both are queued: apply
+returns as soon as Cirro accepts them and the results catch up shortly after.
+
+Sample re-ingest **overwrites** sample values edited by hand since the last ingest.
+
+Either can be declined:
+
+```
+plan(op="update_dataset", args={..., "rerun_transform": False, "ingest_samples": False})
+```
+
+The rendered plan states what you are getting in both directions, and neither runs for
+a dataset in the batch that was not retyped. Read it rather than assuming the default.
 
 ## Samplesheet
 

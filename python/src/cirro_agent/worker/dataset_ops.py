@@ -25,33 +25,108 @@ DIFF_PREVIEW_LINES = 60
 FREE_SPACE_HEADROOM = 0.9
 
 
-def _dataset_edit(row: dict, args: dict) -> Optional[dict]:
+def _process_label(name: Optional[str], process_id: Optional[str]) -> str:
+    """A process as the approval names it: never a bare id."""
+    if not process_id:
+        return "(none)"
+    return f"{name} ({process_id})" if name else process_id
+
+
+def _dataset_edit(row: dict, args: dict, process: Optional[dict],
+                  followups: dict) -> Optional[dict]:
     """What one dataset's record should become, or None if nothing would change.
 
     UpdateDatasetRequest requires name, description, process_id AND tags -- it is a
     whole-record replacement. Omitting a field blanks it, so every one is resolved
     here from the current record and only the requested changes are applied.
+
+    `process` is the resolved new data type or None, and `followups` says whether the
+    sample ingest and the data transforms run behind it. They are recorded per dataset
+    rather than per plan because they follow the retype: a dataset the batch leaves at
+    its current type is not re-ingested and its transforms are not re-run.
     """
     current_folders = list(row.get("folders") or [])
     current_tags = list(row.get("tags") or [])
     target_folders = _target_folders(args, current_folders)
     target_tags = list(args["tags"]) if args.get("tags") is not None else current_tags
+    target_process = process["id"] if process else row.get("process_id")
+    retyped = target_process != row.get("process_id")
 
     changes = {key: args[key] for key in ("name", "description")
                if args.get(key) is not None and args[key] != row.get(key)}
-    if (not changes and target_folders == current_folders
+    if (not changes and not retyped and target_folders == current_folders
             and sorted(target_tags) == sorted(current_tags)):
         return None
+    was_process = _process_label((row.get("process") or {}).get("name"),
+                                 row.get("process_id"))
+    now_process = (_process_label(process["name"], process["id"]) if retyped
+                   else was_process)
     return {
         "dataset_id": row["id"], "dataset_name": row.get("name"),
         "name": changes.get("name", row.get("name")),
         "description": changes.get("description", row.get("description") or ""),
-        "process_id": row.get("process_id"),
+        "process_id": target_process,
+        "process": now_process,
+        "ingest_samples": retyped and followups["ingest_samples"],
+        "rerun_transform": retyped and followups["rerun_transform"],
         "folders": target_folders, "tags": target_tags,
         "was": {"name": row.get("name"), "description": row.get("description"),
+                "process_id": row.get("process_id"), "process": was_process,
                 "folders": current_folders, "tags": current_tags},
         "changed": sorted(changes),
     }
+
+
+def _ingest_process(reader: reads.Reader, args: dict) -> Optional[dict]:
+    """The data type a dataset is being retyped to, or None if it is not being retyped.
+
+    Resolved over every process rather than over the ingest ones alone: narrowing the
+    pool first would answer a pipeline name with "no such process", which reads as a
+    typo when the real answer is that a pipeline is not a thing a dataset can be.
+    """
+    if args.get("process") is None:
+        return None
+    process = reader.resolve_process(args["process"])
+    if process["executor"] != "INGEST":
+        raise errors.InvalidQuery(
+            f"{process['name']} ({process['id']}) is a pipeline, not a data type.",
+            what="A dataset can only be retyped to an ingest process. A pipeline id "
+                 "on a dataset says that pipeline produced it.",
+            field="process", given=args["process"],
+            retry_with=[{"verb": "query", "entity": "process",
+                         "filter": "executor:INGEST"}],
+        )
+    return process
+
+
+def _retyped_subject(n_retyped: int) -> str:
+    return ("the retyped dataset" if n_retyped == 1
+            else f"the {n_retyped} retyped datasets")
+
+
+def _followup_lines(n_retyped: int, followups: dict) -> list:
+    """What happens behind the retype, in the text the person approves.
+
+    Both halves are stated either way. Silence about the one that is off reads as the
+    plan doing it, and these are the two that decide whether the dataset's samples and
+    its derived files agree with the type it now claims to be.
+    """
+    subject = _retyped_subject(n_retyped)
+    if followups["rerun_transform"]:
+        transform = (f"Then re-run the data transforms and web optimization for "
+                     f"{subject}, regenerating what Cirro derives from the files under "
+                     "the new type.")
+    else:
+        transform = ("The data transforms will NOT be re-run, so anything Cirro derived "
+                     "from the files stays as the old type left it. Pass "
+                     "rerun_transform=true to re-run them.")
+    if followups["ingest_samples"]:
+        ingest = (f"Then re-ingest samples for {subject}, updating the project's sample "
+                  "metadata to match the new type.")
+    else:
+        ingest = ("The project's sample metadata will NOT be updated, so its samples "
+                  "still describe the old type. Pass ingest_samples=true to re-ingest.")
+    return [transform, ingest]
 
 
 def plan_update_dataset(reader: reads.Reader, args: dict) -> Draft:
@@ -64,6 +139,12 @@ def plan_update_dataset(reader: reads.Reader, args: dict) -> Draft:
     Several datasets can be edited under one approval. Each one's current record is
     read separately, so "move these into QC" preserves each dataset's own tags rather
     than flattening them to a shared list.
+
+    `process` retypes the dataset. The type it becomes must be an ingest process --
+    a pipeline id describes what produced a dataset, and writing one onto a dataset
+    no pipeline produced makes the record claim something untrue. The type it comes
+    from is unrestricted: mistyping an upload and correcting an analysis output are
+    the same fix.
     """
     given = args.get("dataset_ids") or ([args["dataset_id"]]
                                         if args.get("dataset_id") else [])
@@ -85,15 +166,19 @@ def plan_update_dataset(reader: reads.Reader, args: dict) -> Draft:
                          "args": {"dataset_ids": given, "folder": "Some Folder"}}],
         )
 
+    process = _ingest_process(reader, args)
+    followups = {"ingest_samples": bool(args.get("ingest_samples", True)),
+                 "rerun_transform": bool(args.get("rerun_transform", True))}
+
     rows = [_dataset(reader, project["id"], one) for one in given]
-    edits = [(row, _dataset_edit(row, args)) for row in rows]
+    edits = [(row, _dataset_edit(row, args, process, followups)) for row in rows]
     actionable = [edit for _row, edit in edits if edit is not None]
     unchanged = [row["name"] for row, edit in edits if edit is None]
 
     if not actionable:
         raise errors.InvalidQuery(
             "Nothing would change.",
-            what="Supply a new name, description, folder, or tags.",
+            what="Supply a new name, description, process, folder, or tags.",
             given=args,
             retry_with=[
                 {"op": "update_dataset", "args": {"dataset_ids": given,
@@ -116,7 +201,43 @@ def plan_update_dataset(reader: reads.Reader, args: dict) -> Draft:
             lines += _edit_lines(edit, indent="    ")
             lines.append("")
 
+    retyped = [edit for edit in actionable
+               if edit["process_id"] != edit["was"]["process_id"]]
+    if retyped:
+        lines += ["", *_followup_lines(len(retyped), followups)]
+
     warnings = []
+    if retyped:
+        keeps = "keeps the files it already has" if len(retyped) == 1 else \
+            "keep the files they already have"
+        warnings.append(
+            f"Retyping does not re-validate the files: {_retyped_subject(len(retyped))} "
+            f"{keeps}, which may not be what the new type expects.")
+        if followups["ingest_samples"]:
+            warnings.append(
+                "Sample re-ingest re-derives samples and their metadata from the "
+                "dataset's file names under the new type, replacing the project's "
+                "current sample records for these datasets. Values edited by hand "
+                "since the last ingest are overwritten.")
+        # Already fetched by the resolver, so this costs no call.
+        ingest_ids = {row["id"] for row in reader.processes(include_archived=True)
+                      if row["executor"] == "INGEST"}
+        one_way = [edit for edit in retyped
+                   if edit["was"]["process_id"] and
+                   edit["was"]["process_id"] not in ingest_ids]
+        if one_way:
+            warnings.append(
+                f"{len(one_way)} of these dataset(s) are typed as a pipeline today, "
+                "and this operation will not write a pipeline back -- so this retype "
+                "cannot be undone from here. Use the Cirro web UI to restore it.")
+        downstream = sorted({d["name"] for edit in retyped
+                             for d in _derived_from(reader, project["id"],
+                                                    edit["dataset_id"])})
+        if downstream:
+            warnings.append(
+                f"{len(downstream)} dataset(s) list a retyped dataset as their source: "
+                + ", ".join(downstream[:5]) + (" ..." if len(downstream) > 5 else "")
+                + ". Their lineage will report a source of a different type.")
     if unchanged:
         warnings.append(f"{len(unchanged)} of {len(given)} already match and will be "
                         f"left alone: {', '.join(unchanged)}.")
@@ -136,10 +257,13 @@ def plan_update_dataset(reader: reads.Reader, args: dict) -> Draft:
         warnings.append(f"The tag list is replaced on all {len(actionable)} datasets, "
                         "so any tags unique to one of them are dropped.")
 
+    scopes = [_inv("datasets", project["id"])]
+    if any(edit["ingest_samples"] for edit in actionable):
+        scopes.append(_inv("samples", project["id"]))
     return Draft(
         args={"project_id": project["id"], "edits": actionable},
         summary="\n".join(lines).rstrip(), warnings=warnings,
-        invalidates=[_inv("datasets", project["id"])],
+        invalidates=scopes,
     )
 
 
@@ -148,6 +272,9 @@ def _edit_lines(edit: dict, *, indent: str) -> list:
     for key in edit["changed"]:
         lines += [f"{indent}{key}", f"{indent}  from  {edit['was'][key]!r}",
                   f"{indent}  to    {edit[key]!r}"]
+    if edit["process_id"] != edit["was"]["process_id"]:
+        lines += [f"{indent}process", f"{indent}  from  {edit['was']['process']}",
+                  f"{indent}  to    {edit['process']}"]
     if edit["folders"] != edit["was"]["folders"]:
         was = ", ".join(edit["was"]["folders"]) or R.UNFILED
         now = ", ".join(edit["folders"]) or R.UNFILED
@@ -188,10 +315,25 @@ def apply_update_dataset(reader: reads.Reader, args: dict) -> dict:
                            "name": edit["dataset_name"],
                            "error": f"{type(exc).__name__}: {exc}"})
             continue
-        updated.append({"dataset_id": edit["dataset_id"],
-                        "name": R.plain(getattr(detail, "name", None)),
-                        "folders": edit.get("folders") or [],
-                        "tags": edit.get("tags") or []})
+        entry = {"dataset_id": edit["dataset_id"],
+                 "name": R.plain(getattr(detail, "name", None)),
+                 "folders": edit.get("folders") or [],
+                 "tags": edit.get("tags") or []}
+        # The record is already written, so a failed follow-up is reported against
+        # that dataset rather than raised: the retype stands either way, and saying
+        # the whole operation failed would be a lie the audit trail would keep.
+        for key, queue in (("rerun_transform", _queue_transform_rerun),
+                           ("ingest_samples", _queue_sample_ingest)):
+            if not edit.get(key):
+                continue
+            try:
+                queue(reader, args["project_id"], edit["dataset_id"])
+            except Exception as exc:
+                entry.setdefault("followups_failed", {})[key] = \
+                    f"{type(exc).__name__}: {exc}"
+            else:
+                entry[key] = True
+        updated.append(entry)
 
     if failed and not updated:
         raise errors.UpstreamError(
@@ -202,6 +344,18 @@ def apply_update_dataset(reader: reads.Reader, args: dict) -> dict:
             failed=failed,
         )
     result = {"updated": updated, "n_updated": len(updated)}
+    if any(entry.get("rerun_transform") or entry.get("ingest_samples")
+           for entry in updated):
+        result["followups_note"] = (
+            "Transform re-runs and sample ingests were accepted and run "
+            "asynchronously; derived files and project sample metadata catch up "
+            "shortly.")
+    if any(entry.get("followups_failed") for entry in updated):
+        result["followups_note"] = (
+            result.get("followups_note", "")
+            + " Datasets carrying `followups_failed` were retyped, but the follow-up "
+              "named there did not start and can be re-run from the Cirro web UI."
+        ).strip()
     if failed:
         result["failed"] = failed
         result["note"] = (f"{len(updated)} of {len(updated) + len(failed)} datasets "
@@ -320,16 +474,35 @@ def apply_update_samplesheet(reader: reads.Reader, args: dict) -> dict:
     result = {"updated_samplesheet_for": args["dataset_id"],
               "bytes": len(args["contents"]), "samples_ingested": False}
     if args.get("ingest_samples"):
-        from cirro_api_client.v1.api.datasets import ingest_samples
-        # 202: the ingest is queued, so the project's samples catch up shortly rather
-        # than by the time this returns. Saying "ingested" would overstate it.
-        ingest_samples.sync_detailed(project_id=args["project_id"],
-                                     dataset_id=args["dataset_id"],
-                                     client=reader.client._api_client)
+        _queue_sample_ingest(reader, args["project_id"], args["dataset_id"])
         result["samples_ingested"] = True
         result["note"] = ("Sample ingest was accepted and runs asynchronously; project "
                           "sample metadata updates shortly.")
     return result
+
+
+def _queue_sample_ingest(reader: reads.Reader, project_id: str,
+                         dataset_id: str) -> None:
+    """Re-derive a dataset's samples, from its samplesheet and its file names.
+
+    202: the ingest is queued, so the project's samples catch up shortly rather than
+    by the time this returns. Saying "ingested" would overstate it.
+    """
+    from cirro_api_client.v1.api.datasets import ingest_samples
+    ingest_samples.sync_detailed(project_id=project_id, dataset_id=dataset_id,
+                                 client=reader.client._api_client)
+
+
+def _queue_transform_rerun(reader: reads.Reader, project_id: str,
+                           dataset_id: str) -> None:
+    """Re-run the data transforms and web optimization over a dataset's files.
+
+    202, like the sample ingest. The SDK wraps neither route, so both go through the
+    generated API directly; this is the only place either is reached from.
+    """
+    from cirro_api_client.v1.api.datasets import rerun_transform
+    rerun_transform.sync_detailed(project_id=project_id, dataset_id=dataset_id,
+                                  client=reader.client._api_client)
 
 
 def _scan_folder(folder: Path, include_hidden: bool = False) -> tuple:
@@ -634,7 +807,8 @@ def apply_download_files(reader: reads.Reader, args: dict) -> dict:
 DATASET_OPS = [
     Op("update_dataset", RISK_WRITE, plan_update_dataset, apply_update_dataset,
        accepts=PROJECT_ARGS + FOLDER_ARGS + (
-           "dataset_id", "dataset_ids", "name", "description", "tags")),
+           "dataset_id", "dataset_ids", "name", "description", "tags", "process",
+           "ingest_samples", "rerun_transform")),
     Op("update_samplesheet", RISK_WRITE, plan_update_samplesheet, apply_update_samplesheet,
        accepts=PROJECT_ARGS + (
            "dataset_id", "contents", "file_path", "ingest_samples")),
