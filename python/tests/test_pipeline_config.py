@@ -1053,6 +1053,37 @@ def test_omitting_documentation_url_is_not_a_request_to_clear_it():
     assert caught.value.code == "INVALID_QUERY"
 
 
+# Every field plan_update_process diffs, with a value the fixture record does not
+# already hold. Driven through `Op.planned` rather than the planner, because the
+# declaration is what was wrong: `accepts` named three of these and the other eleven
+# were refused before the planner ran -- including `version`, which the planner's own
+# "Nothing would change" error suggests as the retry.
+UPDATE_PROCESS_FIELDS = {
+    "name": "Demo Two",
+    "description": "a new description",
+    "category": "Genomics",
+    "version": "v2.0.0",
+    "entry_point": "workflows/main.nf",
+    "executor_version": "23.10.1",
+    "uses_sample_sheet": False,
+    "allow_multiple_sources": True,
+    "documentation_url": "https://docs.example.test",
+    "config_repository": "org/config",
+    "config_repository_type": "GITHUB_PRIVATE",
+    "config_branch": "release",
+    "config_folder": "processes/demo",
+}
+
+
+@pytest.mark.parametrize("field", sorted(UPDATE_PROCESS_FIELDS))
+def test_update_process_accepts_every_field_it_diffs(field):
+    from cirro_agent.worker import mutations
+    op = mutations.OPS["update_process"]
+    draft = op.planned(_reader_for(_owned()),
+                       {"process_id": "org-demo", field: UPDATE_PROCESS_FIELDS[field]})
+    assert field in draft.args["changes"]
+
+
 def test_allow_multiple_sources_is_read_from_the_detail_payload():
     """It is absent from the list payload, so an update that guessed could flip it."""
     detail = SimpleNamespace(allow_multiple_sources=False, config_source="STORAGE",

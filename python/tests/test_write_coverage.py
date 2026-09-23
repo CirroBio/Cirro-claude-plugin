@@ -219,6 +219,62 @@ def _functions():
     return found
 
 
+def _args_key_names(node):
+    """Local names used as an `args` key: `args.get(n)`, `args[n]`, `n in args`."""
+    import ast
+    names = set()
+    for sub in ast.walk(node):
+        if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                and sub.func.attr == "get" and isinstance(sub.func.value, ast.Name)
+                and sub.func.value.id == "args" and sub.args
+                and isinstance(sub.args[0], ast.Name)):
+            names.add(sub.args[0].id)
+        if (isinstance(sub, ast.Subscript) and isinstance(sub.value, ast.Name)
+                and sub.value.id == "args" and isinstance(sub.slice, ast.Name)):
+            names.add(sub.slice.id)
+        if _membership_in_args(sub) and isinstance(sub.left, ast.Name):
+            names.add(sub.left.id)
+    return names
+
+
+def _membership_in_args(sub):
+    import ast
+    return (isinstance(sub, ast.Compare) and len(sub.ops) == 1
+            and isinstance(sub.ops[0], ast.In)
+            and isinstance(sub.comparators[0], ast.Name)
+            and sub.comparators[0].id == "args")
+
+
+def _loop_keys(loop):
+    """Keys a `for` over a literal sequence feeds to `args` through its loop variable.
+
+    `plan_update_process` reads most of its surface this way -- a tuple of
+    `(key, current)` pairs walked in a loop -- so a walk that only recognised
+    `args.get("literal")` saw almost none of it and the declaration drifted unnoticed.
+    """
+    import ast
+    if not isinstance(loop.iter, (ast.Tuple, ast.List)):
+        return set()
+    used = _args_key_names(loop)
+    target = loop.target
+    slots = ([target] if isinstance(target, ast.Name)
+             else list(target.elts) if isinstance(target, ast.Tuple) else [])
+    keys = set()
+    for index, slot in enumerate(slots):
+        if not isinstance(slot, ast.Name) or slot.id not in used:
+            continue
+        for element in loop.iter.elts:
+            part = element
+            if isinstance(target, ast.Tuple):
+                if not isinstance(element, (ast.Tuple, ast.List)) \
+                        or index >= len(element.elts):
+                    continue
+                part = element.elts[index]
+            if isinstance(part, ast.Constant):
+                keys.add(part.value)
+    return keys
+
+
 def _keys_read(node, functions, seen):
     """Argument keys this function reads, following the helpers it hands `args` to."""
     import ast
@@ -239,6 +295,10 @@ def _keys_read(node, functions, seen):
         if (isinstance(sub, ast.Subscript) and isinstance(sub.value, ast.Name)
                 and sub.value.id == "args" and isinstance(sub.slice, ast.Constant)):
             keys.add(sub.slice.value)
+        if _membership_in_args(sub) and isinstance(sub.left, ast.Constant):
+            keys.add(sub.left.value)
+        if isinstance(sub, ast.For):
+            keys |= _loop_keys(sub)
     for name in called:
         if name in functions and name not in seen:
             keys |= _keys_read(functions[name], functions, seen | {name})
