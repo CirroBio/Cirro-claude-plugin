@@ -45,7 +45,7 @@ server = MCPServer(
     name="cirro",
     title="Cirro Data Platform",
     instructions=INSTRUCTIONS,
-    version="0.11.0",
+    version="0.12.0",
 )
 
 # Every tool that resolves a session takes this. Without it the only way to work

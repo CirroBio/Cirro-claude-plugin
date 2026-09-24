@@ -2,7 +2,7 @@
 # against this file builds the venv that every worker subprocess runs in.
 [project]
 name = "cirro-agent-runtime"
-version = "0.11.0"
+version = "0.12.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "cirro-agent",
