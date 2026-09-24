@@ -26,6 +26,15 @@ FOLDER_TAG_PREFIX = "folder://"
 DEFAULT_CONFIG_FOLDER = ".cirro"
 DEFAULT_BRANCH = "main"
 
+# Which execution environments a process declares it can run in. This is the vocabulary
+# a *process* speaks; a *run request* speaks EnvironmentType (AWS_BATCH / AWS_OMICS),
+# and analysis_ops explains why the two are kept apart. Both the read that reports a
+# process's modes and the writes that declare them resolve them from here, so a
+# registration cannot declare a mode a run could never ask for.
+STANDARD_MODE = "STANDARD"
+HEALTHOMICS_MODE = "HEALTHOMICS"
+EXECUTION_MODES = (STANDARD_MODE, HEALTHOMICS_MODE)
+
 # How a dataset with no folder is described wherever folders are listed.
 UNFILED = "(not in a folder)"
 
@@ -192,7 +201,7 @@ def execution_modes(obj) -> list:
     if not declared:
         extra = getattr(obj, "additional_properties", None) or {}
         declared = extra.get("executionModes")
-    return [str(m) for m in declared] if declared else ["STANDARD"]
+    return [str(m) for m in declared] if declared else [STANDARD_MODE]
 
 
 def process(obj) -> dict:

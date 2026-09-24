@@ -267,7 +267,20 @@ def test_a_process_declaring_no_modes_still_runs_on_batch(writable_tenant, sessi
     predates the field."""
     result = plan_run(writable_tenant, session_dir, process="proc_sarek")
     assert result["ok"], result
-    assert "Compute      Cirro default (AWS Batch)" in result["rendered"]
+    assert "Compute      Cirro default (AWS Batch)\n" in result["rendered"]
+
+
+def test_a_batch_run_says_when_healthomics_was_available(writable_tenant, session_dir):
+    """The approval is the only thing the person reads. Where the pipeline declares
+    both, landing on Batch is a choice, and a line that does not say so reads as
+    though there were none -- which is how a run ends up in the wrong place."""
+    result = plan_run(writable_tenant, session_dir)
+    assert result["ok"], result
+    assert ("Compute      Cirro default (AWS Batch) -- this pipeline also declares "
+            "HEALTHOMICS") in result["rendered"]
+    # Not where the pipeline declares only STANDARD: there is nothing to disclose.
+    other = plan_run(writable_tenant, session_dir, process="proc_sarek")
+    assert "also declares" not in other["rendered"]
 
 
 def test_a_pipeline_nothing_feeds_launches_with_no_input_dataset(

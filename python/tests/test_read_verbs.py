@@ -169,6 +169,9 @@ def test_process_params_reports_declared_keys_and_defaults(writable_tenant, sess
     assert result["n_parameters"] == len(result["parameters"])
     assert result["process"]["id"] == "proc_rnaseq"
     assert result["next_calls"][0]["call"]["op"] == "run_analysis"
+    # The read that decides how to launch has to say where the pipeline may run; the
+    # run_analysis call it hands back is filled in from what is on this page.
+    assert result["process"]["execution_modes"] == ["STANDARD", "HEALTHOMICS"]
 
 
 def test_process_params_carries_the_labels_a_key_name_cannot(

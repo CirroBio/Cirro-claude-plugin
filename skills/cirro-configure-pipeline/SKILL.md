@@ -148,6 +148,27 @@ an unauthorized repository, and a failed sync means Cirro is quietly running old
 configuration than the repo contains. A private repository needs the Cirro GitHub app
 authorized — a user action, not something the plugin can do.
 
+## Where the pipeline is allowed to run
+
+A process declares its **execution modes**: `STANDARD` is AWS Batch, `HEALTHOMICS` is
+AWS HealthOmics. This is a property of the pipeline, set at registration, and it is
+what decides whether a run may ever be sent to HealthOmics — `run_analysis` refuses
+`environment_type: "AWS_OMICS"` against a pipeline that does not declare it.
+
+Leave it alone unless the user asks for HealthOmics. Omitting `execution_modes`
+registers the pipeline the way Cirro registers everything by default:
+
+```
+plan(op="create_process", args={"design_spec": "...", "config_source": "STORAGE",
+                                "execution_modes": ["STANDARD", "HEALTHOMICS"]})
+plan(op="update_process", args={"process_id": "...",
+                                "execution_modes": ["STANDARD", "HEALTHOMICS"]})
+```
+
+Do not pass `AWS_OMICS` or `AWS_BATCH` here — those are what a *run request* asks for,
+and they are refused. The `Runs on` line of the registration plan states what the
+record will declare; read it out with the rest.
+
 ## One approval for the whole thing
 
 Registering, uploading test data and launching the first run is one intention, so ask

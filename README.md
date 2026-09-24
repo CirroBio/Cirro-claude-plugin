@@ -250,8 +250,16 @@ A few things worth knowing:
   nobody, rather than holding up the launch.
 - **A run can target AWS HealthOmics** instead of Cirro's default AWS Batch, if the
   pipeline supports it. Ask for it and the plan's `Compute` line names the target
-  before you approve. A pipeline that does not declare HealthOmics is refused while
-  the plan is still read-only, rather than after you have said yes.
+  before you approve; where the pipeline could have gone either way, that line says so
+  even when the run is heading for Batch. A pipeline that does not declare HealthOmics
+  is refused while the plan is still read-only, rather than after you have said yes.
+- **Which of those a pipeline may use is decided when you register it.** Pass
+  `execution_modes` to `create_process` or `update_process` to declare `STANDARD` (AWS
+  Batch), `HEALTHOMICS`, or both, and the plan's `Runs on` line states it before you
+  approve. Leave it out and Cirro's own default stands. Editing a pipeline for any
+  other reason keeps the declaration it already had — the API replaces the whole
+  record, so a quiet omission there would cost a pipeline its HealthOmics capability
+  as a side effect of renaming it.
 - **Some things are deliberately not offered** — renaming or re-billing a project,
   editing a live share's conditions, billing changes. Those belong in the Cirro web UI
   where their effects are visible.
@@ -445,6 +453,13 @@ the plugin. The Batch default is the older path and is unchanged. After a run la
 `cirro-agent read dataset <id> -p <project> --include info` is the reliable check:
 `info.omicsRunUuid` and `info.jobId` are present exactly when the run reached
 HealthOmics, and dataset status is not a substitute.
+
+**Declaring which modes a pipeline may use is new in 0.12.0 and has not been sent to a
+live tenant.** `executionModes` is absent from the pinned API client's model, so the
+plugin puts it on the request itself; the tests assert it is on the serialized body and
+that editing a pipeline for any other reason carries it forward, but no registration
+carrying it has been accepted by a real server. Registering a pipeline at all is
+untested live, as above, so this inherits that caveat rather than adding a new one.
 
 **Signing in for a tenant has now been through a real login.** On 2026-09-09 a
 device-code login landed in a tenant folder against a development tenant, and plans

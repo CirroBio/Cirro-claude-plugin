@@ -83,7 +83,10 @@ def do_process_params(request: dict) -> dict:
     required = [f["path"] for f in parameters if f["required"]]
     process = {key: match[key] for key in (
         "id", "name", "executor", "uses_sample_sheet", "documentation_url",
-        "file_requirements_message")}
+        # This is the read someone runs to decide how to launch, and it hands back a
+        # run_analysis call to fill in. Leaving the modes out made the HealthOmics
+        # option invisible at exactly the moment it is being chosen.
+        "execution_modes", "file_requirements_message")}
     max_tokens = int(request.get("max_tokens") or DEFAULT_MAX_TOKENS["query"])
     envelope = wrap(
         query={"verb": "process_params", "id": match["id"]},

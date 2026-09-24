@@ -29,10 +29,11 @@ RUN_ANALYSIS_ARGS = PROJECT_ARGS + FOLDER_ARGS + (
 # deliberately not the `executionModes` vocabulary a process declares: a pipeline says
 # HEALTHOMICS, a request says AWS_OMICS. Conflating the two is what makes a wrong value
 # look plausible, so `HEALTHOMICS` is rejected by name rather than quietly accepted.
+# The mode half is imported rather than restated, so the modes a registration may
+# declare and the modes a run may ask for cannot drift apart.
 AWS_OMICS = "AWS_OMICS"
 AWS_BATCH = "AWS_BATCH"
 ENVIRONMENT_TYPES = (AWS_OMICS, AWS_BATCH)
-HEALTHOMICS_MODE = "HEALTHOMICS"
 
 
 def _environment_type(args: dict, process: dict) -> Optional[str]:
@@ -45,9 +46,9 @@ def _environment_type(args: dict, process: dict) -> Optional[str]:
     if not given:
         return None
     value = str(given).strip().upper()
-    if value == HEALTHOMICS_MODE:
+    if value == R.HEALTHOMICS_MODE:
         raise errors.InvalidQuery(
-            f"{HEALTHOMICS_MODE!r} is a process execution mode, not an environment "
+            f"{R.HEALTHOMICS_MODE!r} is a process execution mode, not an environment "
             f"type; the run request wants {AWS_OMICS!r}.",
             what="Name the environment the run executes in.", field="environment_type",
             given=given, retry_with=[{"environment_type": AWS_OMICS}],
@@ -78,11 +79,11 @@ def _environment_type(args: dict, process: dict) -> Optional[str]:
                         {"environment_type": None}],
         )
     modes = process.get("execution_modes") or []
-    if HEALTHOMICS_MODE not in modes:
+    if R.HEALTHOMICS_MODE not in modes:
         # The backend refuses this too, but refusing it here keeps the failure on the
         # read-only side of the approval gate.
         raise errors.InvalidQuery(
-            f"{process['name']!r} does not declare {HEALTHOMICS_MODE} and cannot run "
+            f"{process['name']!r} does not declare {R.HEALTHOMICS_MODE} and cannot run "
             "on AWS HealthOmics.",
             what="Pick a pipeline that declares HEALTHOMICS, or omit environment_type "
                  "to run on Cirro's default.",
@@ -141,8 +142,15 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
     environment_type = _environment_type(args, process)
 
     compute = args.get("compute_environment")
-    compute_label = ("AWS HealthOmics" if environment_type == AWS_OMICS
-                     else "Cirro default (AWS Batch)")
+    if environment_type == AWS_OMICS:
+        compute_label = "AWS HealthOmics"
+    else:
+        compute_label = "Cirro default (AWS Batch)"
+        if R.HEALTHOMICS_MODE in (process.get("execution_modes") or []):
+            # The pipeline declares both, so Batch is a choice here rather than the
+            # only place this could run. An approval that says nothing reads as though
+            # there were no choice, which is how a run lands on the wrong one.
+            compute_label += " -- this pipeline also declares HEALTHOMICS"
     if compute:
         environments = reader.compute_environments(project["id"])
         match = next((e for e in environments if compute in (e["id"], e["name"])), None)

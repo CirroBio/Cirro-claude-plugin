@@ -79,8 +79,14 @@ parameters[]:  name, type, group, required, default, choices, when, description
 outputs[]:     path, description, required
 constraints[]: applies_to, description, verify
 cirro:         process_id, category, parent_process_ids, child_process_ids,
-               managed_parameters[{name, role, note}]
+               execution_modes, managed_parameters[{name, role, note}]
 ```
+
+`execution_modes` is optional and usually left out: omitting it registers the pipeline
+the way Cirro registers everything by default, which is AWS Batch. Name
+`[STANDARD, HEALTHOMICS]` only when the pipeline is meant to be runnable on AWS
+HealthOmics — it is a capability of the *process*, decided once at registration, not a
+per-run choice, and a pipeline that does not declare it cannot be sent there later.
 
 Two things that will bite you when writing it:
 

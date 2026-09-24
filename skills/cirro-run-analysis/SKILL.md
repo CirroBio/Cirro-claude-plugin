@@ -142,7 +142,9 @@ is accepted as a synonym for omitting it. Two things to keep straight:
   already names where the run executes, so pick one or the other.
 
 The plan's `Compute` line states the target. Read it out — it is the only place the
-person sees which service will actually run the workflow.
+person sees which service will actually run the workflow. Where the pipeline declares
+both modes and the run is going to Batch, that line also says so, so the person can
+redirect before approving rather than after the run has started.
 
 ## 5. Show the plan to the user, then apply
 

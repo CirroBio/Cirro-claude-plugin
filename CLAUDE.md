@@ -238,6 +238,25 @@ one blanks it. Resolve every field from the current record in the planner. Four 
 paths were broken this way. `test_request_models.py` exercises every operation's request
 construction against a recording double — a new operation must be added there.
 
+A field the pinned client does not *model* is the same trap one layer down.
+`executionModes` is in the API spec, `CustomProcessInput` carries no attribute for it,
+and `to_dict` merges `additional_properties` -- so it reaches the wire only because
+`_process_input` puts it there, and an update that stayed quiet about it would strip a
+pipeline's HealthOmics capability as a side effect of renaming it. `_process_input` is
+the one place that decides, and it distinguishes three states: `_UNSPECIFIED` omits the
+key, a value sets it, None sends a null. `environmentType` on `RunAnalysisRequest` is
+the same shape. Both prefer a modeled attribute when one exists, so each collapses to a
+setattr the day the client catches up.
+
+**A process declares `executionModes`; a run request asks for an `EnvironmentType`.**
+STANDARD and HEALTHOMICS are what a pipeline says about itself, AWS_BATCH and AWS_OMICS
+are what a launch asks for, and accepting either name for the other is what makes a
+wrong value look plausible -- so each path refuses the other's vocabulary by name.
+`rows.EXECUTION_MODES` is the one statement of the mode half and `analysis_ops` imports
+it rather than restating it, so a registration cannot declare a mode no run could ask
+for. The capability is a property of the process, set at registration, which is why the
+run path can only refuse a mode the pipeline never declared and never grant one.
+
 **Dataset folders are `folder://` tags.** Report them as `folders`, never surface the
 prefix, and never write a tag list without re-including folder membership.
 `mutations._target_folders` and `_tag_values` are the one implementation of both halves

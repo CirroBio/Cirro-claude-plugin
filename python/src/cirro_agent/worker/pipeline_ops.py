@@ -225,6 +225,57 @@ def _owned_process(reader: reads.Reader, process_id: str) -> dict:
     return reads.process_detail(reader, process_id, row)
 
 
+def _execution_modes(args: dict, spec: Optional[dict] = None) -> Optional[list]:
+    """Which execution environments the process declares, or None to say nothing.
+
+    This is the vocabulary a *process* speaks -- STANDARD is AWS Batch, HEALTHOMICS is
+    AWS HealthOmics -- and not the EnvironmentType a run request speaks. The two are
+    kept apart for the reason analysis_ops gives, and this is the half that turns the
+    capability on: a process declaring only STANDARD cannot be launched on HealthOmics
+    at all, however the run request is phrased.
+
+    None means "this write does not speak to the field". On a create that leaves the
+    server's own default, which the portal and `rows.execution_modes` both read as
+    STANDARD; on an update it would blank the declaration, so update resolves the
+    current value rather than passing None. The spec makes the array nullable with
+    minItems 1, so an empty list is refused rather than sent.
+    """
+    given = args.get("execution_modes")
+    if given is None and spec is not None:
+        given = (spec.get("cirro") or {}).get("execution_modes")
+    if given is None:
+        return None
+    values = [given] if isinstance(given, str) else list(given)
+    if not values:
+        raise errors.InvalidQuery(
+            "execution_modes cannot be empty.",
+            what="Name at least one mode, or omit the argument to leave the "
+                 "declaration alone.",
+            field="execution_modes", given=given,
+            retry_with=[{"execution_modes": [R.STANDARD_MODE]},
+                        {"execution_modes": list(R.EXECUTION_MODES)}],
+        )
+    chosen = set()
+    for value in values:
+        mode = str(value).strip().upper()
+        if mode not in R.EXECUTION_MODES:
+            raise errors.InvalidQuery(
+                f"{value!r} is not an execution mode.",
+                what=(f"A process declares {R.STANDARD_MODE} (AWS Batch), "
+                      f"{R.HEALTHOMICS_MODE} (AWS HealthOmics), or both. AWS_BATCH "
+                      "and AWS_OMICS are what a run request asks for, not what a "
+                      "process declares."),
+                field="execution_modes", given=given,
+                retry_with=[{"execution_modes": [R.STANDARD_MODE]},
+                            {"execution_modes": list(R.EXECUTION_MODES)}],
+            )
+        chosen.add(mode)
+    # Canonical order, however the caller spelled it: apply re-plans and refuses a plan
+    # whose rendered text has changed, so ["HEALTHOMICS", "STANDARD"] and the reverse
+    # must not render as two different approvals.
+    return [mode for mode in R.EXECUTION_MODES if mode in chosen]
+
+
 def _check_name(name: str) -> None:
     if not NAME_CHARSET.match(name or ""):
         raise errors.InvalidQuery(
@@ -407,6 +458,7 @@ def _registration_record(args: dict, spec: dict, source: str, checked: dict,
         "entry_point": workflow.get("entrypoint") or "main.nf",
         "executor_version": workflow.get("executor_version"),
         "repository_type": checked["repository_type"],
+        "execution_modes": _execution_modes(args, spec),
         "parent_process_ids": cirro.get("parent_process_ids") or [],
         "child_process_ids": cirro.get("child_process_ids") or [],
         "uses_sample_sheet": bool(args.get("uses_sample_sheet")),
@@ -432,6 +484,9 @@ def _where_config_lives(source: str, settings: Optional[dict]) -> str:
 def _registration_summary(reader: reads.Reader, args: dict, resolved: dict,
                           assets: dict, report: dict) -> str:
     source = resolved["config_source"]
+    modes = resolved["execution_modes"]
+    runs_on = (", ".join(modes) if modes
+               else f"Cirro default ({R.STANDARD_MODE} -- AWS Batch)")
     lines = [
         f"Register a new Cirro pipeline on {reader.base_url}.",
         "",
@@ -441,6 +496,7 @@ def _registration_summary(reader: reads.Reader, args: dict, resolved: dict,
         f"  Workflow code   {resolved['repository_path']}@{resolved['version']}"
         f":{resolved['entry_point']} [{resolved['executor']}]",
         f"  Engine version  {resolved['executor_version'] or 'Cirro default'}",
+        f"  Runs on         {runs_on}",
         f"  Configuration   {source} — "
         f"{_where_config_lives(source, resolved['custom_settings'])}",
         "",
@@ -492,7 +548,7 @@ def _process_input(*, process_id: str, name: str, description: str, executor: st
                    category: Optional[str], parent_process_ids: list,
                    child_process_ids: list,
                    uses_sample_sheet: bool, allow_multiple_sources: bool,
-                   documentation_url=_UNSPECIFIED):
+                   documentation_url=_UNSPECIFIED, execution_modes=_UNSPECIFIED):
     """The whole-record field set every process write has to fill.
 
     CustomProcessInput replaces the record rather than patching it, so a field left
@@ -500,16 +556,18 @@ def _process_input(*, process_id: str, name: str, description: str, executor: st
     gained by create and update together, instead of one path quietly erasing what
     the other sets.
 
-    `documentation_url` distinguishes three states, which is why it is not just
-    Optional[str]. Absent means "this write does not speak to the link", and the key
-    is omitted so the server keeps its own default -- what a create wants. An explicit
-    None means "clear it", which only an explicit null on the wire achieves. A string
-    sets it. Passing None for "not specified" would send a null and silently clear the
-    link, the same defect executor_version had.
+    `documentation_url` and `execution_modes` distinguish three states, which is why
+    neither is just an Optional. Absent means "this write does not speak to the
+    field", and the key is omitted so the server keeps its own default -- what a
+    create wants. An explicit None means "clear it", which only an explicit null on
+    the wire achieves. A value sets it. Passing None for "not specified" would send a
+    null and silently clear it, the same defect executor_version had -- and for
+    execution_modes that defect costs a pipeline its HealthOmics capability as a side
+    effect of editing its category.
     """
     from cirro_api_client.v1.models import CustomProcessInput, Executor
     from cirro_api_client.v1.types import UNSET
-    return CustomProcessInput(
+    request = CustomProcessInput(
         id=process_id, name=name, description=description,
         executor=Executor(executor), category=category,
         parent_process_ids=parent_process_ids, child_process_ids=child_process_ids,
@@ -519,6 +577,17 @@ def _process_input(*, process_id: str, name: str, description: str, executor: st
         documentation_url=(UNSET if documentation_url is _UNSPECIFIED
                            else documentation_url),
     )
+    if execution_modes is not _UNSPECIFIED:
+        # `executionModes` is in the API spec but the pinned cirro-api-client does not
+        # model it on this input. `to_dict` merges additional_properties, so the field
+        # reaches the wire either way -- and the modeled attribute is preferred, so
+        # this collapses to a setattr when the client catches up. The generated models
+        # are attrs, not dataclasses, so this asks the instance.
+        if hasattr(request, "execution_modes"):
+            request.execution_modes = execution_modes
+        else:
+            request.additional_properties["executionModes"] = execution_modes
+    return request
 
 
 def _pipeline_code(*, repository_path: str, version: str, repository_type: str,
@@ -549,7 +618,8 @@ def apply_create_process(reader: reads.Reader, args: dict) -> dict:
         parent_process_ids=args["parent_process_ids"],
         child_process_ids=args["child_process_ids"],
         uses_sample_sheet=args["uses_sample_sheet"],
-        allow_multiple_sources=args["allow_multiple_sources"])
+        allow_multiple_sources=args["allow_multiple_sources"],
+        execution_modes=args.get("execution_modes") or _UNSPECIFIED)
     request.config_source = ConfigSource(args["config_source"])
     request.pipeline_code = _pipeline_code(
         repository_path=args["repository_path"], version=args["version"],
@@ -948,6 +1018,15 @@ def plan_update_process(reader: reads.Reader, args: dict) -> Draft:
         if args.get(key) is not None and bool(args[key]) != bool(current):
             changes[key] = bool(args[key])
 
+    # `rows.process` fills this in for every process, a record predating the field
+    # included: nothing declared on the wire means STANDARD. Repeating that default
+    # here rather than falling through to [] is what keeps apply from posting an empty
+    # array, which the spec's minItems 1 refuses.
+    declared = detail.get("execution_modes") or [R.STANDARD_MODE]
+    wanted = _execution_modes(args)
+    if wanted is not None and wanted != declared:
+        changes["execution_modes"] = wanted
+
     # Presence, not value: clearing the link is the point, and every other field here
     # reads a missing argument as "leave alone", which would make None ambiguous. An
     # empty string means the same as null, since that is what the form sends.
@@ -997,6 +1076,11 @@ def plan_update_process(reader: reads.Reader, args: dict) -> Draft:
     if changes.get("executor_version"):
         warnings.append("Pinning the engine version should be a recovery from a "
                         "compilation failure, not a default.")
+    if (R.HEALTHOMICS_MODE in declared
+            and R.HEALTHOMICS_MODE not in changes.get("execution_modes", declared)):
+        warnings.append(
+            f"Dropping {R.HEALTHOMICS_MODE} means this pipeline can no longer be "
+            "launched on AWS HealthOmics. Runs already under way are unaffected.")
 
     resolved = {"process_id": args["process_id"], "changes": changes,
                 "current": {"name": detail.get("name"),
@@ -1010,7 +1094,8 @@ def plan_update_process(reader: reads.Reader, args: dict) -> Draft:
                             "documentation_url": detail.get("documentation_url"),
                             "uses_sample_sheet": bool(detail.get("uses_sample_sheet")),
                             "allow_multiple_sources":
-                                bool(detail.get("allow_multiple_sources"))}}
+                                bool(detail.get("allow_multiple_sources")),
+                            "execution_modes": declared}}
     return Draft(args=resolved, summary="\n".join(lines), warnings=warnings,
                  invalidates=[_inv("processes")])
 
@@ -1041,7 +1126,14 @@ def apply_update_process(reader: reads.Reader, args: dict) -> dict:
         # anything else. None here is deliberate and reaches the wire as a null, which
         # is what clearing the link takes.
         documentation_url=changes.get("documentation_url",
-                                      current.get("documentation_url")))
+                                      current.get("documentation_url")),
+        # Resolved on every update for the same reason documentation_url is: the
+        # request replaces the record, so an update that stays quiet about the modes
+        # would strip HealthOmics from a pipeline as a side effect of renaming it.
+        # A process that declared nothing reads back as [STANDARD], and re-sending
+        # that says what it already meant.
+        execution_modes=changes.get("execution_modes",
+                                    current["execution_modes"]))
     if current.get("config_source"):
         request.config_source = ConfigSource(current["config_source"])
     if code.get("repository_path"):
@@ -1263,12 +1355,13 @@ PIPELINE_OPS = [
                 "assets_dir", "preprocess_path", "uses_sample_sheet",
                 "allow_multiple_sources", "config_source", "config_repository",
                 "config_repository_type", "config_branch", "config_folder",
-                "repository_type")),
+                "repository_type", "execution_modes")),
     Op("update_process", RISK_WRITE, plan_update_process, apply_update_process,
        accepts=("process_id", "name", "description", "category", "version",
                 "entry_point", "executor_version", "uses_sample_sheet",
-                "allow_multiple_sources", "documentation_url", "config_repository",
-                "config_repository_type", "config_branch", "config_folder")),
+                "allow_multiple_sources", "execution_modes", "documentation_url",
+                "config_repository", "config_repository_type", "config_branch",
+                "config_folder")),
     Op("upload_process_config", RISK_WRITE_LOCAL, plan_upload_process_config,
        apply_upload_process_config,
        accepts=("process_id", "design_spec", "assets_dir", "preprocess_path",

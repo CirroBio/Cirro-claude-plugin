@@ -87,6 +87,9 @@ APPLY_CASES = {
         "repository_type": "GITHUB_PUBLIC", "parent_process_ids": [],
         "child_process_ids": [], "uses_sample_sheet": False,
         "allow_multiple_sources": True, "file_mapping_rules": [],
+        # What the planner resolves to when nobody names a mode: say nothing and let
+        # Cirro keep its own default.
+        "execution_modes": None,
         "design_spec": "/tmp/design-spec.md"},
     "update_process": {
         "process_id": "process-test-1", "changes": {"version": "v2.0.0"},
@@ -99,7 +102,10 @@ APPLY_CASES = {
                     "settings": {"repository": "org/wf", "branch": "main",
                                  "folder": ".cirro"},
                     "parent_process_ids": [], "child_process_ids": [],
-                    "uses_sample_sheet": False, "allow_multiple_sources": True}},
+                    "uses_sample_sheet": False, "allow_multiple_sources": True,
+                    # A HealthOmics-capable pipeline, because that is the declaration
+                    # an unrelated edit must not strip.
+                    "execution_modes": ["STANDARD", "HEALTHOMICS"]}},
     "sync_process_config": {"process_id": "process-test-1"},
     "archive_process": {"process_id": "process-test-1", "name": "Test Pipeline"},
 }
@@ -280,3 +286,35 @@ def test_update_process_resolves_every_field_from_the_current_record():
     assert request.pipeline_code.entry_point == "main.nf"
     assert request.custom_settings.repository == "org/wf"
     assert str(request.config_source) == "WITH_PROCESS"
+    assert request.to_dict()["executionModes"] == ["STANDARD", "HEALTHOMICS"], \
+        "editing the version must not strip the HealthOmics declaration"
+
+
+def test_execution_modes_reach_the_wire_and_are_omitted_when_unnamed():
+    """`executionModes` is in the API spec but not in the pinned client's model.
+
+    It has to travel as an extra property, so a registration that turns HealthOmics on
+    is only a registration that turns it on if the key is really there -- and one that
+    names no mode has to leave the key out rather than send a null the server would
+    read as a declaration.
+    """
+    reader = _reader()
+    mutations.OPS["create_process"].apply(reader, dict(APPLY_CASES["create_process"]))
+    request = reader.client.processes.create_custom_process.call_args.kwargs["process"]
+    assert "executionModes" not in request.to_dict()
+
+    reader = _reader()
+    mutations.OPS["create_process"].apply(reader, dict(
+        APPLY_CASES["create_process"],
+        execution_modes=["STANDARD", "HEALTHOMICS"]))
+    request = reader.client.processes.create_custom_process.call_args.kwargs["process"]
+    assert request.to_dict()["executionModes"] == ["STANDARD", "HEALTHOMICS"]
+
+
+def test_an_update_can_change_the_declared_execution_modes():
+    reader = _reader()
+    mutations.OPS["update_process"].apply(reader, dict(
+        APPLY_CASES["update_process"],
+        changes={"execution_modes": ["STANDARD"]}))
+    request = reader.client.processes.update_custom_process.call_args.kwargs["process"]
+    assert request.to_dict()["executionModes"] == ["STANDARD"]

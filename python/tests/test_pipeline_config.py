@@ -976,6 +976,7 @@ def _owned(**overrides):
                           "repository_type": "GITHUB_PUBLIC"},
         "uses_sample_sheet": True, "allow_multiple_sources": False,
         "parent_process_ids": [], "child_process_ids": [],
+        "execution_modes": ["STANDARD"],
     }
     record.update(overrides)
     return record
@@ -1067,6 +1068,7 @@ UPDATE_PROCESS_FIELDS = {
     "executor_version": "23.10.1",
     "uses_sample_sheet": False,
     "allow_multiple_sources": True,
+    "execution_modes": ["STANDARD", "HEALTHOMICS"],
     "documentation_url": "https://docs.example.test",
     "config_repository": "org/config",
     "config_repository_type": "GITHUB_PRIVATE",
@@ -1091,3 +1093,107 @@ def test_allow_multiple_sources_is_read_from_the_detail_payload():
                              file_mapping_rules=[])
     row = rows.process_detail(detail, base=_owned(allow_multiple_sources=True))
     assert row["allow_multiple_sources"] is False
+
+
+# --- execution modes ---------------------------------------------------------
+#
+# The vocabulary a process declares, not the one a run request speaks. A pipeline that
+# declares only STANDARD cannot be launched on HealthOmics however the run is phrased,
+# so registration is where the capability is turned on.
+
+def test_a_registration_declares_the_modes_it_was_given(tmp_path):
+    reader = MagicMock()
+    reader.processes.return_value = []
+    reader.base_url = "app.cirro.test"
+    draft = pipeline_ops.plan_create_process(reader, {
+        "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
+        "execution_modes": ["HEALTHOMICS", "standard"]})
+    # Canonical order and case, however the caller spelled it: apply re-plans and
+    # refuses a plan whose rendered text has changed.
+    assert draft.args["execution_modes"] == ["STANDARD", "HEALTHOMICS"]
+    assert "Runs on         STANDARD, HEALTHOMICS" in draft.summary
+
+
+def test_a_registration_that_names_no_mode_declares_nothing(tmp_path):
+    """None is "say nothing", so Cirro keeps its own default rather than being told."""
+    reader = MagicMock()
+    reader.processes.return_value = []
+    reader.base_url = "app.cirro.test"
+    draft = pipeline_ops.plan_create_process(reader, {
+        "design_spec": _write_spec(tmp_path), "config_source": "STORAGE"})
+    assert draft.args["execution_modes"] is None
+    assert "Cirro default (STANDARD -- AWS Batch)" in draft.summary
+
+
+def test_the_design_spec_can_declare_the_modes(tmp_path):
+    import copy
+    spec = copy.deepcopy(SPEC)
+    spec["cirro"]["execution_modes"] = ["HEALTHOMICS"]
+    reader = MagicMock()
+    reader.processes.return_value = []
+    reader.base_url = "app.cirro.test"
+    draft = pipeline_ops.plan_create_process(reader, {
+        "design_spec": _write_spec(tmp_path, spec), "config_source": "STORAGE"})
+    assert draft.args["execution_modes"] == ["HEALTHOMICS"]
+
+
+def test_an_environment_type_is_refused_where_a_mode_belongs(tmp_path):
+    """The mirror of the run path's refusal: a request says AWS_OMICS, a process says
+    HEALTHOMICS, and accepting either name for the other is what makes a wrong value
+    look plausible."""
+    reader = MagicMock()
+    reader.processes.return_value = []
+    reader.base_url = "app.cirro.test"
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops.plan_create_process(reader, {
+            "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
+            "execution_modes": ["AWS_OMICS"]})
+    assert caught.value.code == "INVALID_QUERY"
+    assert any(r["execution_modes"] == ["STANDARD", "HEALTHOMICS"]
+               for r in caught.value.retry_with)
+
+
+def test_an_empty_mode_list_is_refused_rather_than_sent(tmp_path):
+    """The array is nullable with minItems 1, so [] is not a way to say "default"."""
+    reader = MagicMock()
+    reader.processes.return_value = []
+    reader.base_url = "app.cirro.test"
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops.plan_create_process(reader, {
+            "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
+            "execution_modes": []})
+    assert caught.value.code == "INVALID_QUERY"
+
+
+def test_healthomics_can_be_turned_on_for_an_existing_pipeline():
+    reader = _reader_for(_owned())
+    draft = pipeline_ops.plan_update_process(
+        reader, {"process_id": "org-demo",
+                 "execution_modes": ["STANDARD", "HEALTHOMICS"]})
+    assert draft.args["changes"]["execution_modes"] == ["STANDARD", "HEALTHOMICS"]
+
+
+def test_an_unrelated_update_carries_the_declared_modes_forward():
+    """CustomProcessInput replaces the record, so a declaration this plan does not
+    name has to be in `current` or the edit strips it."""
+    reader = _reader_for(_owned(execution_modes=["STANDARD", "HEALTHOMICS"]))
+    draft = pipeline_ops.plan_update_process(
+        reader, {"process_id": "org-demo", "documentation_url": "https://x.test"})
+    assert "execution_modes" not in draft.args["changes"]
+    assert draft.args["current"]["execution_modes"] == ["STANDARD", "HEALTHOMICS"]
+
+
+def test_dropping_healthomics_warns_that_the_capability_goes_with_it():
+    reader = _reader_for(_owned(execution_modes=["STANDARD", "HEALTHOMICS"]))
+    draft = pipeline_ops.plan_update_process(
+        reader, {"process_id": "org-demo", "execution_modes": ["STANDARD"]})
+    assert draft.args["changes"]["execution_modes"] == ["STANDARD"]
+    assert any("HealthOmics" in w for w in draft.warnings)
+
+
+def test_declaring_the_modes_a_pipeline_already_has_is_not_a_change():
+    reader = _reader_for(_owned())
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops.plan_update_process(
+            reader, {"process_id": "org-demo", "execution_modes": ["STANDARD"]})
+    assert caught.value.code == "INVALID_QUERY"
