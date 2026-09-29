@@ -6,6 +6,7 @@ requires-python = ">=3.10,<3.14"
 dependencies = [
     "cirro>=1.13.1,<2",
     "mcp>=1.2",
+    "duckdb>=1.1,<2",
 ]
 
 [project.optional-dependencies]

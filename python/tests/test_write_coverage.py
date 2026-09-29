@@ -202,9 +202,9 @@ def test_the_read_cli_module_does_not_import_the_mutations_registry():
 def _op_modules():
     from cirro_agent.worker import mutations  # noqa: F401  (loads every family)
     import pathlib
-    from cirro_agent.worker import (analysis_ops, chain_ops, dataset_ops,
+    from cirro_agent.worker import (analysis_ops, chain_ops, dashboard_ops, dataset_ops,
                                     pipeline_ops, project_ops, share_ops)
-    modules = [mutations, analysis_ops, chain_ops, dataset_ops, pipeline_ops,
+    modules = [mutations, analysis_ops, chain_ops, dashboard_ops, dataset_ops, pipeline_ops,
                project_ops, share_ops]
     return {m.__name__.rsplit(".", 1)[-1]: pathlib.Path(m.__file__) for m in modules}
 

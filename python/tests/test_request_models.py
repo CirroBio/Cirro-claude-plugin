@@ -138,7 +138,10 @@ def test_every_registered_op_is_covered_here():
                                   # Exercised end to end in test_pipeline_config.py
                                   # against a fake tenant, where the revision API's
                                   # response shape matters more than the request.
-                                  "upload_process_config"}
+                                  "upload_process_config",
+                                  # Exercised end to end in test_dashboards.py against a
+                                  # fake tenant: apply re-reads the record it writes.
+                                  "create_dashboard", "edit_dashboard", "delete_dashboard"}
     missing = set(mutations.OPS) - covered
     assert not missing, (
         f"these operations build requests that nothing exercises: {sorted(missing)}")

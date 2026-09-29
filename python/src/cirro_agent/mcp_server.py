@@ -281,7 +281,8 @@ def session_remove(base_url: str) -> dict:
         "unsubscribe_share, create_workspace, start_workspace, stop_workspace, "
         "delete_workspace, download_files, create_process, update_process, "
         "upload_process_config, sync_process_config, archive_process, "
-        "write_process_config, commit_process_config.\n\n"
+        "write_process_config, commit_process_config, create_dashboard, "
+        "edit_dashboard, delete_dashboard.\n\n"
         "If a plan expired or went stale, pass its id as `renew_from` with the same op "
         "and args: an identical plan comes back as `unchanged: true` without "
         "re-sending the text, since the person has already read it.\n\n"
@@ -298,7 +299,11 @@ def session_remove(base_url: str) -> dict:
         "create_process and upload_process_config generate the configuration from "
         "`design_spec`, or take `assets_dir` -- a folder of process-form.json and "
         "friends written by hand, uploaded verbatim -- for form logic a spec cannot "
-        "express. Exactly one of the two on an upload."
+        "express. Exactly one of the two on an upload.\n\n"
+        "create_dashboard and edit_dashboard take `changes`, a list of {op, ...} "
+        "(add_source, add_query, add_view, add_control, update_*, remove, place, ...); "
+        "`cirro-agent read dashboard-schema` lists every change, chart and option. The "
+        "plan runs the dashboard's data locally and refuses one that would not render."
     ) + DIRECTORY_DOC,
 )
 def plan(op: str, args: Optional[dict] = None,

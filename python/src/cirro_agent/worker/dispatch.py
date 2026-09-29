@@ -3,7 +3,8 @@ from typing import Any
 from .. import errors
 from .. import local_reads
 from . import (gated, read_chains)
-from . import auth, portal, read_listings, read_process, read_query, read_summaries
+from . import (auth, portal, read_dashboards, read_listings, read_process, read_query,
+               read_summaries)
 
 
 HANDLERS = {
@@ -19,6 +20,9 @@ HANDLERS = {
     "tenants": local_reads.do_tenants,
     "task_logs": read_summaries.do_task_logs,
     "chain_status": read_chains.do_chain_status,
+    "dashboard": read_dashboards.do_dashboard,
+    "dashboard_schema": read_dashboards.do_dashboard_schema,
+    "table_preview": read_dashboards.do_table_preview,
     "login_start": auth.login_start,
     "login_wait": auth.login_wait,
     "login_daemon": auth.login_daemon,

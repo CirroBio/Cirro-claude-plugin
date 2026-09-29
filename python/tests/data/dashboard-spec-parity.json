@@ -1,0 +1,410 @@
+{
+  "histogram": {
+    "bindings": {
+      "x": "x_col",
+      "color": "color_col"
+    },
+    "spec": {
+      "$schema": "https://uwdata.github.io/mosaic/schema/latest.json",
+      "plot": [
+        {
+          "mark": "rectY",
+          "data": {
+            "from": "query"
+          },
+          "x": {
+            "bin": "x_col"
+          },
+          "y": {
+            "count": []
+          },
+          "fill": "color_col"
+        }
+      ],
+      "xLabel": "X Col"
+    },
+    "readBack": {
+      "x": "x_col",
+      "color": "color_col"
+    }
+  },
+  "bar": {
+    "bindings": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col"
+    },
+    "spec": {
+      "$schema": "https://uwdata.github.io/mosaic/schema/latest.json",
+      "plot": [
+        {
+          "mark": "barY",
+          "data": {
+            "from": "query"
+          },
+          "x": "x_col",
+          "y": {
+            "sum": "y_col"
+          },
+          "fill": "color_col"
+        }
+      ],
+      "xLabel": "X Col"
+    },
+    "readBack": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col"
+    }
+  },
+  "countbar": {
+    "bindings": {
+      "x": "x_col",
+      "color": "color_col"
+    },
+    "spec": {
+      "$schema": "https://uwdata.github.io/mosaic/schema/latest.json",
+      "plot": [
+        {
+          "mark": "barY",
+          "data": {
+            "from": "query"
+          },
+          "x": "x_col",
+          "y": {
+            "count": []
+          },
+          "fill": "color_col"
+        }
+      ],
+      "xLabel": "X Col"
+    },
+    "readBack": {
+      "x": "x_col",
+      "color": "color_col"
+    }
+  },
+  "scatter": {
+    "bindings": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col",
+      "size": "size_col"
+    },
+    "spec": {
+      "$schema": "https://uwdata.github.io/mosaic/schema/latest.json",
+      "plot": [
+        {
+          "mark": "dot",
+          "data": {
+            "from": "query"
+          },
+          "x": "x_col",
+          "y": "y_col",
+          "fill": "color_col",
+          "fillOpacity": 0.7,
+          "r": "size_col"
+        }
+      ],
+      "xLabel": "X Col",
+      "yLabel": "Y Col"
+    },
+    "readBack": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col",
+      "size": "size_col"
+    }
+  },
+  "boxplot": {
+    "bindings": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col"
+    },
+    "spec": {
+      "$schema": "https://uwdata.github.io/mosaic/schema/latest.json",
+      "plot": [
+        {
+          "mark": "ruleX",
+          "data": {
+            "from": "query"
+          },
+          "x": "x_col",
+          "y1": {
+            "min": "y_col"
+          },
+          "y2": {
+            "max": "y_col"
+          },
+          "stroke": "currentColor",
+          "strokeOpacity": 0.7
+        },
+        {
+          "mark": "barY",
+          "data": {
+            "from": "query"
+          },
+          "x": "x_col",
+          "y1": {
+            "quantile": [
+              "y_col",
+              0.25
+            ]
+          },
+          "y2": {
+            "quantile": [
+              "y_col",
+              0.75
+            ]
+          },
+          "fill": "color_col",
+          "fillOpacity": 0.85,
+          "stroke": "currentColor"
+        },
+        {
+          "mark": "tickY",
+          "data": {
+            "from": "query"
+          },
+          "x": "x_col",
+          "y": {
+            "median": "y_col"
+          },
+          "stroke": "currentColor",
+          "strokeWidth": 2
+        }
+      ],
+      "xLabel": "X Col"
+    },
+    "readBack": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col"
+    }
+  },
+  "heatmap": {
+    "bindings": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col"
+    },
+    "spec": {
+      "$schema": "https://uwdata.github.io/mosaic/schema/latest.json",
+      "plot": [
+        {
+          "mark": "cell",
+          "data": {
+            "from": "query"
+          },
+          "x": "x_col",
+          "y": "y_col",
+          "fill": "color_col"
+        }
+      ],
+      "xLabel": "X Col",
+      "yLabel": "Y Col"
+    },
+    "readBack": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col"
+    }
+  },
+  "dotplot": {
+    "bindings": {
+      "x": "x_col",
+      "y": "y_col",
+      "size": "size_col",
+      "color": "color_col"
+    },
+    "spec": {
+      "$schema": "https://uwdata.github.io/mosaic/schema/latest.json",
+      "plot": [
+        {
+          "mark": "dot",
+          "data": {
+            "from": "query"
+          },
+          "x": "x_col",
+          "y": "y_col",
+          "r": "size_col",
+          "fill": "color_col",
+          "fillOpacity": 0.6,
+          "stroke": "currentColor",
+          "strokeOpacity": 0.5
+        }
+      ],
+      "xLabel": "X Col",
+      "yLabel": "Y Col"
+    },
+    "readBack": {
+      "x": "x_col",
+      "y": "y_col",
+      "size": "size_col",
+      "color": "color_col"
+    }
+  },
+  "hexbin": {
+    "bindings": {
+      "x": "x_col",
+      "y": "y_col"
+    },
+    "spec": {
+      "$schema": "https://uwdata.github.io/mosaic/schema/latest.json",
+      "plot": [
+        {
+          "mark": "hexbin",
+          "data": {
+            "from": "query"
+          },
+          "x": "x_col",
+          "y": "y_col",
+          "fill": {
+            "count": []
+          }
+        }
+      ],
+      "xLabel": "X Col",
+      "yLabel": "Y Col"
+    },
+    "readBack": {
+      "x": "x_col",
+      "y": "y_col"
+    }
+  },
+  "volcano": {
+    "bindings": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col"
+    },
+    "spec": {
+      "$schema": "https://uwdata.github.io/mosaic/schema/latest.json",
+      "plot": [
+        {
+          "mark": "dot",
+          "data": {
+            "from": "query"
+          },
+          "x": "x_col",
+          "y": "y_col",
+          "fill": "color_col",
+          "fillOpacity": 0.7
+        },
+        {
+          "mark": "ruleY",
+          "data": [
+            1.301
+          ]
+        },
+        {
+          "mark": "ruleX",
+          "data": [
+            -1
+          ]
+        },
+        {
+          "mark": "ruleX",
+          "data": [
+            1
+          ]
+        }
+      ],
+      "xLabel": "X Col",
+      "yLabel": "Y Col"
+    },
+    "readBack": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col"
+    }
+  },
+  "line": {
+    "bindings": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col",
+      "detail": "detail_col"
+    },
+    "spec": {
+      "$schema": "https://uwdata.github.io/mosaic/schema/latest.json",
+      "plot": [
+        {
+          "mark": "lineY",
+          "data": {
+            "from": "query"
+          },
+          "x": "x_col",
+          "y": "y_col",
+          "stroke": "color_col",
+          "z": "detail_col"
+        }
+      ],
+      "xLabel": "X Col",
+      "yLabel": "Y Col"
+    },
+    "readBack": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col",
+      "detail": "detail_col"
+    }
+  },
+  "violin": {
+    "bindings": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col"
+    },
+    "spec": {
+      "$schema": "https://uwdata.github.io/mosaic/schema/latest.json",
+      "plot": [
+        {
+          "mark": "areaX",
+          "data": {
+            "from": "query"
+          },
+          "y": "y_col",
+          "fx": "x_col",
+          "fill": "color_col"
+        }
+      ],
+      "yLabel": "Y Col",
+      "fxLabel": "X Col"
+    },
+    "readBack": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col"
+    }
+  },
+  "stacked-area": {
+    "bindings": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col"
+    },
+    "spec": {
+      "$schema": "https://uwdata.github.io/mosaic/schema/latest.json",
+      "plot": [
+        {
+          "mark": "areaY",
+          "data": {
+            "from": "query"
+          },
+          "x": "x_col",
+          "y": "y_col",
+          "fill": "color_col"
+        }
+      ],
+      "xLabel": "X Col",
+      "yLabel": "Y Col"
+    },
+    "readBack": {
+      "x": "x_col",
+      "y": "y_col",
+      "color": "color_col"
+    }
+  }
+}
