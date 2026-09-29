@@ -129,7 +129,7 @@ def test_generated_ids_are_stable_across_plans(schema):
     first, _ = build(schema, [changes[0]])
     again, _ = build(schema, [changes[0]])
     assert first == again
-    assert D.validate(schema, first) == []
+    assert D.errors_only(D.validate(schema, first)) == []
 
 
 def test_a_lone_tile_fills_the_page(schema):
@@ -199,8 +199,8 @@ def test_render_changes_names_what_moves(schema):
     lines = D.render_changes(schema, None, document)
     assert any(line.startswith("  + view volcano1 'Fold change': scatter "
                                "(x=log2fc, y=pvalue, color=gene)") for line in lines)
-    assert any("+ control condpick 'Condition': select -> bygene.param:cond" in line
-               for line in lines)
+    assert any("+ control condpick 'Condition': select (value='treated') "
+               "-> bygene.param:cond" in line for line in lines)
     changed, _ = build(schema, [{"op": "remove", "node": "table1"}], document)
     assert "  - tile table1 from page 'default'" in D.render_changes(schema, document, changed)
 

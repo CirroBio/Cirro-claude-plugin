@@ -507,6 +507,13 @@ def _node_issues(schema: Schema, document: dict, strict_nodes, prior: dict) -> l
                     "warning", "missing-required",
                     f"{node['type']} {node['id']} has nothing wired into {port['id']}",
                     node["id"]))
+    feeding = {e["from"]["node"] for e in document["ir"]["edges"]}
+    for node in document["ir"]["nodes"]:
+        if (node["type"] in schema.node_types and not schema.renderable(node["type"])
+                and node["type"] != "input" and node["id"] not in feeding):
+            issues.append(_issue("warning", "unused",
+                                 f"{node['type']} {node['id']} feeds nothing on the dashboard",
+                                 node["id"]))
     if _has_cycle(document):
         issues.append(_issue("error", "cycle", "the graph contains a cycle"))
     issues.extend(_view_issues(schema, document))
@@ -1201,8 +1208,12 @@ def describe(schema: Schema, document: dict) -> dict:
             out["sources"].append({"id": node["id"], "kind": "server_query",
                                    "sql": config.get("sql"), "table": config.get("tableName")})
         elif kind in ("sql-query", "join"):
-            out["queries"].append({"id": node["id"], "kind": kind,
-                                   "inputs": _inputs_of(document, node["id"]),
+            # Its data inputs only: a control filling a {token} is listed under controls.
+            relation_ports = {p["id"] for p in schema.ports(node)[0]
+                              if p["type"] == "Relation"}
+            inputs = [e["from"]["node"] for e in document["ir"]["edges"]
+                      if e["to"]["node"] == node["id"] and e["to"]["port"] in relation_ports]
+            out["queries"].append({"id": node["id"], "kind": kind, "inputs": inputs,
                                    "sql": config.get("sql"),
                                    "tokens": schema.tokens(config.get("sql"))})
         elif kind == "chart":
@@ -1247,8 +1258,10 @@ def _line(kind: str, entry: dict) -> str:
         return (f"view {entry['id']}{title}: {entry['type']}"
                 f"{f' ({bound})' if bound else ''} of {entry.get('data')}")
     if kind == "controls":
-        return (f"control {entry['id']} {entry.get('label')!r}: {entry['kind']} -> "
-                f"{', '.join(entry['drives'])}")
+        state = ", ".join(f"{k}={entry[k]!r}" for k in ("value", "values", "lo", "hi")
+                          if entry.get(k) not in (None, "", []))
+        return (f"control {entry['id']} {entry.get('label')!r}: {entry['kind']}"
+                f"{f' ({state})' if state else ''} -> {', '.join(entry['drives'])}")
     return f"{entry['type']} {entry['id']}"
 
 

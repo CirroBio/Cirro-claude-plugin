@@ -232,9 +232,13 @@ def plan_edit_dashboard(reader: reads.Reader, args: dict) -> Draft:
         header.append(f"  Description  {record.get('description') or ''!r} -> {description!r}")
     header.append(
         f"  Open         {D.studio_url(reader.base_url, project['id'], record['id'])}")
+    # The portal serves its schema from the release that also checks revisions, so a
+    # schema that came from the portal is what says an open tab will not overwrite this.
     header.append(
-        "  Anyone with the dashboard open sees this change on their next save check; "
-        "their unsaved edits to it will be refused.")
+        "  An open copy of this dashboard reloads to show the change, or, if it has unsaved "
+        "edits, refuses to save over it." if note is None else
+        "  This portal predates the save check: a copy of the dashboard open with unsaved "
+        "edits will overwrite this change when it auto-saves.")
     summary = _render(header, D.render_changes(schema, before, document), profiles, warnings,
                       note, check_data)
     return Draft(args={"project_id": project["id"], "dashboard_id": record["id"], "name": name,
