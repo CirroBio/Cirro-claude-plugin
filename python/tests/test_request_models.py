@@ -294,13 +294,9 @@ def test_update_process_resolves_every_field_from_the_current_record():
 
 
 def test_execution_modes_reach_the_wire_and_are_omitted_when_unnamed():
-    """`executionModes` is in the API spec but not in the pinned client's model.
-
-    It has to travel as an extra property, so a registration that turns HealthOmics on
-    is only a registration that turns it on if the key is really there -- and one that
-    names no mode has to leave the key out rather than send a null the server would
-    read as a declaration.
-    """
+    """A registration that turns HealthOmics on is only one that turns it on if the key
+    is really on the wire -- and one that names no mode has to leave the key out rather
+    than send a null the server would read as a declaration."""
     reader = _reader()
     mutations.OPS["create_process"].apply(reader, dict(APPLY_CASES["create_process"]))
     request = reader.client.processes.create_custom_process.call_args.kwargs["process"]

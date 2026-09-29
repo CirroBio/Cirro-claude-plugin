@@ -16,7 +16,8 @@ from cirro_agent import cli
 
 WRITE_SHAPED = re.compile(
     r"^(create|update|delete|upload|run_|stop|archive|unarchive|invite|set_|sync_"
-    r"|import_|subscribe|unsubscribe|start|resume|rerun)", re.I)
+    r"|import_|subscribe|unsubscribe|start|resume|rerun|insert|save|rename"
+    r"|refresh_view|trigger_)", re.I)
 
 # SDK method -> the plugin operation that exposes it behind plan/apply.
 GATED = {
@@ -51,7 +52,17 @@ GATED = {
     "WorkspaceService.start": "start_workspace",
     "WorkspaceService.stop": "stop_workspace",
     "WorkspaceService.delete": "delete_workspace",
+    "DashboardService.create": "create_dashboard",
+    "DashboardService.update": "edit_dashboard",
+    "DashboardService.delete": "delete_dashboard",
+    "DataPortalProject.create_dashboard": "create_dashboard",
+    "DataPortalDashboard.save": "edit_dashboard",
+    "DataPortalDashboard.rename": "edit_dashboard",
+    "DataPortalDashboard.delete": "delete_dashboard",
 }
+
+_SHEET_WRITES = ("sheets are read as dashboard sources only; creating, changing and "
+                 "deleting sheets and their rows is not exposed")
 
 # Deliberately not exposed. Each entry is a decision with a reason, not an oversight.
 UNSUPPORTED = {
@@ -73,6 +84,13 @@ UNSUPPORTED = {
         "a primitive beneath dataset upload; reachable only via upload_dataset",
     "FileService.upload_files":
         "a primitive beneath dataset upload; reachable only via upload_dataset",
+    **{method: _SHEET_WRITES for method in (
+        "SheetService.create", "SheetService.update", "SheetService.delete",
+        "SheetService.insert_rows", "SheetService.update_rows", "SheetService.delete_rows",
+        "SheetService.refresh_view", "SheetService.trigger_ingest",
+        "DataPortalProject.create_sheet", "DataPortalSheet.update", "DataPortalSheet.delete",
+        "DataPortalSheet.insert_rows", "DataPortalSheet.update_rows",
+        "DataPortalSheet.delete_rows")},
 }
 
 

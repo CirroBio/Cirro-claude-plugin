@@ -29,7 +29,6 @@ DOCUMENTATION = "README.md"
 
 # The one declaration of the ProcessResource slot vocabulary: every slot a process's
 # configuration can occupy in Cirro storage, and the filename each is written as.
-# `metadata` is the only slot nothing here generates, so it has no filename.
 #
 # This mirrors `cirro_api_client.v1.models.ProcessResource` minus its UNKNOWN fallback,
 # and is mirrored rather than imported because both this module and the CLI parser that
@@ -38,16 +37,15 @@ DOCUMENTATION = "README.md"
 # --help`. The enum also maps an unrecognized value onto UNKNOWN instead of raising, so
 # a drifted mirror would fail silently on the wire; test_pipeline_config checks it.
 _SLOT_FILES = {"compute": COMPUTE, "documentation": DOCUMENTATION, "form": FORM,
-               "input": INPUT, "metadata": None, "output": OUTPUT,
-               "preprocess": PREPROCESS}
+               "input": INPUT, "output": OUTPUT, "preprocess": PREPROCESS}
 
 CONFIG_SLOTS = tuple(_SLOT_FILES)
 
 # Filename -> the ProcessResource slot it uploads to.
-SLOTS = {filename: slot for slot, filename in _SLOT_FILES.items() if filename}
+SLOTS = {filename: slot for slot, filename in _SLOT_FILES.items()}
 
 # Slots holding a JSON document rather than free text.
-JSON_SLOTS = ("form", "input", "output", "metadata")
+JSON_SLOTS = ("form", "input", "output")
 
 # Which library a picker resolves from. A genome or annotation belongs to the shared
 # reference library; anything sample-specific comes from the input dataset.

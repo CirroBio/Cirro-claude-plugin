@@ -110,10 +110,12 @@ file at that path is also read as a project-scoped config by anyone running Clau
 inside this repo, where `${CLAUDE_PLUGIN_ROOT}` is undefined and the spawn fails with
 `ENOENT`. `test_readme_current.py` guards this.
 
-**The runtime overrides cirro's own `cirro-api-client<1.6.0` pin.** The process
-config-revision routes and the `ConfigSource` enum exist only in >=1.6.0, and pipeline
-configuration is impossible without them. `test_runtime_contract.py` fails if a future
-`cirro` release stops working against that client.
+**The runtime needs `cirro-api-client` >=1.6.0.** The process config-revision routes
+and the `ConfigSource` enum exist only from 1.6.0, and pipeline configuration is
+impossible without them. cirro 1.13.1 pinned the client below that, so the runtime
+used to override cirro's pin; cirro >=1.15.0 requires >=1.7.1 itself, so the override
+is gone. `test_runtime_contract.py` fails if the client the runtime resolves loses
+those routes.
 
 **Reads are split by verb, with one shared fetch layer.** `worker/reads.py` holds
 `Reader` -- the client, cache, cost accounting and name resolution -- plus the single
@@ -238,15 +240,12 @@ one blanks it. Resolve every field from the current record in the planner. Four 
 paths were broken this way. `test_request_models.py` exercises every operation's request
 construction against a recording double — a new operation must be added there.
 
-A field the pinned client does not *model* is the same trap one layer down.
-`executionModes` is in the API spec, `CustomProcessInput` carries no attribute for it,
-and `to_dict` merges `additional_properties` -- so it reaches the wire only because
-`_process_input` puts it there, and an update that stayed quiet about it would strip a
-pipeline's HealthOmics capability as a side effect of renaming it. `_process_input` is
-the one place that decides, and it distinguishes three states: `_UNSPECIFIED` omits the
-key, a value sets it, None sends a null. `environmentType` on `RunAnalysisRequest` is
-the same shape. Both prefer a modeled attribute when one exists, so each collapses to a
-setattr the day the client catches up.
+An optional field is the same trap one layer down. An update that stayed quiet about
+`executionModes` would strip a pipeline's HealthOmics capability as a side effect of
+renaming it, so `_process_input` is the one place that decides, and it distinguishes
+three states: `_UNSPECIFIED` leaves the attribute UNSET so the key is omitted, a value
+sets it, None sends a null. The field is typed as the `ExecutionMode` enum and
+`to_dict` calls `.value` on each item, so a plain string list fails on the wire.
 
 **A process declares `executionModes`; a run request asks for an `EnvironmentType`.**
 STANDARD and HEALTHOMICS are what a pipeline says about itself, AWS_BATCH and AWS_OMICS

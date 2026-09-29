@@ -282,7 +282,7 @@ def test_a_slot_the_read_could_not_get_is_reported_not_dropped(monkeypatch):
     out = read_process._storage_config(_reader(), "p1", {})
     assert out["slots_present"] == ["form"]
     unread = {entry["what"] for entry in out["omitted"]}
-    assert "the compute slot" in unread and "the metadata slot" in unread
+    assert "the compute slot" in unread and "the preprocess slot" in unread
     assert all(entry["fix"]["verb"] == "process_config" for entry in out["omitted"])
 
 

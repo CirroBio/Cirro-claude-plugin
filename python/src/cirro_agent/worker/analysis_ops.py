@@ -235,16 +235,8 @@ def apply_run_analysis(reader: reads.Reader, args: dict) -> dict:
         if args.get(optional):
             setattr(request, optional, args[optional])
     if args.get("environment_type"):
-        # `environmentType` is in the API spec but the pinned cirro-api-client does not
-        # model it on this request. `to_dict` merges additional_properties, so the
-        # field reaches the wire either way -- and the modeled attribute is preferred,
-        # so this whole branch collapses to a setattr when the client catches up.
-        # The generated models are attrs, not dataclasses, so this asks the instance
-        # rather than reading __dataclass_fields__, which they do not have.
-        if hasattr(request, "environment_type"):
-            request.environment_type = args["environment_type"]
-        else:
-            request.additional_properties["environmentType"] = args["environment_type"]
+        from cirro_api_client.v1.models import EnvironmentType
+        request.environment_type = EnvironmentType(args["environment_type"])
     # Folders are tags, and RunAnalysisRequest carries tags -- so the output dataset
     # is filed at launch, in the same call, instead of needing an update afterwards.
     combined = _wire_tags(args.get("folders"), args.get("tags"))
