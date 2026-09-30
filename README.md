@@ -140,7 +140,8 @@ cirro-agent read tasks -p "My Project" -d ds_123
 | Pipelines | `processes`, `process`, `process-params`, `process-config`, `workflow-spec`, `check-config` |
 | Project resources | `samples`, `references`, `reference-types`, `compute-envs`, `shares`, `workspaces`, `project-users`, `users` |
 | Money | `spend`, `cost` |
-| Dashboards | `dashboards`, `dashboard` (add `--run` to execute its data), `dashboard-schema`, `sheets`, `preview` |
+| Dashboards | `dashboards`, `dashboard` (add `--run` to execute its data), `dashboard-schema`, `preview` |
+| Sheets | `sheets`, `sheet` (its columns and a page of rows with their `_row_id`; `--where` filters them) |
 
 **Big answers stay useful.** Ask about a project with 4,000 datasets and you will not get
 4,000 rows, and you will not get an arbitrary 40 either. You get the shape of all of them
@@ -279,6 +280,7 @@ A few things worth knowing:
 | Workspaces | `create_workspace`, `start_workspace`, `stop_workspace`, `delete_workspace` |
 | Pipelines | `create_process`, `update_process`, `upload_process_config`, `sync_process_config`, `archive_process` |
 | Dashboards | `create_dashboard`, `edit_dashboard`, `delete_dashboard` |
+| Sheets | `create_sheet` (a table, optionally with rows or from a local file, or a view over SQL), `update_sheet` (rename it, add, drop, rename or retype columns, change a view's SQL), `delete_sheet`, `insert_rows`, `update_rows`, `delete_rows`, `refresh_sheet` (a materialized view) |
 | Your computer | `write_process_config`, `commit_process_config` |
 | Several at once | `chain` — approve a sequence of the above as one action |
 | Your computer | `download_files` |
@@ -308,6 +310,7 @@ safely from here — use the web UI.
 | `cirro-define-test-dataset` | Picking test data, parameters and success criteria |
 | `cirro-configure-pipeline` | Turning that into a registered, runnable Cirro pipeline |
 | `cirro-dashboards` | Building, reading and editing Data Studio dashboards |
+| `cirro-sheets` | Creating sheets and editing their columns and rows |
 | `cirro-write-python` | Writing you a standalone script to run yourself |
 
 Commands: `/cirro:setup` and `/cirro:doctor`.
@@ -384,6 +387,29 @@ the plan says which was used.
 when you have no unsaved edits, and warns you instead of overwriting it when you do.
 The other direction holds too: if you save in the portal after Claude has planned an
 edit, the edit is refused as stale rather than written over your work.
+
+## Working with sheets
+
+Claude can create a sheet — from a list of columns, from rows it has worked out, or from
+a CSV, TSV, Parquet or JSON file on your computer — and change one: add, fix or remove
+rows, and add, drop, rename or retype columns.
+
+**Every value is checked against its column before you approve.** The plan shows each
+value as the sheet will store it — `"1,200"` as `1200`, `yes` as `true`, a timestamp in
+UTC — and refuses one that would not fit, naming its row and column: a word in a number
+column, a status that is not one of the allowed values, a duplicate in a unique column.
+Cirro checks some of this too, but a value it cannot store comes back as a bare server
+error that names neither.
+
+**A change to rows shows the rows.** An update lists each selected row's values before
+and after; a delete lists the rows it removes. If anyone edits one of those rows before
+you approve, the change is refused rather than applied to values you did not see. A
+change to the sheet itself — its columns or its table name — shows Cirro's own preview
+of what it will do, and lists the dashboards and views that read the sheet, since SQL or
+a chart that names a dropped column stops working.
+
+Writes of more than 1,000 rows go in several requests. Each is all-or-nothing, but the
+whole is not: the plan says so, and a failure part-way says how many rows were written.
 
 ## Locking it down further
 
@@ -498,6 +524,20 @@ reads, including `dashboard --run`, were checked against all 40 dashboards on th
 tenant. The portal half — an open dashboard reloading to show a plugin's edit, and
 refusing to save over it with unsaved edits — was exercised with an unreleased portal
 build; until that build is deployed, an open tab can still overwrite an edit.
+
+**Sheets have run against a live tenant** — on 2026-09-30, against a development tenant,
+in a project set aside for it. `create_sheet` made a table with rows across eight
+column types (an enum, a URL, dates and timestamps among them) and two views over it; `insert_rows` added rows inline and from a local CSV;
+`update_rows` changed rows by filter and by `_row_id`, and a plan made before one of its
+rows was edited was refused as stale; `update_sheet` added, dropped and renamed columns
+and changed a view's SQL; `delete_rows` and `delete_sheet` removed them all. A delete
+plan for a sheet three dashboards read listed all three. That run also found that the
+backend's dry run accepts narrowing a column's type which the table then refuses, so
+the plan now refuses it first.
+
+`refresh_sheet` is the exception: materializing a view failed inside that tenant's
+backend (`LocalFileSystem has been disabled by configuration`), and the backend will
+not refresh a view in that state, so no refresh has succeeded live.
 
 **Signing in for a tenant has now been through a real login.** On 2026-09-09 a
 device-code login landed in a tenant folder against a development tenant, and plans

@@ -103,7 +103,8 @@ def do_list(request: dict) -> dict:
                   "rows": s.get("totalRowCount"), "status": s.get("status")}
                  for s in sheets(reader, project_id)]
         return _flat(reader, request, of, items, note=(
-            "A sheet is a dashboard source: add_source with sheet=<id>."))
+            "`read sheet <id>` shows a sheet's columns and rows; a sheet is also a "
+            "dashboard source (add_source with sheet=<id>)."))
 
     raise errors.InvalidQuery(
         f"Unknown listing {of!r}.", what="Pick a supported listing.", field="of", given=of,

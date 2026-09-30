@@ -45,7 +45,7 @@ server = MCPServer(
     name="cirro",
     title="Cirro Data Platform",
     instructions=INSTRUCTIONS,
-    version="0.12.1",
+    version="0.13.0",
 )
 
 # Every tool that resolves a session takes this. Without it the only way to work
@@ -282,7 +282,8 @@ def session_remove(base_url: str) -> dict:
         "delete_workspace, download_files, create_process, update_process, "
         "upload_process_config, sync_process_config, archive_process, "
         "write_process_config, commit_process_config, create_dashboard, "
-        "edit_dashboard, delete_dashboard.\n\n"
+        "edit_dashboard, delete_dashboard, create_sheet, update_sheet, delete_sheet, "
+        "insert_rows, update_rows, delete_rows, refresh_sheet.\n\n"
         "If a plan expired or went stale, pass its id as `renew_from` with the same op "
         "and args: an identical plan comes back as `unchanged: true` without "
         "re-sending the text, since the person has already read it.\n\n"
@@ -303,7 +304,12 @@ def session_remove(base_url: str) -> dict:
         "create_dashboard and edit_dashboard take `changes`, a list of {op, ...} "
         "(add_source, add_query, add_view, add_control, update_*, remove, place, ...); "
         "`cirro-agent read dashboard-schema` lists every change, chart and option. The "
-        "plan runs the dashboard's data locally and refuses one that would not render."
+        "plan runs the dashboard's data locally and refuses one that would not render.\n\n"
+        "Sheet ops take `sheet_id`. insert_rows takes `rows` ([{column: value}]) or "
+        "`file` (a local CSV/TSV/Parquet/JSON); update_rows takes `set` with `where` "
+        "({column: value}) or `row_ids`, or per-row `updates`; delete_rows takes `where` "
+        "or `row_ids`. `cirro-agent read sheet <id>` shows the columns and each row's "
+        "`_row_id`. Values are checked against their column's type at plan time."
     ) + DIRECTORY_DOC,
 )
 def plan(op: str, args: Optional[dict] = None,

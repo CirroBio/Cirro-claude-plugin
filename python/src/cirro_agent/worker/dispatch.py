@@ -4,7 +4,7 @@ from .. import errors
 from .. import local_reads
 from . import (gated, read_chains)
 from . import (auth, portal, read_dashboards, read_listings, read_process, read_query,
-               read_summaries)
+               read_sheets, read_summaries)
 
 
 HANDLERS = {
@@ -23,6 +23,7 @@ HANDLERS = {
     "dashboard": read_dashboards.do_dashboard,
     "dashboard_schema": read_dashboards.do_dashboard_schema,
     "table_preview": read_dashboards.do_table_preview,
+    "sheet": read_sheets.do_sheet,
     "login_start": auth.login_start,
     "login_wait": auth.login_wait,
     "login_daemon": auth.login_daemon,

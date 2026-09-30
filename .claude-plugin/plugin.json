@@ -1,7 +1,7 @@
 {
   "name": "cirro",
   "description": "Operate the Cirro data platform through its Python SDK. Explore projects, datasets, samples, files, and pipeline runs with responses shaped for an agent context; launch analyses, upload data, and manage resources behind an explicit approval gate.",
-  "version": "0.12.1",
+  "version": "0.13.0",
   "author": {
     "name": "Cirro Bio",
     "url": "https://cirro.bio"

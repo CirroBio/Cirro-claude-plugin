@@ -492,7 +492,7 @@ def test_a_cirro_curated_process_is_refused():
 
 
 OP_MODULES = ("analysis_ops", "chain_ops", "dashboard_ops", "dataset_ops", "pipeline_ops",
-              "project_ops", "share_ops")
+              "project_ops", "share_ops", "sheet_ops")
 
 
 @pytest.mark.parametrize("first", OP_MODULES + ("mutations",))
@@ -506,7 +506,7 @@ def test_any_op_module_can_be_imported_first(first):
     import sys
     code = (f"from cirro_agent.worker import {first};"
             "from cirro_agent.worker.mutations import OPS;"
-            "assert len(OPS) == 37, len(OPS);"
+            "assert len(OPS) == 44, len(OPS);"
             "assert 'create_process' in OPS and 'run_analysis' in OPS and 'chain' in OPS")
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr[-800:]

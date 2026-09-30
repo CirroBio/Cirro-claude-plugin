@@ -59,10 +59,20 @@ GATED = {
     "DataPortalDashboard.save": "edit_dashboard",
     "DataPortalDashboard.rename": "edit_dashboard",
     "DataPortalDashboard.delete": "delete_dashboard",
+    "SheetService.create": "create_sheet",
+    "SheetService.update": "update_sheet",
+    "SheetService.delete": "delete_sheet",
+    "SheetService.insert_rows": "insert_rows, create_sheet",
+    "SheetService.update_rows": "update_rows",
+    "SheetService.delete_rows": "delete_rows",
+    "SheetService.refresh_view": "refresh_sheet",
+    "DataPortalProject.create_sheet": "create_sheet",
+    "DataPortalSheet.update": "update_sheet",
+    "DataPortalSheet.delete": "delete_sheet",
+    "DataPortalSheet.insert_rows": "insert_rows",
+    "DataPortalSheet.update_rows": "update_rows",
+    "DataPortalSheet.delete_rows": "delete_rows",
 }
-
-_SHEET_WRITES = ("sheets are read as dashboard sources only; creating, changing and "
-                 "deleting sheets and their rows is not exposed")
 
 # Deliberately not exposed. Each entry is a decision with a reason, not an oversight.
 UNSUPPORTED = {
@@ -84,13 +94,9 @@ UNSUPPORTED = {
         "a primitive beneath dataset upload; reachable only via upload_dataset",
     "FileService.upload_files":
         "a primitive beneath dataset upload; reachable only via upload_dataset",
-    **{method: _SHEET_WRITES for method in (
-        "SheetService.create", "SheetService.update", "SheetService.delete",
-        "SheetService.insert_rows", "SheetService.update_rows", "SheetService.delete_rows",
-        "SheetService.refresh_view", "SheetService.trigger_ingest",
-        "DataPortalProject.create_sheet", "DataPortalSheet.update", "DataPortalSheet.delete",
-        "DataPortalSheet.insert_rows", "DataPortalSheet.update_rows",
-        "DataPortalSheet.delete_rows")},
+    "SheetService.trigger_ingest":
+        "ingest reads a file already staged in the sheet's S3 prefix; insert_rows with "
+        "`file` loads a local table instead",
 }
 
 
@@ -221,9 +227,9 @@ def _op_modules():
     from cirro_agent.worker import mutations  # noqa: F401  (loads every family)
     import pathlib
     from cirro_agent.worker import (analysis_ops, chain_ops, dashboard_ops, dataset_ops,
-                                    pipeline_ops, project_ops, share_ops)
+                                    pipeline_ops, project_ops, share_ops, sheet_ops)
     modules = [mutations, analysis_ops, chain_ops, dashboard_ops, dataset_ops, pipeline_ops,
-               project_ops, share_ops]
+               project_ops, share_ops, sheet_ops]
     return {m.__name__.rsplit(".", 1)[-1]: pathlib.Path(m.__file__) for m in modules}
 
 
