@@ -324,6 +324,30 @@ def test_group_tail_summarizes_what_it_drops():
     assert totals["groups"] == 30
 
 
+def test_group_by_list_field_counts_each_element():
+    data = [
+        {"id": "a", "executor": "NEXTFLOW", "execution_modes": ["STANDARD", "HEALTHOMICS"]},
+        {"id": "b", "executor": "NEXTFLOW", "execution_modes": ["STANDARD"]},
+        {"id": "c", "executor": "INGEST", "execution_modes": []},
+    ]
+    groups, _tail, totals = Q.group(data, ["execution_modes"], ["count"])
+    counts = {g["key"]["execution_modes"]: g["count"] for g in groups}
+    assert counts == {"STANDARD": 2, "HEALTHOMICS": 1, None: 1}
+    assert totals["count"] == 4 and "execution_modes" in totals["note"]
+
+    groups, _tail, _totals = Q.group(data, ["executor", "execution_modes"], ["count"])
+    pairs = {(g["key"]["executor"], g["key"]["execution_modes"]): g["count"]
+             for g in groups}
+    assert pairs == {("NEXTFLOW", "STANDARD"): 2, ("NEXTFLOW", "HEALTHOMICS"): 1,
+                     ("INGEST", None): 1}
+
+
+def test_group_by_single_valued_lists_adds_no_note():
+    data = [{"id": "a", "folders": ["x"]}, {"id": "b", "folders": ["y"]}]
+    _groups, _tail, totals = Q.group(data, ["folders"], ["count"])
+    assert totals == {"groups": 2, "count": 2}
+
+
 @pytest.mark.parametrize("key,check", [
     ("created_at:month", lambda v: len(v) == 7),
     ("created_at:quarter", lambda v: "Q" in v),
