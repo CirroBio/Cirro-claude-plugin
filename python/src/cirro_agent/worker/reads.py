@@ -840,15 +840,26 @@ def dashboard_record(reader: Reader, project_id: str, dashboard_id: str) -> dict
 
 
 def _server_message(content: bytes) -> str:
-    """The `message` of an error body, else the body itself, trimmed."""
+    """What an error body says: its `message`, or Cirro's `errorDetail`, else the body
+    itself, trimmed."""
     import json as _json
     try:
         body = _json.loads(content)
     except ValueError:
         return content[:300].decode(errors="replace")
-    if isinstance(body, dict) and body.get("message"):
-        return str(body["message"])
+    if isinstance(body, dict):
+        for key in ("message", "errorDetail"):
+            if body.get(key):
+                return str(body[key])
     return str(body)[:300]
+
+
+def sheet_jobs(reader: Reader, project_id: str, sheet_id: str) -> list:
+    """The jobs run against a sheet (ingests, materializations, drops), newest first."""
+    from cirro_api_client.v1.api.sheets import get_jobs
+    jobs = send(reader, get_jobs, what="Reading the sheet's jobs failed.",
+                cost="sheets.jobs", project_id=project_id, sheet_id=sheet_id) or []
+    return sorted(jobs, key=lambda j: j.get("createdAt") or "", reverse=True)
 
 
 def sheets(reader: Reader, project_id: str) -> list:
@@ -890,7 +901,10 @@ def sheet_page(reader: Reader, project_id: str, sheet_id: str, *, limit: int, pa
                      body=SheetDataRequest.from_dict(body),
                      refusals={400: lambda message: errors.InvalidQuery(
                          f"The sheet refused the query: {message}",
-                         what="Fix the filter or sort and try again.", field="where")})
+                         what="Fix the filter or sort, or check the sheet's status.",
+                         field="where",
+                         retry_with=[{"verb": "list", "of": "sheets",
+                                      "scope": {"project_ids": [project_id]}}])})
     if page_body is None:
         raise errors.NotFound(f"No sheet {sheet_id!r} in project {project_id}.",
                               what="Check the sheet ID.", field="sheet_id", given=sheet_id)

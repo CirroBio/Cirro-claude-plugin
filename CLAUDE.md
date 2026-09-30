@@ -378,7 +378,10 @@ Row writes are held against the rows as read. The plan digests the selected rows
 `sys_updated_at` included, and apply re-reads them by `_row_id` and compares, so a cell
 edited in the portal in between refuses the write. Schema writes send the
 `schemaVersionId` they were planned against (the backend answers 409), and the dry run
-the plan shows is the backend's own (`?dryRun=true`), not a diff computed here. The
+the plan shows is the backend's own (`?dryRun=true`), not a diff computed here -- but it
+is not a complete check: it accepted DOUBLE -> FLOAT on dev, and the ALTER then failed
+with a 500. A sheet is an Iceberg table, which only widens a type, so `sheets.WIDENINGS`
+refuses anything else before the dry run is asked. The
 row endpoints take at most 1,000 inserts or updates and 10,000 deletes per request;
 only one request is atomic, so a write past that says how far it got when it fails.
 

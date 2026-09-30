@@ -88,7 +88,8 @@ def _sheet(reader: reads.Reader, project_id: str, given: str) -> dict:
         raise
 
 
-def _writable(detail: dict, op: str, *, table_only: bool = True) -> None:
+def _writable(detail: dict, op: str, *, table_only: bool = True,
+              statuses: tuple = ("COMPLETED", None)) -> None:
     if detail.get("sheetCreationMode") == "SYSTEM" \
             or detail.get("namespaceName") in S.RESERVED_NAMESPACES:
         raise errors.NotSupported(
@@ -101,7 +102,7 @@ def _writable(detail: dict, op: str, *, table_only: bool = True) -> None:
             what="A view's rows come from its SQL. Change the table it reads, or change "
                  "the view with update_sheet.",
             user_action="Pick a table sheet.")
-    if detail.get("status") not in ("COMPLETED", None):
+    if detail.get("status") not in statuses:
         raise errors.WrongStatus(
             f"Sheet {detail['name']!r} is {detail.get('status')}.",
             what="Only a sheet that finished its last job can be written.",
@@ -503,11 +504,13 @@ def plan_update_sheet(reader: reads.Reader, args: dict) -> Draft:
             "tableName": args.get("table_name") or detail["tableName"],
             "sheetType": detail["sheetType"], "tags": detail.get("tags") or [],
             "auditReadAccess": bool(detail.get("auditReadAccess"))}
-    lines = [f"Update sheet {_label(detail)} in {project['name']}.", ""]
-    for key, label in (("name", "Name"), ("description", "Description"),
-                       ("tableName", "Table")):
-        if body[key] != (detail.get(key) or ""):
-            lines.append(f"  {label:<12} {detail.get(key) or ''!r} -> {body[key]!r}")
+    renamed = [f"  {label:<12} {detail.get(key) or ''!r} -> {body[key]!r}"
+               for key, label in (("name", "Name"), ("description", "Description"),
+                                  ("tableName", "Table"))
+               if body[key] != (detail.get(key) or "")]
+    lines = [f"Update sheet {_label(detail)} in {project['name']}."]
+    if renamed:
+        lines += [""] + renamed
     if body["tableName"] != detail["tableName"]:
         problem = S.identifier_problem(body["tableName"], "table_name")
         if problem:
@@ -536,7 +539,7 @@ def plan_update_sheet(reader: reads.Reader, args: dict) -> Draft:
             raise _invalid(exc, "update_sheet") from None
         body.update(sheetCreationMode=detail.get("sheetCreationMode"),
                     schemaVersionId=detail.get("schemaVersionId"), columns=columns)
-    if len(lines) == 2 and not structural:
+    if not renamed and not structural:
         raise errors.InvalidQuery("Nothing to change.",
                                   what="Give a new name, description, table name, column "
                                        "change or view SQL.", field="name",
@@ -580,7 +583,8 @@ def plan_delete_sheet(reader: reads.Reader, args: dict) -> Draft:
     _need(args, "delete_sheet", "sheet_id")
     project = _project(reader, args)
     detail = _sheet(reader, project["id"], args["sheet_id"])
-    _writable(detail, "delete_sheet", table_only=False)
+    # A sheet whose last job failed can still be deleted; the backend allows it.
+    _writable(detail, "delete_sheet", table_only=False, statuses=("COMPLETED", "FAILED"))
     rows = detail.get("totalRowCount")
     columns = S.user_columns(detail.get("columns"))
     lines = [f"DELETE sheet {_label(detail)} from {project['name']}.", "",
@@ -712,8 +716,13 @@ def plan_update_rows(reader: reads.Reader, args: dict) -> Draft:
     if problems:
         raise _problems(problems, "update_rows")
     current = {r[S.ROW_ID]: r for r in rows}
+    by_name = {c["name"]: c for c in S.user_columns(detail.get("columns"))}
+
+    def differs(row_id, name, value):
+        return not S.stored_equal(by_name[name], current[row_id].get(name), value)
+
     changing = [u for u in updates
-                if any(current[u["rowId"]].get(k) != v for k, v in u["values"].items())]
+                if any(differs(u["rowId"], k, v) for k, v in u["values"].items())]
     if not changing:
         raise errors.InvalidQuery(f"The {how} already hold those values.",
                                   what="Nothing would change.", field="set",
@@ -732,8 +741,8 @@ def plan_update_rows(reader: reads.Reader, args: dict) -> Draft:
     lines += ["", "  Before -> after"]
     for update in changing[:SAMPLE_ROWS]:
         before = current[update["rowId"]]
-        cells = [f"{k} {before.get(k)!r} -> {v!r}" for k, v in update["values"].items()
-                 if before.get(k) != v]
+        cells = [f"{k} {S.shown(before.get(k))} -> {S.shown(v)}"
+                 for k, v in update["values"].items() if differs(update["rowId"], k, v)]
         lines.append(f"    row {update['rowId']}: " + "; ".join(cells))
     if len(changing) > SAMPLE_ROWS:
         lines.append(f"    ... and {len(changing) - SAMPLE_ROWS:,} more")
@@ -821,6 +830,7 @@ def plan_refresh_sheet(reader: reads.Reader, args: dict) -> Draft:
     _need(args, "refresh_sheet", "sheet_id")
     project = _project(reader, args)
     detail = _sheet(reader, project["id"], args["sheet_id"])
+    # The backend refuses to refresh a FAILED view too ("Sheet is not ready").
     _writable(detail, "refresh_sheet", table_only=False)
     if detail.get("sheetType") != "VIEW" or detail.get("virtual"):
         raise errors.NotSupported(

@@ -525,10 +525,19 @@ tenant. The portal half — an open dashboard reloading to show a plugin's edit,
 refusing to save over it with unsaved edits — was exercised with an unreleased portal
 build; until that build is deployed, an open tab can still overwrite an edit.
 
-**Sheet writes are new and have not been sent to a live tenant.** The tests run each
-operation against an in-memory backend built from Cirro-backend's rules — its
-per-request limits, its filter shape, its schema-version check — but no sheet has been
-created or changed through the plugin on a real server.
+**Sheets have run against a live tenant** — on 2026-09-30, against a development tenant,
+in a project set aside for it. `create_sheet` made a table with rows across eight
+column types (an enum, a URL, dates and timestamps among them) and two views over it; `insert_rows` added rows inline and from a local CSV;
+`update_rows` changed rows by filter and by `_row_id`, and a plan made before one of its
+rows was edited was refused as stale; `update_sheet` added, dropped and renamed columns
+and changed a view's SQL; `delete_rows` and `delete_sheet` removed them all. A delete
+plan for a sheet three dashboards read listed all three. That run also found that the
+backend's dry run accepts narrowing a column's type which the table then refuses, so
+the plan now refuses it first.
+
+`refresh_sheet` is the exception: materializing a view failed inside that tenant's
+backend (`LocalFileSystem has been disabled by configuration`), and the backend will
+not refresh a view in that state, so no refresh has succeeded live.
 
 **Signing in for a tenant has now been through a real login.** On 2026-09-09 a
 device-code login landed in a tenant folder against a development tenant, and plans

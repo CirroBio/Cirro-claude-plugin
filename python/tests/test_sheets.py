@@ -111,6 +111,21 @@ def test_altering_columns_keeps_their_ids():
         S.alter_columns(SAMPLES, None, {"status": {"required": True}}, None)
 
 
+def test_a_type_only_widens():
+    """dev's dry run accepted DOUBLE -> FLOAT, and the ALTER then failed with a 500."""
+    columns = SAMPLES + [{"name": "conc", "dataType": "FLOAT", "id": "5"}]
+    assert S.alter_columns(columns, None, {"conc": {"type": "DOUBLE"}}, None)[-1][
+        "dataType"] == "DOUBLE"
+    with pytest.raises(S.SheetError, match="only widens"):
+        S.alter_columns(columns, None, {"reads": {"type": "INTEGER"}}, None)
+
+
+def test_a_timestamp_read_back_equals_the_one_written():
+    column = {"dataType": "TIMESTAMP"}
+    assert S.stored_equal(column, "2026-09-02T08:30:00Z", "2026-09-02 08:30:00")
+    assert not S.stored_equal(column, None, "2026-09-02 08:30:00")
+
+
 # --- a sheets backend ------------------------------------------------------------
 
 def _matches(row, node):
@@ -267,6 +282,10 @@ def sheets_tenant(writable_tenant):
         side_effect=data)
     router.put(url__regex=rf"{API}/projects/proj_a/sheets/[^/]+:refresh$").respond(
         status_code=200)
+    router.get(url__regex=rf"{API}/projects/proj_a/sheets/[^/]+/jobs$").respond(json=[
+        {"id": "job-1", "jobType": "MATERIALIZE_VIEW", "status": "FAILED",
+         "createdAt": "2026-09-30T22:00:09Z",
+         "errorMessage": "Permission Error: File system LocalFileSystem has been disabled"}])
     router.route(url__regex=rf"{API}/projects/proj_a/sheets/[^/:]+$").mock(side_effect=one)
     return {**writable_tenant, "sheets": state}
 
@@ -303,7 +322,7 @@ def test_create_a_table_with_rows(sheets_tenant, session_dir):
     text = planned["rendered"]
     assert "Table        default.plate_map" in text
     assert "well STRING required unique 'Well'" in text
-    assert "A1    1.5   True" in text
+    assert "A1    1.5   true" in text
     applied = apply(sheets_tenant, session_dir, planned)
     assert applied["ok"], applied
     result = applied["result"]
@@ -495,6 +514,22 @@ def test_delete_sheet_refuses_when_rows_were_added_since(sheets_tenant, session_
 def test_refresh_is_for_materialized_views(sheets_tenant, session_dir):
     planned = plan(sheets_tenant, session_dir, "refresh_sheet", sheet_id="sheet-1")
     assert planned["error"]["code"] == "NOT_SUPPORTED"
+
+
+def test_a_failed_sheet_reads_with_its_last_jobs_error_and_can_be_deleted(sheets_tenant,
+                                                                          session_dir):
+    """Observed on dev: a materialized view whose job failed answers "Sheet is not
+    ready" for its rows and refuses a refresh, but the backend still deletes it."""
+    sheets_tenant["sheets"]["sheets"]["sheet-1"]["status"] = "FAILED"
+    read = call(sheets_tenant, session_dir, "sheet", id="sheet-1",
+                scope={"project_ids": ["proj_a"]})
+    assert read["result"]["rows"] == []
+    assert "LocalFileSystem has been disabled" in read["result"]["notes"][0]
+    inserted = plan(sheets_tenant, session_dir, "insert_rows", sheet_id="sheet-1",
+                    rows=[{"sample_id": "x"}])
+    assert inserted["error"]["code"] == "WRONG_STATUS"
+    assert apply(sheets_tenant, session_dir,
+                 plan(sheets_tenant, session_dir, "delete_sheet", sheet_id="sheet-1"))["ok"]
 
 
 # --- reading -----------------------------------------------------------------------

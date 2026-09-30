@@ -49,6 +49,9 @@ KINDS = ("STANDARD", "URL", "ENUM_SINGLE", "CIRRO_FILE", "CIRRO_FOLDER", "CIRRO_
 CIRRO_KINDS = ("CIRRO_FILE", "CIRRO_FOLDER", "CIRRO_DATASET")
 _STRING_KINDS = ("URL", "ENUM_SINGLE") + CIRRO_KINDS
 _UNIQUE_REFUSED = ("DOUBLE", "FLOAT")
+# The type changes an Iceberg table accepts. The backend's dry run does not check this;
+# anything else passes the preview and fails the ALTER with a 500 (SchemaDiffSqlBuilder).
+WIDENINGS = {("INTEGER", "BIGINT"), ("FLOAT", "DOUBLE")}
 _INT32 = (-2**31, 2**31 - 1)
 _INT64 = (-2**63, 2**63 - 1)
 
@@ -234,6 +237,13 @@ def _altered(column: dict, change, where: str) -> dict:
         if data_type not in DATA_TYPES:
             raise SheetError(f"{where}.type {data_type!r} is not one of {list(DATA_TYPES)}",
                              f"{where}.type")
+        if data_type != column.get("dataType") \
+                and (column.get("dataType"), data_type) not in WIDENINGS:
+            raise SheetError(
+                f"{where}: a {column.get('dataType')} column cannot become {data_type}. A "
+                "sheet is an Iceberg table, which only widens a type (INTEGER to BIGINT, "
+                "FLOAT to DOUBLE); add a new column and copy the values instead",
+                f"{where}.type")
         out["dataType"] = data_type
     if "values" in change:
         if out.get("semanticType") != "ENUM_SINGLE":
@@ -260,9 +270,9 @@ def describe_column(column: dict) -> str:
         parts.append(kind)
     parts += [flag for flag in ("required", "unique", "hidden") if column.get(flag)]
     if column.get("allowedValues"):
-        shown = column["allowedValues"][:8]
-        more = len(column["allowedValues"]) - len(shown)
-        parts.append("{" + ", ".join(shown) + (f", +{more}" if more > 0 else "") + "}")
+        listed = column["allowedValues"][:8]
+        more = len(column["allowedValues"]) - len(listed)
+        parts.append("{" + ", ".join(listed) + (f", +{more}" if more > 0 else "") + "}")
     if column.get("displayName") and column["displayName"] != column["name"]:
         parts.append(repr(column["displayName"]))
     return " ".join(parts)
@@ -448,7 +458,7 @@ def check_rows(columns: list, rows, *, inserting: bool,
             try:
                 out[name] = coerce(column, value, project_id)
             except ValueError as exc:
-                problems.append(f"{where}[{index}].{name}: {_shown(value)} {exc}")
+                problems.append(f"{where}[{index}].{name}: {shown(value)} {exc}")
         if inserting:
             missing = [n for n in required if n not in row]
             if missing:
@@ -457,6 +467,18 @@ def check_rows(columns: list, rows, *, inserting: bool,
             problems.append(f"{where}[{index}] sets no columns")
         coerced.append(out)
     return coerced, problems
+
+
+def stored_equal(column: dict, stored, value) -> bool:
+    """Whether a cell as read equals a coerced value about to be written. They differ in
+    form: a TIMESTAMP reads back as `2026-09-02T08:30:00Z` and is written without the
+    offset."""
+    if stored is None or value is None:
+        return stored is None and value is None
+    try:
+        return coerce({**column, "required": False}, stored) == value
+    except ValueError:
+        return False
 
 
 def duplicates(columns: list, rows: list) -> list:
@@ -472,14 +494,15 @@ def duplicates(columns: list, rows: list) -> list:
                 continue
             if value in seen:
                 problems.append(f"rows[{seen[value]}] and rows[{index}] both give "
-                                f"{column['name']} {_shown(value)}, which must be unique")
+                                f"{column['name']} {shown(value)}, which must be unique")
             else:
                 seen[value] = index
     return problems
 
 
-def _shown(value) -> str:
-    text = repr(value)
+def shown(value) -> str:
+    """A value in plan text: text quoted, so `'null'` and null differ, and cut short."""
+    text = repr(value) if isinstance(value, str) else _cell(value)
     return text if len(text) <= 60 else text[:57] + "..."
 
 
@@ -546,7 +569,7 @@ def _where_value(column, value, name, project_id, like=False):
     try:
         return coerce({**column, "required": False}, value, project_id)
     except ValueError as exc:
-        raise SheetError(f"where.{name}: {_shown(value)} {exc}", f"where.{name}") from None
+        raise SheetError(f"where.{name}: {shown(value)} {exc}", f"where.{name}") from None
 
 
 def _checked_filter(node, by_name: dict, where: str) -> dict:
@@ -604,19 +627,24 @@ def sheet_digest(detail: dict) -> str:
 
 def render_rows(rows: list, columns: list, limit: int = 10, indent: str = "    ") -> list:
     """Rows as aligned text for a plan, system columns left out."""
-    shown = rows[:limit]
-    if not shown:
+    head = rows[:limit]
+    if not head:
         return [f"{indent}(no rows)"]
     names = [n for n in columns if not n.startswith(SYSTEM_PREFIX)]
-    cells = [[_cell(r.get(n)) for n in names] for r in shown]
+    cells = [[_cell(r.get(n)) for n in names] for r in head]
     widths = [min(max([len(n)] + [len(row[i]) for row in cells]), 32)
               for i, n in enumerate(names)]
-    lines = [indent + "  ".join(n.ljust(w)[:w] for n, w in zip(names, widths))]
-    lines += [indent + "  ".join(c.ljust(w)[:w] for c, w in zip(row, widths)) for row in cells]
+    lines = [(indent + "  ".join(n.ljust(w)[:w] for n, w in zip(names, widths))).rstrip()]
+    lines += [(indent + "  ".join(c.ljust(w)[:w] for c, w in zip(row, widths))).rstrip()
+              for row in cells]
     if len(rows) > limit:
         lines.append(f"{indent}... and {len(rows) - limit:,} more")
     return lines
 
 
 def _cell(value) -> str:
-    return "null" if value is None else str(value)
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)

@@ -7,7 +7,7 @@ write with the same filter would touch.
 
 from .. import errors, sheets as S
 from ..envelope import DEFAULT_MAX_TOKENS, wrap
-from .reads import Reader, sheet_detail, sheet_page, sheets
+from .reads import Reader, sheet_detail, sheet_jobs, sheet_page, sheets
 
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 500
@@ -56,9 +56,19 @@ def do_sheet(request: dict) -> dict:
                                       given=request["where"],
                                       retry_with=[{"verb": "sheet", "id": detail["id"]}]) \
                 from None
-    page = sheet_page(reader, project_id, detail["id"], limit=limit, page=page_number,
-                      row_filter=row_filter, order_by=request.get("order_by"),
-                      descending=bool(request.get("desc")))
+    notes = []
+    if detail.get("status") == "COMPLETED":
+        page = sheet_page(reader, project_id, detail["id"], limit=limit, page=page_number,
+                          row_filter=row_filter, order_by=request.get("order_by"),
+                          descending=bool(request.get("desc")))
+    else:
+        # The backend answers "Sheet is not ready" for its rows; what went wrong is on
+        # the sheet's last job.
+        page = {}
+        last = next(iter(sheet_jobs(reader, project_id, detail["id"])), None)
+        notes.append(f"The sheet is {detail.get('status')}, so it has no rows to show."
+                     + (f" Its last job ({last.get('jobType')}, {last.get('status')}): "
+                        f"{last.get('errorMessage') or 'no error recorded'}" if last else ""))
     rows = [{k: v for k, v in r.items() if not k.startswith(S.SYSTEM_PREFIX)}
             for r in S.page_rows(page)]
     matched = page.get("totalRowCount")
@@ -76,6 +86,8 @@ def do_sheet(request: dict) -> dict:
         result["last_refreshed_at"] = detail.get("lastRefreshedAt")
     elif detail.get("sheetCreationMode") == "SYSTEM":
         result["system"] = True
+    if notes:
+        result["notes"] = notes
     args = {"project_id": project_id, "sheet_id": detail["id"]}
     result["next_calls"] = []
     if matched is not None and page_number * limit < matched:

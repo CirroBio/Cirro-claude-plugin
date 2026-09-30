@@ -94,7 +94,9 @@ plan(op="update_sheet", args={"project_id": ..., "sheet_id": ...,
 ```
 
 A new column cannot be required, and an existing one cannot become required or unique;
-Cirro refuses both. For a view, change `view_sql` instead. The plan shows Cirro's own
+Cirro refuses both. A type only widens -- `INTEGER` to `BIGINT`, `FLOAT` to `DOUBLE`; for
+any other change, add a new column, copy the values with `update_rows`, and drop the old
+one. For a view, change `view_sql` instead. The plan shows Cirro's own
 dry run of the change and **lists the dashboards and views that read the sheet** --
 tell the user that SQL, charts and filters naming a dropped or renamed column will stop
 working. If the columns change between plan and apply, it is refused as stale.
