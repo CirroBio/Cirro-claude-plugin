@@ -141,7 +141,12 @@ def test_every_registered_op_is_covered_here():
                                   "upload_process_config",
                                   # Exercised end to end in test_dashboards.py against a
                                   # fake tenant: apply re-reads the record it writes.
-                                  "create_dashboard", "edit_dashboard", "delete_dashboard"}
+                                  "create_dashboard", "edit_dashboard", "delete_dashboard",
+                                  # Exercised end to end in test_sheets.py against a fake
+                                  # tenant: apply re-reads the rows and sheet it writes.
+                                  "create_sheet", "update_sheet", "delete_sheet",
+                                  "insert_rows", "update_rows", "delete_rows",
+                                  "refresh_sheet"}
     missing = set(mutations.OPS) - covered
     assert not missing, (
         f"these operations build requests that nothing exercises: {sorted(missing)}")

@@ -792,8 +792,13 @@ def pick(rows: list, given: str, *, kind: str, field: str, brief=None) -> dict:
 # parse a delete's empty 204 as a Dashboard and raise, and cannot parse a sheet page at
 # all -- they expect each cell to be an object, and cells are plain values.
 
-def send(reader: Reader, route, *, what: str, cost: str, **kwargs):
-    """Call one generated route; its decoded JSON body, or None for a 404 or no body."""
+def send(reader: Reader, route, *, what: str, cost: str, refusals: Optional[dict] = None,
+         **kwargs):
+    """Call one generated route; its decoded JSON body, or None for a 404 or no body.
+
+    `refusals` maps a status to a callable taking the server's message and returning
+    the AgentError to raise, for a route whose 400 or 409 is the caller's to explain
+    rather than an upstream failure."""
     import json as _json
     client = reader.client._api_client
     # The same call the generated sync_detailed makes, minus its response parsing.
@@ -802,6 +807,8 @@ def send(reader: Reader, route, *, what: str, cost: str, **kwargs):
     reader.cost.call(cost)
     if response.status_code == 404:
         return None
+    if refusals and response.status_code in refusals:
+        raise refusals[response.status_code](_server_message(response.content))
     if response.status_code >= 400:
         raise portal.wrap_upstream(
             RuntimeError(f"HTTP {response.status_code}: {response.content[:300]!r}"),
@@ -832,10 +839,62 @@ def dashboard_record(reader: Reader, project_id: str, dashboard_id: str) -> dict
     return record
 
 
+def _server_message(content: bytes) -> str:
+    """The `message` of an error body, else the body itself, trimmed."""
+    import json as _json
+    try:
+        body = _json.loads(content)
+    except ValueError:
+        return content[:300].decode(errors="replace")
+    if isinstance(body, dict) and body.get("message"):
+        return str(body["message"])
+    return str(body)[:300]
+
+
 def sheets(reader: Reader, project_id: str) -> list:
     from cirro_api_client.v1.api.sheets import get_sheets
     return send(reader, get_sheets, what="Listing sheets failed.", cost="sheets.list",
                 project_id=project_id) or []
+
+
+def sheet_detail(reader: Reader, project_id: str, sheet_id: str) -> dict:
+    """One sheet with its columns (or view definition), or NotFound listing the
+    project's sheets."""
+    from cirro_api_client.v1.api.sheets import get_sheet
+    detail = send(reader, get_sheet, what="Reading the sheet failed.", cost="sheets.get",
+                  project_id=project_id, sheet_id=sheet_id)
+    if detail is None:
+        raise errors.NotFound(
+            f"No sheet {sheet_id!r} in project {project_id}.",
+            what="Check the sheet ID.", field="sheet_id", given=sheet_id,
+            candidates=[{"id": s.get("id"), "name": s.get("name")}
+                        for s in sheets(reader, project_id)],
+            retry_with=[{"verb": "list", "of": "sheets",
+                         "scope": {"project_ids": [project_id]}}])
+    return detail
+
+
+def sheet_page(reader: Reader, project_id: str, sheet_id: str, *, limit: int, page: int = 1,
+               row_filter: Optional[dict] = None, order_by: Optional[str] = None,
+               descending: bool = False) -> dict:
+    """One page of a sheet's rows: `{columns, rows, totalRowCount}`, `_row_id` first."""
+    from cirro_api_client.v1.api.sheets import query_sheet_data
+    from cirro_api_client.v1.models import SheetDataRequest
+    body = {"limit": limit, "page": page}
+    if row_filter:
+        body["filter"] = row_filter
+    if order_by:
+        body["sort"] = {"orderBy": order_by, "order": "DESC" if descending else "ASC"}
+    page_body = send(reader, query_sheet_data, what="Reading the sheet's rows failed.",
+                     cost="sheets.query", project_id=project_id, sheet_id=sheet_id,
+                     body=SheetDataRequest.from_dict(body),
+                     refusals={400: lambda message: errors.InvalidQuery(
+                         f"The sheet refused the query: {message}",
+                         what="Fix the filter or sort and try again.", field="where")})
+    if page_body is None:
+        raise errors.NotFound(f"No sheet {sheet_id!r} in project {project_id}.",
+                              what="Check the sheet ID.", field="sheet_id", given=sheet_id)
+    return page_body
 
 
 # The tenant's portal serves the schema its dashboards are rendered with. A portal that

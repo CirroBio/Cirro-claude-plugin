@@ -366,6 +366,22 @@ portal's promotions, not pandas' guesses. Dashboard and sheet routes are sent ra
 (`reads.send`) because the generated models cannot parse a sheet page and read a
 delete's empty 204 as a Dashboard.
 
+**A sheet write's value checks are not a second opinion.** Cirro-backend validates
+column names, required, unique, enum values and Cirro URIs, but it does not cast: each
+cell is bound straight into DuckDB, and a value DuckDB cannot cast comes back as a 500
+("Failed to insert rows") with the row and column gone. So `sheets.coerce` turns every
+value into what its column stores before the plan is shown, and the plan shows the
+stored form. A TIMESTAMP goes as UTC text with no offset, because DuckDB will not cast
+an offset-bearing string into a zone-less column.
+
+Row writes are held against the rows as read. The plan digests the selected rows with
+`sys_updated_at` included, and apply re-reads them by `_row_id` and compares, so a cell
+edited in the portal in between refuses the write. Schema writes send the
+`schemaVersionId` they were planned against (the backend answers 409), and the dry run
+the plan shows is the backend's own (`?dryRun=true`), not a diff computed here. The
+row endpoints take at most 1,000 inserts or updates and 10,000 deletes per request;
+only one request is atomic, so a write past that says how far it got when it fails.
+
 **There is no safe way to delete one reference.** The generated
 `delete_project_reference` route is `DELETE /projects/{project_id}/references` and takes
 the project id alone -- nothing in it names the reference to remove, though its own

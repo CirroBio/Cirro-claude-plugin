@@ -17,7 +17,7 @@ from . import errors, formgen, runner
 READ_VERBS = frozenset({"query", "get", "summarize", "describe", "list",
                         "process_params", "process_config", "workflow_spec", "check_config",
                         "task_logs", "chain_status", "whoami", "tenants",
-                        "dashboard", "dashboard_schema", "table_preview"})
+                        "dashboard", "dashboard_schema", "table_preview", "sheet"})
 
 
 def _emit(payload: dict) -> int:
@@ -208,7 +208,15 @@ def build_parser() -> argparse.ArgumentParser:
     dash.add_argument("--raw", action="store_true", help="include the stored document")
     add("dashboard-schema", "chart types, channels, view options and the change list a "
                             "dashboard plan takes")
-    add("sheets", "sheets in a project (dashboard sources)", project=True)
+    add("sheets", "sheets in a project", project=True)
+    sheet = add("sheet", "one sheet: its columns and a page of rows with their _row_id",
+                project=True)
+    sheet.add_argument("id", help="sheet ID, name or table name")
+    sheet.add_argument("--where", help='JSON row filter, e.g. \'{"status": "failed"}\'')
+    sheet.add_argument("--limit", type=int, help="rows to return (default 20, max 500)")
+    sheet.add_argument("--page", type=int, help="page of rows (default 1)")
+    sheet.add_argument("--order-by", help="column to sort by")
+    sheet.add_argument("--desc", action="store_true", help="sort descending")
     preview = add("preview", "load one file or sheet as a dashboard would, optionally "
                              "querying it", project=True)
     preview.add_argument("-d", "--dataset-id", help="dataset ID holding the file")
@@ -385,6 +393,21 @@ def main(argv=None) -> int:
         for flag in ("run", "raw"):
             if getattr(args, flag):
                 request[flag] = True
+        return _run(request, args)
+
+    if command == "sheet":
+        request = {"verb": "sheet", "id": args.id, "scope": _scope(args)}
+        if args.where:
+            try:
+                request["where"] = json.loads(args.where)
+            except ValueError as exc:
+                return _emit(errors.InvalidQuery(
+                    f"--where is not JSON: {exc}", what="Pass a JSON object.",
+                    field="where", given=args.where,
+                    retry_with=[{"where": {"column": "value"}}]).to_dict())
+        for flag in ("limit", "page", "order_by", "desc"):
+            if getattr(args, flag):
+                request[flag] = getattr(args, flag)
         return _run(request, args)
 
     if command == "dashboard-schema":
