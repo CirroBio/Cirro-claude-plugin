@@ -1,0 +1,1866 @@
+{
+  "format": 1,
+  "persistVersion": 1,
+  "cellIdPattern": "^[a-z0-9]{4,32}$",
+  "sqlTokenPattern": "\\{(\\w+)\\}",
+  "mosaicSchemaUrl": "https://uwdata.github.io/mosaic/schema/latest.json",
+  "grid": {
+    "columns": 12,
+    "tileWidth": 12,
+    "tileHeight": 10,
+    "soloTileHeight": 16
+  },
+  "portTypes": [
+    "Relation",
+    "ColumnRef",
+    "ScalarParam",
+    "Selection",
+    "ChartType",
+    "ChartSpec",
+    "Scale"
+  ],
+  "dataTypeClasses": [
+    "quantitative",
+    "categorical",
+    "temporal"
+  ],
+  "encodingChannels": [
+    "x",
+    "y",
+    "color",
+    "size",
+    "detail"
+  ],
+  "nodeTypes": [
+    {
+      "type": "sql-query",
+      "label": "SQL",
+      "description": "Runs SQL over one or more wired sheets/dataset files (query, in1, in2…), producing a result.",
+      "renderable": false,
+      "addableViaMenu": true,
+      "inputs": [
+        {
+          "id": "upstream",
+          "type": "Relation",
+          "role": "input",
+          "cardinality": "many",
+          "required": false
+        }
+      ],
+      "outputs": [
+        {
+          "id": "relation",
+          "type": "Relation",
+          "role": "output",
+          "cardinality": "one",
+          "required": false
+        }
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "sql": {
+            "type": "string",
+            "description": "The node's SQL text; {tokens} are substituted from wired params"
+          },
+          "defaultLimit": {
+            "type": "boolean",
+            "description": "Set when the starter query auto-applied the default LIMIT"
+          }
+        }
+      },
+      "preconditions": [],
+      "dynamicPorts": {
+        "kind": "sql-tokens",
+        "field": "sql",
+        "pattern": "\\{(\\w+)\\}",
+        "port": {
+          "idPrefix": "param:",
+          "type": "ScalarParam",
+          "cardinality": "one",
+          "required": false
+        }
+      }
+    },
+    {
+      "type": "dataset-source",
+      "label": "Sheet",
+      "description": "Selects a Cirro Sheet (table or view) as a data source.",
+      "renderable": false,
+      "addableViaMenu": true,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "relation",
+          "type": "Relation",
+          "role": "file rows",
+          "cardinality": "one",
+          "required": false
+        }
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "sheetId": {
+            "type": "string",
+            "description": "Cirro Sheet id of the dataset file"
+          },
+          "tableName": {
+            "type": "string",
+            "description": "SQL table name of the dataset file"
+          },
+          "sql": {
+            "type": "string",
+            "description": "Generated source query (SELECT * FROM <tableName>)"
+          }
+        }
+      },
+      "preconditions": [],
+      "dynamicPorts": null
+    },
+    {
+      "type": "dataset-file",
+      "label": "Dataset File",
+      "description": "Points to a file (CSV/TSV/Parquet/JSON) in a Cirro dataset as a data source.",
+      "renderable": false,
+      "addableViaMenu": true,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "relation",
+          "type": "Relation",
+          "role": "file rows",
+          "cardinality": "one",
+          "required": false
+        }
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "datasetId": {
+            "type": "string",
+            "description": "Cirro dataset id"
+          },
+          "datasetName": {
+            "type": "string",
+            "description": "Dataset display name"
+          },
+          "path": {
+            "type": "string",
+            "description": "Relative path of the file within the dataset"
+          },
+          "fileType": {
+            "type": "string",
+            "enum": [
+              "csv",
+              "tsv",
+              "parquet",
+              "json",
+              "txt"
+            ],
+            "description": "File format"
+          },
+          "tableName": {
+            "type": "string",
+            "description": "SQL table/alias name (derived from the basename)"
+          },
+          "sizeBytes": {
+            "type": "number",
+            "description": "File size in bytes from the dataset manifest (drives the starter default LIMIT)"
+          }
+        }
+      },
+      "preconditions": [],
+      "dynamicPorts": null
+    },
+    {
+      "type": "namespace-query",
+      "label": "Query",
+      "description": "Runs SQL on the server and loads only the result.",
+      "renderable": false,
+      "addableViaMenu": true,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "relation",
+          "type": "Relation",
+          "role": "query rows",
+          "cardinality": "one",
+          "required": false
+        }
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "sql": {
+            "type": "string",
+            "description": "SQL executed by the backend against the project namespace"
+          },
+          "tableName": {
+            "type": "string",
+            "description": "Catalog table this query targets, used to resolve the node's form fields — not a downstream SQL alias (the downstream alias is deliberately `query`, see NamespaceQueryConfig.tableName)"
+          }
+        }
+      },
+      "preconditions": [],
+      "dynamicPorts": null
+    },
+    {
+      "type": "discussion",
+      "label": "Discussion",
+      "description": "A discussion thread scoped to this dashboard.",
+      "renderable": true,
+      "addableViaMenu": false,
+      "inputs": [],
+      "outputs": [],
+      "configSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "preconditions": [],
+      "dynamicPorts": null
+    },
+    {
+      "type": "input",
+      "label": "Input control",
+      "description": "A user control (text, number, select, multi-select, or range) whose value can drive downstream SQL.",
+      "renderable": false,
+      "addableViaMenu": true,
+      "inputs": [
+        {
+          "id": "data",
+          "type": "Relation",
+          "role": "options",
+          "cardinality": "one",
+          "required": false
+        }
+      ],
+      "outputs": [
+        {
+          "id": "value",
+          "type": "ScalarParam",
+          "role": "value(s)",
+          "cardinality": "one",
+          "required": false
+        }
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "Display label"
+          },
+          "inputType": {
+            "type": "string",
+            "enum": [
+              "text",
+              "number",
+              "select",
+              "multiselect",
+              "range"
+            ],
+            "default": "text",
+            "description": "Control kind"
+          },
+          "value": {
+            "type": "string",
+            "description": "Current value"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Options for a select (user-provided list)"
+          },
+          "optionsColumn": {
+            "type": "string",
+            "description": "Column whose distinct values populate a bound select"
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Selected values for a multiselect"
+          },
+          "column": {
+            "type": "string",
+            "description": "Column this control subsets (set when bound to a chart property)"
+          },
+          "lo": {
+            "type": "number",
+            "description": "Lower bound for a range control"
+          },
+          "hi": {
+            "type": "number",
+            "description": "Upper bound for a range control"
+          }
+        }
+      },
+      "preconditions": [],
+      "dynamicPorts": null
+    },
+    {
+      "type": "join",
+      "label": "Join",
+      "description": "Combines two relations on a key column (inner/left/right/full).",
+      "renderable": false,
+      "addableViaMenu": true,
+      "inputs": [
+        {
+          "id": "lhs",
+          "type": "Relation",
+          "role": "left",
+          "cardinality": "one",
+          "required": true
+        },
+        {
+          "id": "rhs",
+          "type": "Relation",
+          "role": "right",
+          "cardinality": "one",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "id": "relation",
+          "type": "Relation",
+          "role": "output",
+          "cardinality": "one",
+          "required": false
+        }
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "joinType": {
+            "type": "string",
+            "enum": [
+              "inner",
+              "left",
+              "right",
+              "full"
+            ],
+            "description": "SQL join type"
+          },
+          "leftKey": {
+            "type": "string",
+            "description": "Join key column from the left input"
+          },
+          "rightKey": {
+            "type": "string",
+            "description": "Join key column from the right input"
+          },
+          "sql": {
+            "type": "string",
+            "description": "Generated join query"
+          }
+        }
+      },
+      "preconditions": [
+        "two Relation inputs"
+      ],
+      "dynamicPorts": null
+    },
+    {
+      "type": "param",
+      "label": "Parameter",
+      "description": "A typed value (number/text) substituted into downstream SQL as {{name}}.",
+      "renderable": false,
+      "addableViaMenu": true,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "value",
+          "type": "ScalarParam",
+          "role": "value",
+          "cardinality": "one",
+          "required": false
+        }
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Placeholder name; referenced as {{name}}"
+          },
+          "paramType": {
+            "type": "string",
+            "enum": [
+              "number",
+              "text"
+            ],
+            "description": "Value type"
+          },
+          "value": {
+            "type": "string",
+            "description": "Current value"
+          }
+        }
+      },
+      "preconditions": [],
+      "dynamicPorts": null
+    },
+    {
+      "type": "result-grid",
+      "label": "Result Grid",
+      "description": "Displays a Relation as a paginated data grid.",
+      "renderable": true,
+      "addableViaMenu": true,
+      "inputs": [
+        {
+          "id": "relation",
+          "type": "Relation",
+          "role": "input",
+          "cardinality": "one",
+          "required": true
+        }
+      ],
+      "outputs": [],
+      "configSchema": null,
+      "preconditions": [
+        "a Relation to display"
+      ],
+      "dynamicPorts": null
+    },
+    {
+      "type": "viz-picker",
+      "label": "Visualization",
+      "description": "Pick a chart type filtered by the data types present in the Relation.",
+      "renderable": false,
+      "addableViaMenu": false,
+      "inputs": [
+        {
+          "id": "relation",
+          "type": "Relation",
+          "role": "input",
+          "cardinality": "one",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "id": "chartType",
+          "type": "ChartType",
+          "role": "chart type",
+          "cardinality": "one",
+          "required": false
+        }
+      ],
+      "configSchema": null,
+      "preconditions": [
+        "a Relation with at least one chartable column"
+      ],
+      "dynamicPorts": null
+    },
+    {
+      "type": "column",
+      "label": "Column",
+      "description": "Selects one column of a wired table as a reusable column reference.",
+      "renderable": false,
+      "addableViaMenu": true,
+      "inputs": [
+        {
+          "id": "relation",
+          "type": "Relation",
+          "role": "input",
+          "cardinality": "one",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "id": "column",
+          "type": "ColumnRef",
+          "role": "column",
+          "cardinality": "one",
+          "required": false
+        }
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "column": {
+            "type": "string",
+            "description": "Selected column name"
+          },
+          "columnClass": {
+            "type": "string",
+            "enum": [
+              "quantitative",
+              "categorical",
+              "temporal"
+            ],
+            "description": "Data class of the selected column"
+          }
+        }
+      },
+      "preconditions": [
+        "a wired table"
+      ],
+      "dynamicPorts": {
+        "kind": "column-class",
+        "field": "columnClass",
+        "outputPort": "column"
+      }
+    },
+    {
+      "type": "channel-binding",
+      "label": "Channel Bindings",
+      "description": "Bind result columns to a chart's encoding channels (x, y, color, size).",
+      "renderable": false,
+      "addableViaMenu": false,
+      "inputs": [
+        {
+          "id": "chartType",
+          "type": "ChartType",
+          "role": "chart type",
+          "cardinality": "one",
+          "required": true
+        },
+        {
+          "id": "relation",
+          "type": "Relation",
+          "role": "columns",
+          "cardinality": "one",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "id": "chartSpec",
+          "type": "ChartSpec",
+          "role": "chart spec",
+          "cardinality": "one",
+          "required": false
+        }
+      ],
+      "configSchema": null,
+      "preconditions": [
+        "a selected chart type",
+        "a Relation with columns"
+      ],
+      "dynamicPorts": null
+    },
+    {
+      "type": "chart-spec",
+      "label": "Chart Spec",
+      "description": "Edit the Mosaic JSON spec directly, with column-aware autocomplete and validation.",
+      "renderable": false,
+      "addableViaMenu": false,
+      "inputs": [
+        {
+          "id": "spec",
+          "type": "ChartSpec",
+          "role": "chart spec",
+          "cardinality": "one",
+          "required": true
+        },
+        {
+          "id": "relation",
+          "type": "Relation",
+          "role": "columns",
+          "cardinality": "one",
+          "required": false
+        }
+      ],
+      "outputs": [
+        {
+          "id": "spec",
+          "type": "ChartSpec",
+          "role": "output",
+          "cardinality": "one",
+          "required": false
+        }
+      ],
+      "configSchema": null,
+      "preconditions": [],
+      "dynamicPorts": null
+    },
+    {
+      "type": "chart-render",
+      "label": "Chart Preview",
+      "description": "Renders the Mosaic spec as a live chart over the query result (DuckDB-WASM).",
+      "renderable": true,
+      "addableViaMenu": false,
+      "inputs": [
+        {
+          "id": "spec",
+          "type": "ChartSpec",
+          "role": "chart spec",
+          "cardinality": "one",
+          "required": true
+        },
+        {
+          "id": "relation",
+          "type": "Relation",
+          "role": "input",
+          "cardinality": "one",
+          "required": true
+        }
+      ],
+      "outputs": [],
+      "configSchema": null,
+      "preconditions": [
+        "a Relation with rows",
+        "a non-empty spec"
+      ],
+      "dynamicPorts": null
+    },
+    {
+      "type": "chart",
+      "label": "View",
+      "description": "Displays the wired data as a table (default) or a fitting chart.",
+      "renderable": true,
+      "addableViaMenu": true,
+      "inputs": [
+        {
+          "id": "data",
+          "type": "Relation",
+          "role": "input",
+          "cardinality": "one",
+          "required": true
+        },
+        {
+          "id": "filter",
+          "type": "ScalarParam",
+          "role": "filter",
+          "cardinality": "many",
+          "required": false
+        },
+        {
+          "id": "scale",
+          "type": "Scale",
+          "role": "scale",
+          "cardinality": "one",
+          "required": false
+        }
+      ],
+      "outputs": [
+        {
+          "id": "selection",
+          "type": "ScalarParam",
+          "role": "selection",
+          "cardinality": "one",
+          "required": false
+        }
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Tile title shown on the dashboard"
+          },
+          "viewType": {
+            "type": "string",
+            "enum": [
+              "table",
+              "histogram",
+              "bar",
+              "countbar",
+              "scatter",
+              "boxplot",
+              "heatmap",
+              "dotplot",
+              "hexbin",
+              "volcano",
+              "line",
+              "violin",
+              "stacked-area"
+            ],
+            "default": "table",
+            "description": "Data table (default) or a chart type that fits the input columns"
+          },
+          "spec": {
+            "type": "string",
+            "description": "Mosaic spec for chart views; generated from viewType, editable per channel"
+          },
+          "showPoints": {
+            "type": "boolean",
+            "default": false,
+            "description": "Box plot / violin: overlay individual observations (off by default)"
+          },
+          "maxPoints": {
+            "type": "number",
+            "description": "Box plot / violin: cap on overlaid points (reservoir-sampled); defaults to 500 when unset"
+          },
+          "widthScale": {
+            "type": "string",
+            "enum": [
+              "area",
+              "count",
+              "width"
+            ],
+            "default": "area",
+            "description": "Violin: width scaling (area = equal area, count = scale by n, width = equal max width)"
+          },
+          "showBox": {
+            "type": "boolean",
+            "default": true,
+            "description": "Violin: draw the inner quartile box + median + whiskers (on by default)"
+          },
+          "maxKdeSample": {
+            "type": "number",
+            "description": "Violin: per-category cap on rows feeding the KDE (reservoir-sampled); defaults to 5000 when unset"
+          },
+          "colorDomain": {
+            "type": "array",
+            "items": {},
+            "description": "Isolated color window [min,max] for a quantitative color channel (recolor; persists per chart)"
+          },
+          "colorTreatCategorical": {
+            "type": "boolean",
+            "default": false,
+            "description": "Treat a numeric color column as categorical (e.g. a cluster id) instead of a continuous scale"
+          },
+          "selectionValue": {
+            "description": "The current row selection, exposed to wired params"
+          },
+          "selectionColumn": {
+            "type": "string",
+            "description": "Column the selection is emitted on (wired X channel, or the table dimension column)"
+          },
+          "useHexbin": {
+            "type": "boolean",
+            "default": false,
+            "description": "Scatter: render as a hexbin density instead of one SVG node per row"
+          },
+          "significanceP": {
+            "type": "number",
+            "description": "Volcano: significance cutoff (p-value); the horizontal guide is placed to match pValueScale. Defaults to 0.05 when unset"
+          },
+          "foldChange": {
+            "type": "number",
+            "description": "Volcano: |log2 fold-change| cutoff; vertical guides at ±value. Defaults to 1 when unset"
+          },
+          "showThresholds": {
+            "type": "boolean",
+            "default": true,
+            "description": "Volcano: master switch for the threshold guide lines"
+          },
+          "pValueScale": {
+            "type": "string",
+            "enum": [
+              "prescaled",
+              "apply",
+              "raw"
+            ],
+            "default": "prescaled",
+            "description": "Volcano: what the y column holds — prescaled (already -log10, plot as-is), apply (raw p, -log10 it for display, zeros clamped), or raw (raw p, plot untransformed). Also decides where the significance guide sits"
+          },
+          "showSignificanceLine": {
+            "type": "boolean",
+            "default": true,
+            "description": "Volcano: draw the horizontal significance guide"
+          },
+          "showFoldChangeLines": {
+            "type": "boolean",
+            "default": true,
+            "description": "Volcano: draw the ±fold-change vertical guides"
+          },
+          "xScale": {
+            "type": "string",
+            "enum": [
+              "linear",
+              "log",
+              "sqrt",
+              "symlog"
+            ],
+            "description": "X-axis scale override (View inspector advanced section)"
+          },
+          "yScale": {
+            "type": "string",
+            "enum": [
+              "linear",
+              "log",
+              "sqrt",
+              "symlog"
+            ],
+            "description": "Y-axis scale override (View inspector advanced section)"
+          },
+          "xPadding": {
+            "type": "number",
+            "description": "X-axis padding override (0-1)"
+          },
+          "yPadding": {
+            "type": "number",
+            "description": "Y-axis padding override (0-1)"
+          },
+          "xTickRotate": {
+            "type": "number",
+            "description": "X-axis tick label rotation, in degrees"
+          },
+          "yTickRotate": {
+            "type": "number",
+            "description": "Y-axis tick label rotation, in degrees"
+          },
+          "specRawEdited": {
+            "type": "boolean",
+            "description": "Set when the spec was hand-edited; a chart-type change asks before regenerating it"
+          },
+          "showLegend": {
+            "type": "boolean",
+            "description": "Color legend on/off; unset shows it when color is encoded"
+          },
+          "showLegendTitle": {
+            "type": "boolean",
+            "description": "Color legend title line on/off; unset shows it"
+          },
+          "legendTitle": {
+            "type": "string",
+            "description": "Color legend title text; unset uses the color column label"
+          },
+          "showSizeLegend": {
+            "type": "boolean",
+            "description": "Size legend on/off; unset shows it when a size column is bound"
+          },
+          "showSizeLegendTitle": {
+            "type": "boolean",
+            "description": "Size legend title line on/off; unset shows it"
+          },
+          "sizeLegendTitle": {
+            "type": "string",
+            "description": "Size legend title text; unset uses the size column name"
+          },
+          "sizeDomain": {
+            "type": "array",
+            "items": {},
+            "description": "User-narrowed [lo, hi] window for the size scale"
+          },
+          "binCount": {
+            "type": "number",
+            "description": "Histogram: bin-count hint (Mosaic snaps to nice widths); unset bins automatically"
+          },
+          "xLabel": {
+            "type": "string",
+            "description": "X-axis title override"
+          },
+          "yLabel": {
+            "type": "string",
+            "description": "Y-axis title override"
+          },
+          "xGrid": {
+            "type": "boolean",
+            "description": "X-axis grid lines"
+          },
+          "yGrid": {
+            "type": "boolean",
+            "description": "Y-axis grid lines"
+          }
+        }
+      },
+      "preconditions": [
+        "a Relation to display"
+      ],
+      "dynamicPorts": {
+        "kind": "chart-channels",
+        "field": "viewType",
+        "default": "table",
+        "port": {
+          "idPrefix": "channel:",
+          "type": "ColumnRef",
+          "cardinality": "one"
+        }
+      }
+    },
+    {
+      "type": "legend",
+      "label": "Legend",
+      "description": "Shows a color/size legend for a field and shares its scale with attached views.",
+      "renderable": true,
+      "addableViaMenu": true,
+      "inputs": [
+        {
+          "id": "data",
+          "type": "Relation",
+          "role": "input",
+          "cardinality": "one",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "id": "filter",
+          "type": "ScalarParam",
+          "role": "filter",
+          "cardinality": "many",
+          "required": false
+        },
+        {
+          "id": "scale",
+          "type": "Scale",
+          "role": "scale",
+          "cardinality": "many",
+          "required": false
+        }
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Tile title shown on the dashboard"
+          },
+          "field": {
+            "type": "string",
+            "description": "Column the legend maps"
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "color",
+              "r",
+              "symbol"
+            ],
+            "default": "color",
+            "description": "Encoding this legend represents"
+          },
+          "scheme": {
+            "type": "string",
+            "description": "Color scheme name (continuous / discrete)"
+          },
+          "range": {
+            "type": "array",
+            "items": {},
+            "description": "Explicit colors/radii (overrides scheme)"
+          },
+          "selected": {
+            "description": "Per-field kept-values map (or a legacy single array for the manual `field`)"
+          },
+          "colors": {
+            "type": "object",
+            "description": "Per-field category→color overrides from the legend swatch picker: { [field]: { [value]: \"#rrggbb\" } }"
+          },
+          "colorRangeMode": {
+            "type": "string",
+            "enum": [
+              "recolor",
+              "filter"
+            ],
+            "default": "recolor",
+            "description": "How a continuous COLOR scale's window interacts with rows: narrow the domain (recolor) or drop rows (filter)"
+          }
+        }
+      },
+      "preconditions": [
+        "a Relation to read categories/extent from"
+      ],
+      "dynamicPorts": null
+    }
+  ],
+  "charts": [
+    {
+      "id": "histogram",
+      "label": "Histogram",
+      "mark": "rectY",
+      "channels": [
+        {
+          "channel": "x",
+          "label": "Value (x)",
+          "required": true,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "x",
+              "bin"
+            ]
+          ]
+        },
+        {
+          "channel": "color",
+          "label": "Color by",
+          "required": false,
+          "accepts": [
+            "categorical",
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "fill"
+            ]
+          ]
+        }
+      ],
+      "base": {
+        "plot": [
+          {
+            "mark": "rectY",
+            "data": {
+              "from": "query"
+            },
+            "x": {
+              "bin": null
+            },
+            "y": {
+              "count": []
+            },
+            "fill": "#0e7ca0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "bar",
+      "label": "Bar",
+      "mark": "barY",
+      "channels": [
+        {
+          "channel": "x",
+          "label": "Category (x)",
+          "required": true,
+          "accepts": [
+            "categorical"
+          ],
+          "binAbove": 50,
+          "paths": [
+            [
+              "plot",
+              0,
+              "x"
+            ]
+          ]
+        },
+        {
+          "channel": "y",
+          "label": "Value to sum (y)",
+          "required": true,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "y",
+              "sum"
+            ]
+          ]
+        },
+        {
+          "channel": "color",
+          "label": "Color by",
+          "required": false,
+          "accepts": [
+            "categorical",
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "fill"
+            ]
+          ]
+        }
+      ],
+      "base": {
+        "plot": [
+          {
+            "mark": "barY",
+            "data": {
+              "from": "query"
+            },
+            "x": null,
+            "y": {
+              "sum": null
+            },
+            "fill": "#0e7ca0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "countbar",
+      "label": "Count bar",
+      "mark": "barY",
+      "channels": [
+        {
+          "channel": "x",
+          "label": "Category to count (x)",
+          "required": true,
+          "accepts": [
+            "categorical"
+          ],
+          "binAbove": 50,
+          "paths": [
+            [
+              "plot",
+              0,
+              "x"
+            ]
+          ]
+        },
+        {
+          "channel": "color",
+          "label": "Color by",
+          "required": false,
+          "accepts": [
+            "categorical",
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "fill"
+            ]
+          ]
+        }
+      ],
+      "base": {
+        "plot": [
+          {
+            "mark": "barY",
+            "data": {
+              "from": "query"
+            },
+            "x": null,
+            "y": {
+              "count": []
+            },
+            "fill": "#0e7ca0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "scatter",
+      "label": "Scatter",
+      "mark": "dot",
+      "channels": [
+        {
+          "channel": "x",
+          "label": "X axis",
+          "required": true,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "x"
+            ]
+          ]
+        },
+        {
+          "channel": "y",
+          "label": "Y axis",
+          "required": true,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "y"
+            ]
+          ]
+        },
+        {
+          "channel": "color",
+          "label": "Color by",
+          "required": false,
+          "accepts": [
+            "categorical",
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "fill"
+            ]
+          ]
+        },
+        {
+          "channel": "size",
+          "label": "Size by",
+          "required": false,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "r"
+            ]
+          ]
+        }
+      ],
+      "base": {
+        "plot": [
+          {
+            "mark": "dot",
+            "data": {
+              "from": "query"
+            },
+            "x": null,
+            "y": null,
+            "fill": "#0e7ca0",
+            "fillOpacity": 0.7
+          }
+        ]
+      }
+    },
+    {
+      "id": "boxplot",
+      "label": "Box plot",
+      "mark": "composite",
+      "channels": [
+        {
+          "channel": "x",
+          "label": "Group (x)",
+          "required": true,
+          "accepts": [
+            "categorical"
+          ],
+          "minDistinct": 2,
+          "maxDistinct": 20,
+          "paths": [
+            [
+              "plot",
+              0,
+              "x"
+            ],
+            [
+              "plot",
+              1,
+              "x"
+            ],
+            [
+              "plot",
+              2,
+              "x"
+            ]
+          ]
+        },
+        {
+          "channel": "y",
+          "label": "Measured value (y)",
+          "required": true,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "y1",
+              "min"
+            ],
+            [
+              "plot",
+              0,
+              "y2",
+              "max"
+            ],
+            [
+              "plot",
+              1,
+              "y1",
+              "quantile",
+              0
+            ],
+            [
+              "plot",
+              1,
+              "y2",
+              "quantile",
+              0
+            ],
+            [
+              "plot",
+              2,
+              "y",
+              "median"
+            ]
+          ]
+        },
+        {
+          "channel": "color",
+          "label": "Color by",
+          "required": false,
+          "accepts": [
+            "categorical",
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              1,
+              "fill"
+            ]
+          ]
+        }
+      ],
+      "base": {
+        "plot": [
+          {
+            "mark": "ruleX",
+            "data": {
+              "from": "query"
+            },
+            "x": null,
+            "y1": {
+              "min": null
+            },
+            "y2": {
+              "max": null
+            },
+            "stroke": "currentColor",
+            "strokeOpacity": 0.7
+          },
+          {
+            "mark": "barY",
+            "data": {
+              "from": "query"
+            },
+            "x": null,
+            "y1": {
+              "quantile": [
+                null,
+                0.25
+              ]
+            },
+            "y2": {
+              "quantile": [
+                null,
+                0.75
+              ]
+            },
+            "fill": "white",
+            "fillOpacity": 0.85,
+            "stroke": "currentColor"
+          },
+          {
+            "mark": "tickY",
+            "data": {
+              "from": "query"
+            },
+            "x": null,
+            "y": {
+              "median": null
+            },
+            "stroke": "currentColor",
+            "strokeWidth": 2
+          }
+        ]
+      }
+    },
+    {
+      "id": "heatmap",
+      "label": "Heatmap",
+      "mark": "cell",
+      "channels": [
+        {
+          "channel": "x",
+          "label": "Columns (x)",
+          "required": true,
+          "accepts": [
+            "categorical"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "x"
+            ]
+          ]
+        },
+        {
+          "channel": "y",
+          "label": "Rows (y)",
+          "required": true,
+          "accepts": [
+            "categorical"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "y"
+            ]
+          ]
+        },
+        {
+          "channel": "color",
+          "label": "Cell value (color)",
+          "required": true,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "fill"
+            ]
+          ]
+        }
+      ],
+      "base": {
+        "plot": [
+          {
+            "mark": "cell",
+            "data": {
+              "from": "query"
+            },
+            "x": null,
+            "y": null,
+            "fill": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "dotplot",
+      "label": "Dot plot",
+      "mark": "dot",
+      "channels": [
+        {
+          "channel": "x",
+          "label": "Columns (x)",
+          "required": true,
+          "accepts": [
+            "categorical"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "x"
+            ]
+          ]
+        },
+        {
+          "channel": "y",
+          "label": "Rows (y)",
+          "required": true,
+          "accepts": [
+            "categorical"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "y"
+            ]
+          ]
+        },
+        {
+          "channel": "size",
+          "label": "Dot size",
+          "required": true,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "r"
+            ]
+          ]
+        },
+        {
+          "channel": "color",
+          "label": "Dot color",
+          "required": false,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "fill"
+            ]
+          ]
+        }
+      ],
+      "base": {
+        "plot": [
+          {
+            "mark": "dot",
+            "data": {
+              "from": "query"
+            },
+            "x": null,
+            "y": null,
+            "r": null,
+            "fill": "#0e7ca0",
+            "fillOpacity": 0.6,
+            "stroke": "currentColor",
+            "strokeOpacity": 0.5
+          }
+        ]
+      }
+    },
+    {
+      "id": "hexbin",
+      "label": "Hexbin",
+      "mark": "hexbin",
+      "channels": [
+        {
+          "channel": "x",
+          "label": "X axis",
+          "required": true,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "x"
+            ]
+          ]
+        },
+        {
+          "channel": "y",
+          "label": "Y axis",
+          "required": true,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "y"
+            ]
+          ]
+        }
+      ],
+      "base": {
+        "plot": [
+          {
+            "mark": "hexbin",
+            "data": {
+              "from": "query"
+            },
+            "x": null,
+            "y": null,
+            "fill": {
+              "count": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "volcano",
+      "label": "Volcano",
+      "mark": "composite",
+      "channels": [
+        {
+          "channel": "x",
+          "label": "Log2 fold-change (x)",
+          "required": true,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "x"
+            ]
+          ]
+        },
+        {
+          "channel": "y",
+          "label": "P-value (y)",
+          "required": true,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "y"
+            ]
+          ]
+        },
+        {
+          "channel": "color",
+          "label": "Color by",
+          "required": false,
+          "accepts": [
+            "categorical",
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "fill"
+            ]
+          ]
+        }
+      ],
+      "base": {
+        "plot": [
+          {
+            "mark": "dot",
+            "data": {
+              "from": "query"
+            },
+            "x": null,
+            "y": null,
+            "fill": "#0e7ca0",
+            "fillOpacity": 0.7
+          },
+          {
+            "mark": "ruleY",
+            "data": [
+              1.301
+            ]
+          },
+          {
+            "mark": "ruleX",
+            "data": [
+              -1
+            ]
+          },
+          {
+            "mark": "ruleX",
+            "data": [
+              1
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "line",
+      "label": "Line",
+      "mark": "lineY",
+      "channels": [
+        {
+          "channel": "x",
+          "label": "X axis",
+          "required": true,
+          "accepts": [
+            "quantitative",
+            "temporal"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "x"
+            ]
+          ]
+        },
+        {
+          "channel": "y",
+          "label": "Y axis",
+          "required": true,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "y"
+            ]
+          ]
+        },
+        {
+          "channel": "color",
+          "label": "Color by",
+          "required": false,
+          "accepts": [
+            "categorical"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "stroke"
+            ]
+          ]
+        },
+        {
+          "channel": "detail",
+          "label": "Series",
+          "required": false,
+          "accepts": [
+            "categorical",
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "z"
+            ]
+          ]
+        }
+      ],
+      "base": {
+        "plot": [
+          {
+            "mark": "lineY",
+            "data": {
+              "from": "query"
+            },
+            "x": null,
+            "y": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "violin",
+      "label": "Violin",
+      "mark": "composite",
+      "channels": [
+        {
+          "channel": "x",
+          "label": "Group (x)",
+          "required": true,
+          "accepts": [
+            "categorical"
+          ],
+          "minDistinct": 2,
+          "maxDistinct": 20,
+          "paths": [
+            [
+              "plot",
+              0,
+              "fx"
+            ]
+          ]
+        },
+        {
+          "channel": "y",
+          "label": "Measured value (y)",
+          "required": true,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "y"
+            ]
+          ]
+        },
+        {
+          "channel": "color",
+          "label": "Color by",
+          "required": false,
+          "accepts": [
+            "categorical",
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "fill"
+            ]
+          ]
+        }
+      ],
+      "base": {
+        "plot": [
+          {
+            "mark": "areaX",
+            "data": {
+              "from": "query"
+            },
+            "y": null,
+            "fx": null,
+            "fill": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "stacked-area",
+      "label": "Stacked area",
+      "mark": "areaY",
+      "channels": [
+        {
+          "channel": "x",
+          "label": "X axis",
+          "required": true,
+          "accepts": [
+            "quantitative",
+            "temporal"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "x"
+            ]
+          ]
+        },
+        {
+          "channel": "y",
+          "label": "Value (y)",
+          "required": true,
+          "accepts": [
+            "quantitative"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "y"
+            ]
+          ]
+        },
+        {
+          "channel": "color",
+          "label": "Stack by (color)",
+          "required": true,
+          "accepts": [
+            "categorical"
+          ],
+          "paths": [
+            [
+              "plot",
+              0,
+              "fill"
+            ]
+          ]
+        }
+      ],
+      "base": {
+        "plot": [
+          {
+            "mark": "areaY",
+            "data": {
+              "from": "query"
+            },
+            "x": null,
+            "y": null,
+            "fill": null
+          }
+        ]
+      }
+    }
+  ]
+}

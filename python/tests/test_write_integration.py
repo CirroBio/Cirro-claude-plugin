@@ -35,10 +35,10 @@ def serve_user(tenant, *, email=SESSION_EMAIL, notifications=True):
     a shape UserDetail does not have. Re-registering the same pattern replaces the
     route, so a test may serve a different record before planning.
     """
-    from cirro_api_client.v1.models import UserDetail, UserSettings
+    from cirro_api_client.v1.models import UserDetail, UserSettings, UserStatus
     payload = UserDetail(
         username="sminot", name="Sam Minot", email=email, organization="Cirro",
-        project_assignments=[], global_roles=[],
+        status=UserStatus.ACTIVE, project_assignments=[], global_roles=[],
         settings=UserSettings(analysis_update_notifications_enabled=notifications),
     ).to_dict()
     tenant["router"].get(f"{API}/users/sminot").respond(json=payload)

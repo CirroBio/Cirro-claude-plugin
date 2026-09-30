@@ -1,9 +1,9 @@
 """The shared core of the gated operations.
 
 The operations themselves live in analysis_ops, dataset_ops, project_ops, share_ops,
-chain_ops and pipeline_ops. This module holds what every family needs -- Draft, Op,
-the risk classes, the resolvers, the folder/tag rule -- and the registry they all
-register into.
+chain_ops, pipeline_ops and dashboard_ops. This module holds what every family needs
+-- Draft, Op, the risk classes, the resolvers, the folder/tag rule -- and the registry
+they all register into.
 
 Each operation is one planner and one executor.
 
@@ -192,5 +192,5 @@ def get_op(name: str) -> Op:
     return OPS[name]
 
 
-from . import (analysis_ops, chain_ops, dataset_ops,  # noqa: E402,F401
+from . import (analysis_ops, chain_ops, dashboard_ops, dataset_ops,  # noqa: E402,F401
                pipeline_ops, project_ops, share_ops)

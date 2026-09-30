@@ -140,6 +140,7 @@ cirro-agent read tasks -p "My Project" -d ds_123
 | Pipelines | `processes`, `process`, `process-params`, `process-config`, `workflow-spec`, `check-config` |
 | Project resources | `samples`, `references`, `reference-types`, `compute-envs`, `shares`, `workspaces`, `project-users`, `users` |
 | Money | `spend`, `cost` |
+| Dashboards | `dashboards`, `dashboard` (add `--run` to execute its data), `dashboard-schema`, `sheets`, `preview` |
 
 **Big answers stay useful.** Ask about a project with 4,000 datasets and you will not get
 4,000 rows, and you will not get an arbitrary 40 either. You get the shape of all of them
@@ -277,6 +278,7 @@ A few things worth knowing:
 | Sharing | `create_share`, `delete_share`, `subscribe_share`, `unsubscribe_share` |
 | Workspaces | `create_workspace`, `start_workspace`, `stop_workspace`, `delete_workspace` |
 | Pipelines | `create_process`, `update_process`, `upload_process_config`, `sync_process_config`, `archive_process` |
+| Dashboards | `create_dashboard`, `edit_dashboard`, `delete_dashboard` |
 | Your computer | `write_process_config`, `commit_process_config` |
 | Several at once | `chain` — approve a sequence of the above as one action |
 | Your computer | `download_files` |
@@ -305,6 +307,7 @@ safely from here — use the web UI.
 | `cirro-spec-workflow` | Reading a Nextflow or WDL workflow and writing down what it needs |
 | `cirro-define-test-dataset` | Picking test data, parameters and success criteria |
 | `cirro-configure-pipeline` | Turning that into a registered, runnable Cirro pipeline |
+| `cirro-dashboards` | Building, reading and editing Data Studio dashboards |
 | `cirro-write-python` | Writing you a standalone script to run yourself |
 
 Commands: `/cirro:setup` and `/cirro:doctor`.
@@ -357,6 +360,30 @@ Two things worth knowing:
   fields the renderer will ignore, file pickers that will show an empty list, parameters
   wired to fields that do not exist. Nothing in that check can tell you whether the form
   makes sense to a biologist, so open it in the Cirro UI once before sharing it.
+
+## Building dashboards
+
+Claude can build a Data Studio dashboard from a description — *"a volcano plot of the
+DE results with a p-value cutoff I can change, and the significant genes beside it"* —
+and read or change the ones you already have.
+
+It works in the same terms you do: a table to read from, a query over it, a chart or
+table of the result, a filter. Before anything is saved, the plan **runs the
+dashboard's data on your machine** with the same engine the portal uses (DuckDB), so
+the approval tells you how many rows each chart will show and which columns it is
+drawing — and a dashboard that would come out blank, because a column is missing or a
+chart was given the wrong kind of column, is refused with the reason instead of saved.
+Files over 500 MiB are not downloaded for that check; the plan says so.
+
+The dashboard's structure is checked against the schema your Cirro portal publishes at
+`/schemas/dashboard-schema.json`, so it matches the portal that will draw it. A portal
+that does not publish one yet is checked against a copy bundled with the plugin, and
+the plan says which was used.
+
+**If you have the dashboard open while Claude edits it**, your tab picks up the change
+when you have no unsaved edits, and warns you instead of overwriting it when you do.
+The other direction holds too: if you save in the portal after Claude has planned an
+edit, the edit is refused as stale rather than written over your work.
 
 ## Locking it down further
 
@@ -455,11 +482,22 @@ the plugin. The Batch default is the older path and is unchanged. After a run la
 HealthOmics, and dataset status is not a substitute.
 
 **Declaring which modes a pipeline may use is new in 0.12.0 and has not been sent to a
-live tenant.** `executionModes` is absent from the pinned API client's model, so the
-plugin puts it on the request itself; the tests assert it is on the serialized body and
-that editing a pipeline for any other reason carries it forward, but no registration
+live tenant.** The tests assert `executionModes` is on the serialized body and that
+editing a pipeline for any other reason carries it forward, but no registration
 carrying it has been accepted by a real server. Registering a pipeline at all is
 untested live, as above, so this inherits that caveat rather than adding a new one.
+
+**Dashboards have run against a live tenant** — on 2026-09-29, against a development
+tenant, in a project set aside for it. `create_dashboard` made two throwaway
+dashboards — one over a dataset file (scatter, histogram, box plot, table, a number
+control feeding the SQL and a multi-select filter), one over a sheet — and both
+rendered in the portal as planned. `edit_dashboard` restyled a chart, changed a
+control, added a tile and moved tiles; an edit planned before a save in the portal was
+refused as stale, and the portal's save survived. `delete_dashboard` removed both. The
+reads, including `dashboard --run`, were checked against all 40 dashboards on that
+tenant. The portal half — an open dashboard reloading to show a plugin's edit, and
+refusing to save over it with unsaved edits — was exercised with an unreleased portal
+build; until that build is deployed, an open tab can still overwrite an edit.
 
 **Signing in for a tenant has now been through a real login.** On 2026-09-09 a
 device-code login landed in a tenant folder against a development tenant, and plans

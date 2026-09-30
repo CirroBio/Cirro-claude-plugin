@@ -78,31 +78,27 @@ def _user_payload(username="sminot", email="sminot@cirro.test", notifications=Tr
     it puts every run_analysis plan on the lookup-failure path -- passing, but
     exercising the degraded branch rather than the one people will hit.
     """
-    from cirro_api_client.v1.models import UserDetail, UserSettings
+    from cirro_api_client.v1.models import UserDetail, UserSettings, UserStatus
     return UserDetail(
         username=username, name="Sam Minot", email=email, organization="Cirro",
-        project_assignments=[], global_roles=[],
+        status=UserStatus.ACTIVE, project_assignments=[], global_roles=[],
         settings=UserSettings(analysis_update_notifications_enabled=notifications),
     ).to_dict()
 
 
 def _process_payload(pid, name, executor, category, pipeline_type, description="",
                      parents=(), children=(), modes=()):
-    from cirro_api_client.v1.models import Process, Executor
-    payload = Process(
+    from cirro_api_client.v1.models import ExecutionMode, Process, Executor
+    # The server never sends an empty list; a pipeline that declares nothing is STANDARD.
+    return Process(
         id=pid, name=name, description=description, data_type="paired_dnaseq",
         executor=Executor(executor), child_process_ids=list(children),
         parent_process_ids=list(parents),
         linked_project_ids=[], is_tenant_wide=True, allow_multiple_sources=True,
         uses_sample_sheet=True, is_archived=False, tags=[],
         category=category, pipeline_type=pipeline_type,
+        execution_modes=[ExecutionMode(m) for m in (modes or ("STANDARD",))],
     ).to_dict()
-    # The pinned client does not model `executionModes`, so the server's value arrives
-    # as an extra property. Setting it here rather than on the model is what the wire
-    # actually looks like, and is what `rows.execution_modes` has to cope with.
-    if modes:
-        payload["executionModes"] = list(modes)
-    return payload
 
 
 def _detail_payload(base):
@@ -252,7 +248,7 @@ def fake_tenant(monkeypatch):
                          "Transcriptomics", "nf-core", "RNA-seq",
                          parents=("proc_ingest",),
                          modes=("STANDARD", "HEALTHOMICS")),
-        # Declares no modes at all, which is the older shape and means Batch only.
+        # Batch only.
         _process_payload("proc_sarek", "nf-core/sarek v3.4", "NEXTFLOW",
                          "Genomics", "nf-core", "WGS"),
         _process_payload("proc_ingest", "Paired DNA sequencing", "INGEST",

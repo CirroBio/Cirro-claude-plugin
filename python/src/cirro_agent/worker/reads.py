@@ -782,3 +782,88 @@ def pick(rows: list, given: str, *, kind: str, field: str, brief=None) -> dict:
         candidates=[show(row) for row in rows],
         retry_with=[{"verb": "list", "of": f"{kind}s"}],
     )
+
+
+# ------------------------------------------------------------------ dashboards
+#
+# These routes are sent raw: the generated request is built, but the response is read as
+# JSON rather than through the generated models. Those models turn `dashboardData` and
+# `criteria` into wrappers the planner would have to unpack before writing them back,
+# parse a delete's empty 204 as a Dashboard and raise, and cannot parse a sheet page at
+# all -- they expect each cell to be an object, and cells are plain values.
+
+def send(reader: Reader, route, *, what: str, cost: str, **kwargs):
+    """Call one generated route; its decoded JSON body, or None for a 404 or no body."""
+    import json as _json
+    client = reader.client._api_client
+    # The same call the generated sync_detailed makes, minus its response parsing.
+    response = client.get_httpx_client().request(auth=client.get_auth(),
+                                                 **route._get_kwargs(**kwargs))
+    reader.cost.call(cost)
+    if response.status_code == 404:
+        return None
+    if response.status_code >= 400:
+        raise portal.wrap_upstream(
+            RuntimeError(f"HTTP {response.status_code}: {response.content[:300]!r}"),
+            what=what)
+    return _json.loads(response.content) if response.content else None
+
+
+def dashboards(reader: Reader, project_id: str) -> list:
+    """Every dashboard record in a project, without blobs (the list is slim)."""
+    from cirro_api_client.v1.api.dashboards import get_dashboards
+    return send(reader, get_dashboards, what="Listing dashboards failed.",
+                cost="dashboards.list", project_id=project_id) or []
+
+
+def dashboard_record(reader: Reader, project_id: str, dashboard_id: str) -> dict:
+    """One dashboard record, blob included, or NotFound listing the project's."""
+    from cirro_api_client.v1.api.dashboards import get_dashboard
+    record = send(reader, get_dashboard, what="Reading the dashboard failed.",
+                  cost="dashboards.get", project_id=project_id, dashboard_id=dashboard_id)
+    if record is None:
+        raise errors.NotFound(
+            f"No dashboard {dashboard_id!r} in project {project_id}.",
+            what="Check the dashboard ID.", field="dashboard_id", given=dashboard_id,
+            candidates=[{"id": d.get("id"), "name": d.get("name")}
+                        for d in dashboards(reader, project_id)],
+            retry_with=[{"verb": "list", "of": "dashboards",
+                         "scope": {"project_ids": [project_id]}}])
+    return record
+
+
+def sheets(reader: Reader, project_id: str) -> list:
+    from cirro_api_client.v1.api.sheets import get_sheets
+    return send(reader, get_sheets, what="Listing sheets failed.", cost="sheets.list",
+                project_id=project_id) or []
+
+
+# The tenant's portal serves the schema its dashboards are rendered with. A portal that
+# predates it answers 403 from the bucket, or an HTML page from a SPA fallback, so
+# anything that is not the expected JSON falls back to the vendored copy, said aloud.
+SCHEMA_PATH = "/schemas/dashboard-schema.json"
+SCHEMA_TIMEOUT_S = 5
+
+
+def dashboard_schema(reader: Reader):
+    """(Schema, note): the portal's own schema when it serves one, else the vendored
+    copy with a note saying so. Memoized per worker -- one operation, one schema."""
+    cached = getattr(reader, "_dashboard_schema", None)
+    if cached:
+        return cached
+    import json as _json
+    import urllib.request
+    from .. import dashboards as D
+    url = f"https://{reader.base_url}{SCHEMA_PATH}"
+    note = None
+    try:
+        with urllib.request.urlopen(url, timeout=SCHEMA_TIMEOUT_S) as response:  # noqa: S310
+            schema = D.Schema(_json.loads(response.read()), source=url)
+    except (OSError, ValueError) as exc:
+        schema = D.vendored_schema()
+        note = (f"{url} is not available ({type(exc).__name__}), so dashboards were checked "
+                "against the plugin's vendored schema, which may be older or newer than "
+                "this portal.")
+    reader.cost.call("dashboard_schema")
+    reader._dashboard_schema = (schema, note)
+    return reader._dashboard_schema

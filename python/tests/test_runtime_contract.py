@@ -1,10 +1,9 @@
 """What the pinned runtime must provide.
 
-The plugin overrides cirro's own `cirro_api_client<1.6.0` pin because pipeline
-configuration is impossible without the >=1.6.0 routes. That override is only safe
-while cirro itself still works against 1.6.0, so assert both halves here: a future
-cirro release that breaks the pairing fails the build instead of silently removing
-the ability to configure pipelines.
+Pipeline configuration is impossible without the `cirro_api_client` >=1.6.0 routes,
+and the dashboard operations without cirro's own `DashboardService`. Assert both here,
+so a release that loses either fails the build instead of silently removing what the
+plugin was built on.
 
 Also the plugin's own version, which is declared in three manifests that have to agree.
 """
@@ -49,7 +48,7 @@ def test_client_is_at_least_1_6():
     major, minor = (int(part) for part in version.split(".")[:2])
     assert (major, minor) >= (1, 6), (
         f"cirro-api-client {version} predates the process config-revision routes; "
-        "pipeline configuration cannot work. See the override in runtime/pyproject.toml."
+        "pipeline configuration cannot work."
     )
 
 
@@ -86,12 +85,13 @@ def test_custom_pipeline_settings_defaults_to_the_dot_cirro_folder():
     assert settings.branch == "main"
 
 
-def test_cirro_still_imports_against_the_overridden_client():
-    """The override's whole premise."""
+def test_cirro_provides_the_services_the_plugin_uses():
     import cirro
     from cirro import CirroApi, DataPortal  # noqa: F401
     from cirro.services.process import ProcessService
+    from cirro.services.dashboard import DashboardService
     assert hasattr(ProcessService, "create_custom_process")
+    assert {"list", "get", "create", "update", "delete"} <= set(dir(DashboardService))
     assert cirro.__file__
 
 

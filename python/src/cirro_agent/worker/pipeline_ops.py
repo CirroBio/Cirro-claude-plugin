@@ -235,10 +235,9 @@ def _execution_modes(args: dict, spec: Optional[dict] = None) -> Optional[list]:
     at all, however the run request is phrased.
 
     None means "this write does not speak to the field". On a create that leaves the
-    server's own default, which the portal and `rows.execution_modes` both read as
-    STANDARD; on an update it would blank the declaration, so update resolves the
-    current value rather than passing None. The spec makes the array nullable with
-    minItems 1, so an empty list is refused rather than sent.
+    server's own default, STANDARD; on an update it would blank the declaration, so
+    update resolves the current value rather than passing None. The spec makes the
+    array nullable with minItems 1, so an empty list is refused rather than sent.
     """
     given = args.get("execution_modes")
     if given is None and spec is not None:
@@ -565,7 +564,7 @@ def _process_input(*, process_id: str, name: str, description: str, executor: st
     execution_modes that defect costs a pipeline its HealthOmics capability as a side
     effect of editing its category.
     """
-    from cirro_api_client.v1.models import CustomProcessInput, Executor
+    from cirro_api_client.v1.models import CustomProcessInput, ExecutionMode, Executor
     from cirro_api_client.v1.types import UNSET
     request = CustomProcessInput(
         id=process_id, name=name, description=description,
@@ -578,15 +577,8 @@ def _process_input(*, process_id: str, name: str, description: str, executor: st
                            else documentation_url),
     )
     if execution_modes is not _UNSPECIFIED:
-        # `executionModes` is in the API spec but the pinned cirro-api-client does not
-        # model it on this input. `to_dict` merges additional_properties, so the field
-        # reaches the wire either way -- and the modeled attribute is preferred, so
-        # this collapses to a setattr when the client catches up. The generated models
-        # are attrs, not dataclasses, so this asks the instance.
-        if hasattr(request, "execution_modes"):
-            request.execution_modes = execution_modes
-        else:
-            request.additional_properties["executionModes"] = execution_modes
+        request.execution_modes = (None if execution_modes is None
+                                   else [ExecutionMode(m) for m in execution_modes])
     return request
 
 
@@ -742,10 +734,9 @@ def plan_upload_process_config(reader: reads.Reader, args: dict) -> Draft:
             added.append(name)
         elif current[slot].strip() != text.strip():
             changed.append(name)
-    # A live slot this upload has no asset for. `metadata` is the standing case: it is
-    # in the slot vocabulary but nothing generates or authors one, so an upload that
-    # leaves it out must say so rather than let the approver read New and Changed as
-    # the whole of what the revision touches.
+    # A live slot this upload has no asset for -- a preprocess script uploaded before,
+    # left out of this one. The upload must say so rather than let the approver read
+    # New and Changed as the whole of what the revision touches.
     absent = sorted(set(current) - {formgen.SLOTS[name] for name in assets})
     # Reporting an unread slot as New would understate what the upload replaces, so
     # the whole comparison is withheld rather than half of it presented as fact.

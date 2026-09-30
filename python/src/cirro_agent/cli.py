@@ -16,7 +16,8 @@ from . import errors, formgen, runner
 # The complete set of verbs this binary may ask the worker for.
 READ_VERBS = frozenset({"query", "get", "summarize", "describe", "list",
                         "process_params", "process_config", "workflow_spec", "check_config",
-                        "task_logs", "chain_status", "whoami", "tenants"})
+                        "task_logs", "chain_status", "whoami", "tenants",
+                        "dashboard", "dashboard_schema", "table_preview"})
 
 
 def _emit(payload: dict) -> int:
@@ -198,6 +199,24 @@ def build_parser() -> argparse.ArgumentParser:
                  " --all-projects compares every project in one call", project=True)
     add("shares", "data shares in a project", project=True)
     add("workspaces", "interactive workspaces in a project", project=True)
+    add("dashboards", "Data Studio dashboards in a project", project=True)
+    dash = add("dashboard", "one dashboard: its sources, queries, views and controls",
+               project=True)
+    dash.add_argument("id", help="dashboard ID")
+    dash.add_argument("--run", action="store_true",
+                      help="execute its data in DuckDB and report what each view draws")
+    dash.add_argument("--raw", action="store_true", help="include the stored document")
+    add("dashboard-schema", "chart types, channels, view options and the change list a "
+                            "dashboard plan takes")
+    add("sheets", "sheets in a project (dashboard sources)", project=True)
+    preview = add("preview", "load one file or sheet as a dashboard would, optionally "
+                             "querying it", project=True)
+    preview.add_argument("-d", "--dataset-id", help="dataset ID holding the file")
+    preview.add_argument("--path", help="file path within the dataset")
+    preview.add_argument("--sheet", help="sheet ID or name, instead of a file")
+    preview.add_argument("--sql",
+                         help="DuckDB SQL over the table, read as `query` or its name")
+    preview.add_argument("--limit", type=int, help="sample rows to return (default 20)")
     add("users", "users in this tenant")
     add("project-users", "members of a project and their roles", project=True)
     chains = add("chain-status", "where a chained workflow stands: attempts, outputs, "
@@ -361,10 +380,29 @@ def main(argv=None) -> int:
             request["line_range"] = args.line_range
         return _run(request, args)
 
+    if command == "dashboard":
+        request = {"verb": "dashboard", "id": args.id, "scope": _scope(args)}
+        for flag in ("run", "raw"):
+            if getattr(args, flag):
+                request[flag] = True
+        return _run(request, args)
+
+    if command == "dashboard-schema":
+        return _run({"verb": "dashboard_schema"}, args)
+
+    if command == "preview":
+        request = {"verb": "table_preview", "scope": _scope(args)}
+        for source, target in (("dataset_id", "dataset_id"), ("path", "path"),
+                               ("sheet", "sheet"), ("sql", "sql"), ("limit", "limit")):
+            if getattr(args, source, None):
+                request[target] = getattr(args, source)
+        return _run(request, args)
+
     listings = {"folders": "folders", "reference-types": "reference_types",
                 "users": "users", "spend": "spend",
                 "compute-envs": "compute_envs", "shares": "shares",
-                "workspaces": "workspaces", "project-users": "project_users"}
+                "workspaces": "workspaces", "project-users": "project_users",
+                "dashboards": "dashboards", "sheets": "sheets"}
     if command in listings:
         return _run({"verb": "list", "of": listings[command], "scope": _scope(args)}, args)
 

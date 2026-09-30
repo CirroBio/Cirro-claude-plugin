@@ -5,10 +5,11 @@ from typing import Optional
 from .. import errors
 from ..envelope import DEFAULT_MAX_TOKENS, estimate_tokens, shrink_to_fit, wrap
 from . import rows as R
-from .reads import Reader, all_project_metrics, project_metrics
+from .. import dashboards as D
+from .reads import Reader, all_project_metrics, dashboards, project_metrics, sheets
 
 LISTINGS = ("folders", "reference_types", "users", "compute_envs", "shares",
-            "workspaces", "project_users", "spend")
+            "workspaces", "project_users", "spend", "dashboards", "sheets")
 
 
 def _flat(reader: Reader, request: dict, kind: str, items: list,
@@ -93,10 +94,46 @@ def do_list(request: dict) -> dict:
     if of == "project_users":
         return _flat(reader, request, of, reader.project_users(project_id))
 
+    if of == "dashboards":
+        return _dashboards(reader, request, project_id)
+
+    if of == "sheets":
+        items = [{"id": s.get("id"), "name": s.get("name"), "table": s.get("tableName"),
+                  "namespace": s.get("namespaceName"), "type": s.get("sheetType"),
+                  "rows": s.get("totalRowCount"), "status": s.get("status")}
+                 for s in sheets(reader, project_id)]
+        return _flat(reader, request, of, items, note=(
+            "A sheet is a dashboard source: add_source with sheet=<id>."))
+
     raise errors.InvalidQuery(
         f"Unknown listing {of!r}.", what="Pick a supported listing.", field="of", given=of,
         retry_with=[{"of": name} for name in LISTINGS],
     )
+
+
+def _dashboards(reader: Reader, request: dict, project_id: str) -> dict:
+    """Data Studio dashboards first. Records other features keep in the same table have
+    no `sql-room` criteria and the Data Studio does not show them, so they are listed
+    only as a count."""
+    records = dashboards(reader, project_id)
+    studio = [r for r in records if (r.get("criteria") or {}).get("type") == D.SESSION_TYPE]
+    items = [{"id": r.get("id"), "name": r.get("name"),
+              "description": r.get("description") or None,
+              "scope": (r.get("criteria") or {}).get("scope"),
+              "created_by": r.get("createdBy"), "updated_at": r.get("updatedAt"),
+              "url": D.studio_url(reader.base_url, project_id, r.get("id"))}
+             for r in sorted(studio, key=lambda r: str(r.get("updatedAt") or ""),
+                             reverse=True)]
+    other = len(records) - len(studio)
+    note = (f"{other} other dashboard record(s) in this project are not Data Studio dashboards"
+            if other else None)
+    return _flat(reader, request, "dashboards", items, note=note, next_calls=[{
+        "id": "nc_dashboard", "why": "what the most recently updated dashboard contains",
+        "call": {"command": f"cirro-agent read dashboard {items[0]['id']} -p {project_id}"},
+    }] if items else [{
+        "id": "nc_schema", "why": "what a new dashboard can be built from",
+        "call": {"command": "cirro-agent read dashboard-schema"},
+    }])
 
 
 def _spend(reader: Reader, request: dict, scope: dict) -> dict:

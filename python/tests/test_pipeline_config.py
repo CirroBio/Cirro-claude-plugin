@@ -491,7 +491,7 @@ def test_a_cirro_curated_process_is_refused():
     assert caught.value.code == "FORBIDDEN"
 
 
-OP_MODULES = ("analysis_ops", "chain_ops", "dataset_ops", "pipeline_ops",
+OP_MODULES = ("analysis_ops", "chain_ops", "dashboard_ops", "dataset_ops", "pipeline_ops",
               "project_ops", "share_ops")
 
 
@@ -506,7 +506,7 @@ def test_any_op_module_can_be_imported_first(first):
     import sys
     code = (f"from cirro_agent.worker import {first};"
             "from cirro_agent.worker.mutations import OPS;"
-            "assert len(OPS) == 34, len(OPS);"
+            "assert len(OPS) == 37, len(OPS);"
             "assert 'create_process' in OPS and 'run_analysis' in OPS and 'chain' in OPS")
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr[-800:]
@@ -638,31 +638,31 @@ def test_the_slot_vocabulary_is_the_sdk_enum_minus_its_fallback():
     assert set(formgen.JSON_SLOTS) <= set(formgen.CONFIG_SLOTS)
 
 
-def test_the_filename_map_covers_every_slot_but_metadata():
+def test_the_filename_map_covers_every_slot():
     """`SLOTS` is derived from the vocabulary, so it cannot name a slot that is not in
     it -- the drift this replaces had `metadata` in one list and not the other."""
-    assert set(formgen.SLOTS.values()) <= set(formgen.CONFIG_SLOTS)
-    assert set(formgen.CONFIG_SLOTS) - set(formgen.SLOTS.values()) == {"metadata"}
+    assert set(formgen.SLOTS.values()) == set(formgen.CONFIG_SLOTS)
 
 
 def test_the_planner_sees_a_live_slot_no_asset_of_its_own_covers(
         tmp_path, monkeypatch, storage_process):
-    """The planner read six slots while the read verb read seven, so a live `metadata`
-    slot was invisible to the approval: New and Changed named only what the upload
-    carries, and nothing said the revision holds a slot this upload does not."""
-    def only_metadata(_process_id, resource, **_kwargs):
-        if str(resource) == "metadata":
-            return _Response(content='{"kept": true}')
+    """The planner once read fewer slots than the read verb, so a live slot this upload
+    carries nothing for was invisible to the approval: New and Changed named only what
+    the upload carries, and nothing said the revision holds a slot this one does not.
+    A generated upload has no preprocess script, so a live one is that case."""
+    def only_preprocess(_process_id, resource, **_kwargs):
+        if str(resource) == "preprocess":
+            return _Response(content='print("kept")')
         _not_found()
 
     monkeypatch.setattr(REVISION_API, lambda *_a, **_k: _Response(revision_number=4))
-    monkeypatch.setattr(RESOURCE_API, only_metadata)
+    monkeypatch.setattr(RESOURCE_API, only_preprocess)
 
     draft = pipeline_ops.plan_upload_process_config(
         storage_process, {"process_id": "p1", "design_spec": _write_spec(tmp_path)})
 
-    assert _field(draft.summary, "Not uploaded") == "metadata (live now, no asset here)"
-    assert any("metadata" in w for w in draft.warnings)
+    assert _field(draft.summary, "Not uploaded") == "preprocess (live now, no asset here)"
+    assert any("preprocess" in w for w in draft.warnings)
     assert "process-form.json" in _field(draft.summary, "New")
 
 
