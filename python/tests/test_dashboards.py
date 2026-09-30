@@ -217,10 +217,11 @@ def test_a_wrong_typed_field_is_an_error_because_the_portal_wipes_the_config(sch
 
 
 def test_problems_on_nodes_a_change_did_not_write_are_only_warnings(schema):
-    """A dashboard from a newer portal build (dev ran one with `spatialdata` tiles and
-    extra chart fields) must stay editable: only what the change wrote can be refused."""
+    """A dashboard from a newer portal build (dev ran `spatialdata` tiles before the schema
+    had them, and extra chart fields) must stay editable: only what the change wrote can
+    be refused."""
     document, _ = build(schema, STARTER)
-    document["ir"]["nodes"].append({"id": "spat0001", "type": "spatialdata", "config": {}})
+    document["ir"]["nodes"].append({"id": "spat0001", "type": "futurenode", "config": {}})
     document["dashboards"][0]["tiles"].append(
         {"componentId": "spat0001", "x": 0, "y": 20, "w": 12, "h": 8})
     document["ir"]["nodes"][2]["config"]["futureField"] = True

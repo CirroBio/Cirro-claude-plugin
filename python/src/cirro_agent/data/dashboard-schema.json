@@ -951,6 +951,38 @@
         "a Relation to read categories/extent from"
       ],
       "dynamicPorts": null
+    },
+    {
+      "type": "spatialdata",
+      "label": "Spatial data",
+      "description": "A SpatialData checkpoint shown in the Spatial Data Studio viewer.",
+      "renderable": true,
+      "addableViaMenu": false,
+      "inputs": [],
+      "outputs": [],
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "default": ""
+          },
+          "datasetId": {
+            "type": "string"
+          },
+          "datasetName": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "display": {
+            "type": "object"
+          }
+        }
+      },
+      "preconditions": [],
+      "dynamicPorts": null
     }
   ],
   "charts": [
