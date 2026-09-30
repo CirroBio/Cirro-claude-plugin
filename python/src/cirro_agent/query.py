@@ -11,6 +11,7 @@ and is testable without a tenant.
 """
 import difflib
 import fnmatch
+import itertools
 import math
 import re
 from datetime import datetime, timedelta, timezone
@@ -916,10 +917,23 @@ def group(rows: list, group_by: list, metrics: list, *,
                             {"metrics": ["sum:total_size_bytes"]}],
             )
 
+    # A list-valued key (folders, tags, execution_modes) puts the row in one bucket per
+    # element, and an empty list in the null bucket -- the same rule the terms facet
+    # uses. Several list-valued keys take the cross product.
     buckets: dict = {}
+    multi_valued = []
     for row in rows:
-        key = tuple(_group_key(row, part) for part in group_by)
-        buckets.setdefault(key, []).append(row)
+        parts = []
+        for part in group_by:
+            value = _group_key(row, part)
+            if isinstance(value, list):
+                if len(value) > 1 and part not in multi_valued:
+                    multi_valued.append(part)
+                parts.append([_facet_key(item) for item in value] or [None])
+            else:
+                parts.append([value])
+        for key in itertools.product(*parts):
+            buckets.setdefault(key, []).append(row)
 
     def metric(name: str, members: list) -> Any:
         if name == "count":
@@ -968,4 +982,7 @@ def group(rows: list, group_by: list, metrics: list, *,
         column = name.replace(":", "_")
         if all(isinstance(g.get(column), (int, float)) for g in groups):
             totals[column] = sum(g[column] for g in groups)
+    if multi_valued:
+        totals["note"] = (f"{', '.join(multi_valued)} multi-valued; a row counts toward"
+                          " each of its values, so group totals exceed the match total")
     return shown, tail_summary, totals
