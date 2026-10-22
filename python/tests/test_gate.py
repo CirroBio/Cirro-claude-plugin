@@ -165,6 +165,123 @@ def test_a_module_is_the_code_that_runs(tmp_path):
     assert run(bash("python3 -m pytest sdkmod.py -q", cwd=tmp_path)) == ALLOW
 
 
+# The worker and the MCP server each act on whatever request arrives on stdin, an apply
+# included, so started by hand either one executes a plan with no prompt. Neither is in
+# the working directory for the module check above to read, and every spelling of `-m`
+# runs them.
+ENTRY_POINT_RUNS = [
+    "echo '{\"verb\": \"apply\"}' | python3 -m cirro_agent.worker",
+    "python3 -m cirro_agent.worker < request.json",
+    "python3 -m cirro_agent.worker<request.json",
+    "PYTHONPATH=python/src python3 -m cirro_agent.worker < request.json",
+    "python3 -mcirro_agent.worker < request.json",
+    "python3 -Im cirro_agent.worker < request.json",
+    "python3 -X dev -m cirro_agent.worker < request.json",
+    "python3 -m runpy cirro_agent.worker < request.json",
+    "python3 -m cirro_agent.worker.__main__ < request.json",
+    "uv run python -m cirro_agent.worker < request.json",
+    "uv run --module=cirro_agent.worker < request.json",
+    "printf '%s\\n' '{}' | python3 -m cirro_agent.mcp_server",
+    "bash -c 'python3 -m cirro_agent.worker < request.json'",
+    "bash <<'EOF'\npython3 -m cirro_agent.worker < request.json\nEOF",
+]
+
+
+@pytest.mark.parametrize("command", ENTRY_POINT_RUNS, ids=lambda c: c[:50])
+def test_running_the_plugins_own_entry_points_is_denied(command):
+    decision, reason = decide(bash(command))
+    assert decision == DENY
+    assert "worker or MCP server" in reason
+
+
+def test_a_script_that_starts_the_worker_is_denied(tmp_path):
+    path = _script(tmp_path, "replay.sh",
+                   '#!/bin/sh\npython3 -m cirro_agent.worker < "$1"\n')
+    assert run(bash(f"bash {path} request.json")) == DENY
+
+
+def test_naming_an_entry_point_is_not_running_it(tmp_path):
+    """A quoted argument is an argument, and a heredoc body written to a file is a
+    payload: a commit message, a search or a note naming the worker runs nothing. Nor
+    is the read-only CLI one of the refused entry points."""
+    note = tmp_path / "notes.md"
+    for command in ('git commit -m "gate: refuse python3 -m cirro_agent.worker"',
+                    "grep -rn cirro_agent.worker python/src",
+                    'rg "python3 -m cirro_agent.mcp_server" .',
+                    f"cat > {note} <<'EOF'\npython3 -m cirro_agent.worker < r.json\nEOF",
+                    "python3 -m cirro_agent.cli read --help"):
+        assert run(bash(command, cwd=tmp_path)) == ALLOW, command
+
+
+# The server's launcher is the same act as `-m cirro_agent.mcp_server`, but it has no
+# suffix to be read by and starts the server as `"$PY" -m ...`, so it is known by the
+# manifest that declares it.
+LAUNCHER = GATE.parent / "mcp-server"
+
+
+def _plugin_tree(root: Path, name: str) -> Path:
+    """A plugin root whose manifest, under `name`, declares a copy of the launcher."""
+    manifest = json.loads((GATE.parents[1] / ".claude-plugin" / "plugin.json").read_text())
+    manifest["name"] = name
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps(manifest))
+    (root / "scripts").mkdir()
+    launcher = root / "scripts" / "mcp-server"
+    launcher.write_text(LAUNCHER.read_text())
+    return launcher
+
+
+@pytest.mark.parametrize("template", [
+    "{path}",
+    "bash {path}",
+    "sh -c '{path}'",
+    ". {path}",
+    "printf '%s\\n' '{{}}' | {path}",
+    "env CLAUDE_PROJECT_DIR=/tmp nohup {path}",
+])
+def test_running_the_server_launcher_is_denied(template):
+    decision, reason = decide(bash(template.format(path=LAUNCHER)))
+    assert decision == DENY
+    assert "launches the plugin's own MCP server" in reason
+
+
+def test_the_launcher_is_found_from_the_working_directory():
+    for command in ("./scripts/mcp-server", "scripts/mcp-server",
+                    "bash scripts/mcp-server"):
+        assert run(bash(command, cwd=GATE.parents[1])) == DENY, command
+
+
+def test_the_launcher_is_known_in_any_install_of_the_plugin(tmp_path):
+    installed = _plugin_tree(tmp_path / "cache" / "cirro" / "0.13.0", "cirro")
+    assert run(bash(str(installed))) == DENY
+
+
+def test_another_projects_launcher_is_not_this_one(tmp_path):
+    """Identity is the manifest, not the name: a launcher another plugin declares, or
+    one no manifest declares at all, is somebody else's program."""
+    other = _plugin_tree(tmp_path / "other", "not-cirro")
+    undeclared = tmp_path / "bare" / "scripts" / "mcp-server"
+    undeclared.parent.mkdir(parents=True)
+    undeclared.write_text(LAUNCHER.read_text())
+    for path in (other, undeclared):
+        assert run(bash(str(path))) == ALLOW, path
+
+
+def test_reading_the_launcher_is_not_running_it():
+    for command in (f"cat {LAUNCHER}", f"shellcheck {LAUNCHER}", f"git add {LAUNCHER}",
+                    f'git commit -m "fix {LAUNCHER}"'):
+        assert run(bash(command)) == ALLOW, command
+
+
+def test_the_plugins_other_launchers_still_run():
+    """`/cirro:setup` runs scripts/setup by path, and it imports the SDK to report its
+    version -- which is why the launcher is known by identity rather than by reading
+    every extensionless script."""
+    root = GATE.parents[1]
+    for command in (f"{root}/scripts/setup", f"{root}/bin/cirro-agent read --help"):
+        assert run(bash(command)) == ALLOW, command
+
+
 def test_running_a_shell_script_that_drives_the_cli_is_denied(tmp_path):
     path = _script(tmp_path, "run.sh", "#!/bin/sh\ncirro upload -p X -n Y\n")
     assert run(bash(f"bash {path}")) == DENY
@@ -700,6 +817,14 @@ def test_an_unidentifiable_session_is_gated(tmp_path):
     assert decide(bash(SDK_CALL), armed_env(tmp_path))[0] == DENY
     assert decide(sess(bash(SDK_CALL), ""), armed_env(tmp_path))[0] == DENY
     assert decide(sess(bash(SDK_CALL), "../escape"), armed_env(tmp_path))[0] == DENY
+
+
+def test_starting_the_worker_waits_for_arming_like_every_bypass_check(tmp_path):
+    command = "python3 -m cirro_agent.worker < request.json"
+    env = armed_env(tmp_path)
+    assert decide(sess(bash(command)), env)[0] == ALLOW
+    decide(sess({"tool_name": "mcp__cirro__plan", "tool_input": {}}), env)
+    assert decide(sess(bash(command)), env)[0] == DENY
 
 
 def test_a_skill_from_another_plugin_does_not_arm(tmp_path):

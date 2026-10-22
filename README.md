@@ -414,11 +414,13 @@ whole is not: the plan says so, and a failure part-way says how many rows were w
 ## Locking it down further
 
 The plugin already blocks the obvious ways around the gate: driving the Cirro SDK
-directly from a Python one-liner, running a script or shell script that drives it, using
-the standalone `cirro` CLI's upload or configure commands, or moving data with the AWS
-CLI. Be clear about the limit, though — that check reads commands, and the scripts they
-launch, as text. It makes accidental bypass impossible and deliberate bypass obvious. It
-is not a sandbox.
+directly from a Python one-liner, running a script or shell script that drives it,
+starting the plugin's own worker or MCP server by hand (`python -m cirro_agent.worker`,
+`scripts/mcp-server`) to apply a plan without the approval prompt, using the standalone
+`cirro` CLI's upload or configure commands, or moving data with the AWS CLI. Be clear
+about the limit, though — that check reads commands, and the scripts they launch, as
+text. It makes accidental bypass impossible and deliberate bypass obvious. It is not a
+sandbox.
 
 Editing files is never blocked and never prompts. Writing Python that uses the Cirro SDK
 is ordinary work; only running it is gated.

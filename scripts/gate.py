@@ -58,7 +58,8 @@ ARG_PREVIEW_CHARS = 160
 # What is imported is the rule, never the answer: the gate reaches its own verdict from
 # its own reading of the plan file and refuses on it, and the worker does the same again
 # when apply runs. Neither defers to the other having said yes.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python" / "src"))
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PLUGIN_ROOT / "python" / "src"))
 from cirro_agent.errors import NoSessionFolder  # noqa: E402
 from cirro_agent.plans import (DIGEST_MISMATCH, DIGEST_TAMPERED,  # noqa: E402
                                EXPIRED, NOT_PENDING, PLAN_ID_PATTERN,
@@ -177,6 +178,24 @@ SDK_MARKERS = re.compile(
 INTERPRETERS = re.compile(
     r"^(?:python[0-9.]*|ipython[0-9.]*|jupyter|uv|uvx|pipx|poetry|conda|hatch|pdm)$",
     re.I)
+
+# The plugin's own entry points. Each acts on whatever request arrives on stdin, `apply`
+# included, and takes the request's word for what was approved: the worker reads
+# `approved_summary` from it, and the server's `requiresUserInteraction` is honoured by
+# the host, not by a client on the other end of a pipe. Run by hand, either one executes
+# a plan with no prompt. They are refused by name because their files are not in the
+# working directory for `module_file` to read, and the server never names the SDK at
+# all. The plugin starts both with subprocess, never over Bash, so this costs it nothing.
+#
+# Matched on a whole argument, bare or joined to its flag, because every spelling runs
+# the module: `-m mod`, `-mmod`, `-Im mod`, `-X dev -m mod`, `-m runpy mod`,
+# `uv run --module=mod`. The lookahead admits a redirect glued to the name, which shlex
+# leaves in the same token: `-m mod<request.json`.
+ENTRY_POINT_ARGUMENT = re.compile(
+    r"(?:-[A-Za-z]*m|--module=)?(cirro_agent\.(?:worker(?:\.\w+)*|mcp_server))(?![\w.])")
+
+# Where a plugin declares itself, relative to its root.
+MANIFEST = Path(".claude-plugin") / "plugin.json"
 
 # What gets read when a command executes a file rather than inline code. The SDK is
 # named in the file, not in the command, so `python analyse.py` says nothing on its
@@ -550,6 +569,41 @@ def judge_script(target: str, cwd: str, depth: int) -> None:
               f"and delete.\n\n{USE_INSTEAD}")
 
 
+def server_launcher(target: str, cwd: str) -> bool:
+    """Is `target` the file this plugin's manifest starts its MCP server with?
+
+    The launcher is the entry-point refusal's blind spot: it has no suffix, so it is
+    never read as a script, and it starts the server as `"$PY" -m ...` with `PY` set by
+    a substitution the parser cannot follow. Judging extensionless scripts by content
+    is no way round that -- the plugin's own `scripts/setup` imports the SDK to report
+    its version. So it is known by identity, through the manifest above it: another
+    project's `scripts/mcp-server` is not this one, and this plugin installed under any
+    version directory, or checked out anywhere, still is.
+    """
+    path = Path(target).expanduser()
+    if not path.is_absolute():
+        path = Path(cwd or ".") / path
+    if not path.is_file():
+        return False
+    path = path.resolve()
+    root = next((p for p in path.parents if (p / MANIFEST).is_file()), None)
+    if root is None:
+        return False
+    try:
+        declared = json.loads((root / MANIFEST).read_text())
+    except (OSError, ValueError):
+        return False
+    servers = declared.get("mcpServers") if isinstance(declared, dict) else None
+    if not isinstance(servers, dict):
+        return False
+    if declared.get("name") != json.loads((PLUGIN_ROOT / MANIFEST).read_text())["name"]:
+        return False
+    commands = (str(server.get("command") or "") for server in servers.values()
+                if isinstance(server, dict))
+    return any(Path(command.replace("${CLAUDE_PLUGIN_ROOT}", str(root))).resolve() == path
+               for command in commands if command)
+
+
 def takes_program_from_stdin(words: list, cwd: str) -> bool:
     """An interpreter handed no program of its own reads one from stdin."""
     index = program_index(words)
@@ -618,6 +672,32 @@ def inspect_bash(command: str, cwd: str = "", depth: int = 0) -> None:
             continue
         # `.` has no path name of its own, and it is a program: `. ./run.sh`.
         program = Path(words[index]).name or words[index]
+
+        if INTERPRETERS.match(program):
+            for argument in words[index + 1:]:
+                entry_point = ENTRY_POINT_ARGUMENT.match(argument)
+                if entry_point:
+                    block(
+                        f"Blocked by the Cirro plugin: `{entry_point.group(1)}` is the "
+                        "plugin's own worker or MCP server. Run by hand, it executes "
+                        "whatever request it is given -- an apply included -- with no "
+                        "approval prompt.\n\n"
+                        f"{USE_INSTEAD}")
+
+        # The program when it is named by path, and the file a shell or `source` is
+        # handed: `scripts/mcp-server`, `bash scripts/mcp-server` and
+        # `. scripts/mcp-server` all start the server.
+        launched = [words[index]] if "/" in words[index] else []
+        if SHELLS.match(program) or program in SOURCING:
+            launched += [a for a in words[index + 1:] if not a.startswith("-")][:1]
+        for path in launched:
+            if server_launcher(path, cwd):
+                block(
+                    f"Blocked by the Cirro plugin: `{path}` launches the plugin's own MCP "
+                    "server. Its approval prompt is shown by Claude Code's connection to "
+                    "it; run by hand, it executes whatever tool call it is given -- an "
+                    "apply included -- with no prompt at all.\n\n"
+                    f"{USE_INSTEAD}")
 
         target = executed_script(words, index, program, cwd)
         if target:
