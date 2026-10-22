@@ -13,6 +13,8 @@ import textwrap
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from cirro_agent.worker import portal
 
 SRC = str(Path(__file__).resolve().parents[1] / "src")
@@ -174,3 +176,13 @@ def test_an_exception_with_no_message_does_not_render_a_dangling_colon():
 
     assert portal.wrap_upstream(Silent(), what="w").message == "Silent"
     assert portal.wrap_upstream(Silent("it said"), what="w").message == "Silent: it said"
+
+
+def test_a_planted_lock_link_is_refused_rather_than_truncated(session_dir, tmp_path):
+    """Opening the lock with "w" truncated whatever a link at its name pointed to."""
+    target = tmp_path / "victim.txt"
+    target.write_text("keep")
+    (session_dir.path / portal.LOCK_NAME).symlink_to(target)
+    with pytest.raises(OSError):
+        portal.renew_under_lock(FakeAuth(expires_in=timedelta(seconds=-1)))
+    assert target.read_text() == "keep"

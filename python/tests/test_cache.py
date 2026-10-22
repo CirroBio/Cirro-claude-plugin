@@ -119,3 +119,16 @@ def test_a_corrupt_snapshot_is_treated_as_a_miss(store):
     path = next(store.root.glob("*.json"))
     path.write_text("{not json")
     assert store.get("datasets", project="proj_a") is None
+
+
+def test_a_snapshot_is_private_and_never_written_through_a_link(store, tmp_path):
+    """Snapshots hold dataset, sample and user names; they were readable by every
+    local user, and a link at the temporary name was written through."""
+    target = tmp_path / "victim.txt"
+    target.write_text("keep")
+    path = store._path(store.key("projects"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.with_suffix(path.suffix + ".tmp").symlink_to(target)
+    store.put("projects", [{"id": "p"}])
+    assert target.read_text() == "keep"
+    assert path.stat().st_mode & 0o777 == 0o600

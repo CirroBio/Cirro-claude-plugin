@@ -74,6 +74,14 @@ directory you are working in has nothing bound nearer, Claude will not pick betw
 them — it names both and asks. You can always say which to use, without moving:
 `cirro-agent read ... --dir <path>` does the same on the command line.
 
+A `.cirro/` that is tracked by git is refused: it arrived with the repository rather
+than from a sign-in on your machine, and the nearest folder decides which host every
+request goes to. If it is yours, untrack it with `git rm -r --cached .cirro` — its own
+`.gitignore` keeps it out after that. A folder naming anything but a plain hostname is
+refused too. And a Cirro credential in your environment (`CIRRO_ACCESS_TOKEN`, or
+`CIRRO_CLIENT_ID` with `CIRRO_CLIENT_SECRET`) is used only when `CIRRO_BASE_URL` says
+which host it is for.
+
 #### Seeing and removing what is signed in
 
 ```bash
@@ -417,10 +425,13 @@ The plugin already blocks the obvious ways around the gate: driving the Cirro SD
 directly from a Python one-liner, running a script or shell script that drives it,
 starting the plugin's own worker or MCP server by hand (`python -m cirro_agent.worker`,
 `scripts/mcp-server`) to apply a plan without the approval prompt, using the standalone
-`cirro` CLI's upload or configure commands, or moving data with the AWS CLI. Be clear
-about the limit, though — that check reads commands, and the scripts they launch, as
-text. It makes accidental bypass impossible and deliberate bypass obvious. It is not a
-sandbox.
+`cirro` CLI's upload or configure commands, or writing to Cirro storage with the AWS CLI
+or `s5cmd`. It finds the interpreter wherever a command puts it — behind `env`,
+`timeout` or `sudo` options, inside a `for` loop or a subshell, in a `bash -lc` string,
+after a `cd` — and it refuses a command that hands a `.cirro/` folder or the credential
+files in one to anything that reads them. Be clear about the limit, though — that check
+reads commands, and the scripts they launch, as text. It makes accidental bypass
+impossible and deliberate bypass obvious. It is not a sandbox.
 
 Editing files is never blocked and never prompts. Writing Python that uses the Cirro SDK
 is ordinary work; only running it is gated.

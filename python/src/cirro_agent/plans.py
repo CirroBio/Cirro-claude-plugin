@@ -32,7 +32,8 @@ from .session import Session, write_private
 TTL_SECONDS = 3600
 
 # A plan id becomes a filesystem path, so it is validated before it is interpolated.
-PLAN_ID_PATTERN = re.compile(r"^plan_\d{10,}_[0-9a-f]{8}$")
+# `\Z`, not `$`: `$` also matches before a trailing newline, and the id becomes a path.
+PLAN_ID_PATTERN = re.compile(r"^plan_\d{10,}_[0-9a-f]{8}\Z")
 
 # Everything the human's approval depends on. `status` is excluded because claim()
 # advances it; everything else must be immutable once the plan is written.

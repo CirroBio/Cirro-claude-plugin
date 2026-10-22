@@ -85,7 +85,7 @@ from cirro_agent.session import find_session_dir  # noqa: E402
 # marketplace copies that tree verbatim into every install.
 ARMED_DIR = "armed-sessions"
 ARMED_TTL_S = 14 * 24 * 3600
-SESSION_ID = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+SESSION_ID = re.compile(r"^[A-Za-z0-9_.-]{1,128}\Z")
 
 # Set from the marker in main(); the recursive helpers read it rather than threading a
 # parameter through every call site.
@@ -114,9 +114,13 @@ def session_is_armed(session_id: str) -> bool:
 
 
 def arm_session(session_id: str) -> None:
-    """Record that this session has used the plugin. Never fails the gate."""
+    """Record that this session has used the plugin. Never fails the gate.
+
+    Touched on every use, not only the first: markers are pruned by age, so one written
+    once and never refreshed disarmed a session that was still running a fortnight on.
+    """
     path = _marker(session_id)
-    if path is None or path.exists():
+    if path is None:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -149,7 +153,8 @@ def arms_the_session(tool: str, tool_input: dict) -> bool:
     if tool == "Skill" and "cirro" in str(tool_input.get("skill") or ""):
         return True
     if tool == "Bash":
-        return bool(re.search(r"(?:^|[^\w./-])cirro-agent\b",
+        # By path too: `~/.claude/plugins/.../bin/cirro-agent read x` is a use.
+        return bool(re.search(r"(?:^|[^\w.-])cirro-agent\b",
                               tool_input.get("command") or ""))
     return False
 
@@ -173,11 +178,26 @@ SDK_MARKERS = re.compile(
     r"(?:^|[^\w.])(?:import\s+cirro|from\s+cirro\b|cirro\.sdk|cirro_api_client"
     r"|DataPortal|DataPortalLogin|CirroApi"
     # `python -m cirro.cli upload` reaches the upstream CLI without naming an import.
-    r"|-m\s+cirro(?:[.\s]|$)|\bcirro\.cli\b)", re.I)
+    r"|-m\s+cirro(?:[.\s]|$)|\bcirro\.cli\b"
+    # The plugin's own entry points, reached from inline code rather than `-m`:
+    # `from cirro_agent.worker.gated import do_apply` names no SDK at all.
+    r"|cirro_agent(?:\.|\s+import\s+)(?:worker|mcp_server)\b)", re.I)
 
 INTERPRETERS = re.compile(
-    r"^(?:python[0-9.]*|ipython[0-9.]*|jupyter|uv|uvx|pipx|poetry|conda|hatch|pdm)$",
-    re.I)
+    r"^(?:python[0-9.]*|ipython[0-9.]*|pypy[0-9.]*|jupyter|uv|uvx|pipx|poetry|conda"
+    r"|mamba|micromamba|pixi|rye|hatch|pdm)$", re.I)
+
+# The interpreters that read a program from stdin when given none. The package runners
+# above do not, so `uv sync` beside a commit message naming the SDK is not a program
+# arriving by pipe.
+STDIN_INTERPRETERS = re.compile(r"^(?:python[0-9.]*|ipython[0-9.]*|pypy[0-9.]*)$", re.I)
+
+# Options whose next word is their value, not the script: `python3 -W ignore x.py`,
+# `uv run --with pandas x.py`. Read as the script, the value ended the search there.
+OPTIONS_WITH_VALUE = {"-W", "-X", "--with", "--with-requirements", "--python", "-p",
+                      "--env-file", "--project", "--directory", "--extra", "--group",
+                      "--index-url", "--from", "--package", "--spec", "-n", "--name",
+                      "-e", "--env"}
 
 # The plugin's own entry points. Each acts on whatever request arrives on stdin, `apply`
 # included, and takes the request's word for what was approved: the worker reads
@@ -214,19 +234,22 @@ USE_INSTEAD = ("Use instead:\n"
 # A shell re-enters the parser: its -c payload is a command in its own right, and
 # without this `bash -c "python -c 'import cirro'"` sails past every other check.
 SHELLS = re.compile(r"^(?:sh|bash|zsh|dash|ksh|fish)$", re.I)
+# `-c` alone, or inside a cluster: `bash -lc '...'` is how a model most often runs a
+# login shell, and only a bare `-c` used to be read as handing over a command.
+SHELL_COMMAND_OPTION = re.compile(r"^-[A-Za-z]*c[A-Za-z]*$")
 
-# Wrappers that take their own argument before the real program. Skipping only the
-# wrapper name left `program` pointing at the argument, so `timeout 5 python ...`
-# resolved to "5" and matched nothing.
-# The value encodes what to skip after the wrapper before the real program name:
-# 0 = nothing, 1 = one option flag, 2 = one option flag and its value. The scan
-# runs once per wrapper, so `timeout -k 5 10 python` skips `-k 5` and `10` is
-# then read as the argument the wrapper always takes.
-WRAPPERS_WITH_ARG = {"timeout": 1, "nice": 2, "env": 0, "sudo": 0, "stdbuf": 1,
-                     "ionice": 2, "setsid": 0, "nohup": 0, "time": 0}
+# Words that run the program named after them, and the options of theirs that take a
+# value. Each option is skipped rather than counted, so `timeout -s KILL 5 python`,
+# `sudo -u root python` and `env -i python` all reach the program; `timeout` alone
+# also takes a duration before it.
+WRAPPERS = {"timeout", "nice", "env", "sudo", "stdbuf", "ionice", "setsid", "nohup",
+            "time", "command", "builtin", "exec", "xargs"}
+WRAPPER_OPTIONS_WITH_VALUE = {"-u", "-g", "-s", "-k", "-n", "-c", "-C", "-I", "-S",
+                              "-o", "--signal", "--kill-after", "--user", "--chdir"}
 
-# Wrappers that hand straight through to the program named after them.
-BARE_WRAPPERS = ("command", "builtin", "exec", "xargs")
+# Shell syntax that runs the command after it rather than being one:
+# `for f in x; do python3 "$f"; done` put `do` where the program name was looked for.
+SHELL_KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "!"}
 
 # Sourcing runs the file in the current shell, so the argument is the executed code.
 SOURCING = (".", "source")
@@ -241,12 +264,33 @@ TOKEN_SNOOPING = re.compile(
     # Any spelling of the machine-wide credential directory.
     r"|(?:~|\$HOME|\$\{HOME\}|/(?:home|Users)/[^/\s]+)/\.cirro\b)", re.I)
 
+# A session folder handed over whole, or the files in it that hold a credential:
+# `.cirro`, `.cirro/`, `.cirro/*`, `.cirro/*.dat`, under any directory -- the tenant
+# folder every unbound directory falls back to included. A named file that is not a
+# credential (`.cirro/session.json`, `.cirro/runs/...`) is not matched.
+SESSION_FOLDER_ARGUMENT = re.compile(
+    r"(?:^|/)\.cirro/?(?:\*[^/]*)?$|(?:^|/)\.cirro/[^/]*(?:\*|token|\.dat)[^/]*$", re.I)
+# Programs that name a session folder without reading what is in it. `rm` stays
+# allowed because deleting a session folder is the documented safe reset, and `git`
+# because untracking one is the fix for a folder that was committed.
+FOLDER_HANDLERS = {"ls", "rm", "rmdir", "cd", "pushd", "du", "stat", "mkdir", "test",
+                   "[", "git", "touch"}
+
 # The upstream CLI performs uploads and logins with no plan and no approval.
 UPSTREAM_CLI = re.compile(r"^(?:cirro|cirro-cli)$")
 UPSTREAM_CLI_READ_ONLY = {"list-projects", "list-datasets", "list-files", "--help",
                           "--version"}
 
 AWS_DATA_MOVERS = {"cp", "sync", "mv", "rm", "rb"}
+S5CMD_DATA_MOVERS = {"cp", "sync", "mv", "rm", "pipe"}
+# `aws s3api` verbs that write or delete.
+S3API_WRITES = re.compile(r"^(?:put|delete|copy|upload|complete|restore)-")
+# Cirro storage, named or by its bucket shape. Project buckets are `project-<uuid>`,
+# which is how the plugin's own reads show them, so a path the model was handed never
+# needed to say "cirro" for the check to have to catch it.
+CIRRO_STORAGE = re.compile(
+    r"cirro|s3://project-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.I)
 
 SPLITTERS = re.compile(r"(?:\|\||&&|[;|&\n])")
 
@@ -419,9 +463,25 @@ def segments(command: str) -> list:
 
 def tokens_of(segment: str) -> list:
     try:
-        return shlex.split(segment)
+        words = shlex.split(segment)
     except ValueError:
-        return segment.split()
+        words = segment.split()
+    return [w for w in (_ungrouped(word) for word in words) if w]
+
+
+def _ungrouped(word: str) -> str:
+    """A word without the grouping a subshell or brace group glued to it.
+
+    `(python3 drive.py)` split into `(python3` and `drive.py)`, so neither the program
+    nor the script was recognised. `{}` is kept: it is find's and xargs' placeholder.
+    """
+    if word in ("(", ")", "{", "}"):
+        return ""
+    if word[:1] in "({" and word[1:2] not in ("}", ")"):
+        word = word.lstrip("({")
+    if word[-1:] in ")}" and not any(c in word for c in "({"):
+        word = word.rstrip(")}")
+    return word
 
 
 def assignments(command: str) -> dict:
@@ -445,32 +505,44 @@ def expand(words: list, values: dict) -> list:
 
 
 def program_index(words: list) -> int:
-    """Where the real program name starts, past env assignments and wrappers.
+    """Where the real program name starts, past env assignments, shell keywords and
+    wrappers with their options.
 
-    So `env FOO=1 python -c ...` and `timeout 5 python ...` are both seen. Skipping
-    only the wrapper name left it pointing at the wrapper's own argument, so
-    `timeout 5 python ...` resolved to "5" and matched nothing.
+    So `env FOO=1 python -c ...`, `timeout -s KILL 5 python ...` and
+    `for f in x; do python ...` are all seen. This finds the program a segment starts
+    with; an interpreter further along -- behind a wrapper this does not know -- is
+    found by `code_runners` instead.
     """
     index = 0
     while index < len(words):
         token = words[index]
         name = Path(token).name
-        if "=" in token and not token.startswith("-"):
+        if token in SHELL_KEYWORDS or ("=" in token and not token.startswith("-")):
             index += 1
             continue
-        if name in WRAPPERS_WITH_ARG or name in BARE_WRAPPERS:
+        if name in WRAPPERS:
             index += 1
-            # Consume the wrapper's own options and their values.
-            budget = WRAPPERS_WITH_ARG.get(name, 0)
-            while index < len(words) and budget and words[index].startswith("-"):
-                index += 2 if budget > 1 else 1
-                budget = 0
+            while index < len(words) and words[index].startswith("-"):
+                index += 2 if words[index] in WRAPPER_OPTIONS_WITH_VALUE else 1
             if name == "timeout" and index < len(words) and \
                     re.fullmatch(r"[\d.]+[smhd]?", words[index] or ""):
                 index += 1
             continue
         break
     return index
+
+
+def code_runners(words: list, index: int) -> list:
+    """Every position in a segment that starts an interpreter or a shell: the program,
+    and any further along. A wrapper this file does not model -- `arch -arm64`,
+    `find -exec`, `micromamba run -n env` -- puts the interpreter where the program
+    name is not, and judging only the first program let all of them through."""
+    found = [index]
+    for offset, word in enumerate(words):
+        name = Path(word).name
+        if offset != index and (INTERPRETERS.match(name) or SHELLS.match(name)):
+            found.append(offset)
+    return found
 
 
 def module_file(arguments: list, cwd: str) -> str | None:
@@ -519,13 +591,20 @@ def executed_script(words: list, index: int, program: str, cwd: str = "") -> str
     # nothing on the command line already did.
     cut = next((i for i, a in enumerate(arguments) if a.startswith("<")),
                len(arguments))
+    value_next = False
     for offset, argument in enumerate(arguments[:cut]):
+        if value_next:
+            value_next = False
+            continue
         # An inline program: any path after it is that program's own argv, which is
         # why `python -m pytest test_x.py` runs pytest, not test_x.
         if argument == "-c":
             return None
         if argument == "-m":
             return module_file(arguments[offset + 1:cut], cwd)
+        if argument in OPTIONS_WITH_VALUE:
+            value_next = True
+            continue
         if argument.startswith("-"):
             continue
         name = Path(argument).name
@@ -536,10 +615,22 @@ def executed_script(words: list, index: int, program: str, cwd: str = "") -> str
     return redirected_file(arguments[cut:])
 
 
+def local_path(target: str, cwd: str) -> Path:
+    """`target` as the shell would find it: `~`, `$HOME` and `$PWD` expanded, and a
+    relative path taken from `cwd`. Unexpanded, `python3 ~/drive.py` named no file."""
+    home = str(Path.home())
+    for prefix in ("$HOME", "${HOME}"):
+        if target == prefix or target.startswith(prefix + "/"):
+            target = home + target[len(prefix):]
+    for prefix in ("$PWD", "${PWD}"):
+        if target == prefix or target.startswith(prefix + "/"):
+            target = (cwd or ".") + target[len(prefix):]
+    path = Path(target).expanduser()
+    return path if path.is_absolute() else Path(cwd or ".") / path
+
+
 def read_script(target: str, cwd: str) -> str | None:
-    path = Path(target)
-    if not path.is_absolute():
-        path = Path(cwd or ".") / path
+    path = local_path(target, cwd)
     try:
         with open(path, "rb") as handle:
             return handle.read(SCRIPT_READ_LIMIT).decode("utf-8", "replace")
@@ -567,6 +658,10 @@ def judge_script(target: str, cwd: str, depth: int) -> None:
         block(f"Blocked by the Cirro plugin: `{target}` drives the Cirro SDK, so "
               "running it would bypass the approval gate on every create, update "
               f"and delete.\n\n{USE_INSTEAD}")
+    elif TOKEN_SNOOPING.search(body):
+        block(f"Blocked by the Cirro plugin: `{target}` reads Cirro credential storage "
+              "or the machine-wide ~/.cirro. A script is held to the same rule as a "
+              "command.\n")
 
 
 def server_launcher(target: str, cwd: str) -> bool:
@@ -580,9 +675,7 @@ def server_launcher(target: str, cwd: str) -> bool:
     project's `scripts/mcp-server` is not this one, and this plugin installed under any
     version directory, or checked out anywhere, still is.
     """
-    path = Path(target).expanduser()
-    if not path.is_absolute():
-        path = Path(cwd or ".") / path
+    path = local_path(target, cwd)
     if not path.is_file():
         return False
     path = path.resolve()
@@ -604,15 +697,32 @@ def server_launcher(target: str, cwd: str) -> bool:
                for command in commands if command)
 
 
+LAUNCHER_REFUSAL = (
+    "Blocked by the Cirro plugin: `{path}` launches the plugin's own MCP server. Its "
+    "approval prompt is shown by Claude Code's connection to it; run by hand, it "
+    "executes whatever tool call it is given -- an apply included -- with no prompt "
+    "at all.\n\n" + USE_INSTEAD)
+
+
+def reads_stdin(words: list, index: int, program: str, cwd: str) -> bool:
+    """Does the interpreter or shell at `index` take its program from stdin?"""
+    arguments = words[index + 1:]
+    if SHELLS.match(program):
+        if any(SHELL_COMMAND_OPTION.match(a) for a in arguments):
+            return False
+    elif not STDIN_INTERPRETERS.match(program) or any(
+            a in ("-c", "-m", "-V", "-VV", "--version", "-h", "--help")
+            for a in arguments):
+        return False
+    return executed_script(words, index, program, cwd) is None
+
+
 def takes_program_from_stdin(words: list, cwd: str) -> bool:
-    """An interpreter handed no program of its own reads one from stdin."""
+    """An interpreter or shell handed no program of its own reads one from stdin."""
     index = program_index(words)
     if index >= len(words):
         return False
-    program = Path(words[index]).name
-    return (bool(INTERPRETERS.match(program))
-            and not any(a in ("-c", "-m") for a in words[index + 1:])
-            and executed_script(words, index, program, cwd) is None)
+    return reads_stdin(words, index, Path(words[index]).name, cwd)
 
 
 def piped_scripts(command: str, values: dict, cwd: str) -> list:
@@ -621,7 +731,7 @@ def piped_scripts(command: str, values: dict, cwd: str) -> list:
     `cat drive.py | python3` and `echo drive.py | xargs python3` leave the
     interpreter's own stage with no script argument at all, so the segment loop finds
     nothing to read -- while the file named in another stage of the same pipeline is
-    the code that is about to run.
+    the code that is about to run. A shell reading stdin counts too: `cat run.sh | bash`.
     """
     fed = []
     for pipeline in split_unquoted(CONTINUATION.sub(" ", command), PIPELINES):
@@ -631,26 +741,60 @@ def piped_scripts(command: str, values: dict, cwd: str) -> list:
             continue
         for words in stages:
             if not takes_program_from_stdin(words, cwd):
-                fed += [w for w in words if w.endswith(SCRIPT_SUFFIXES)]
+                fed += [w for w in words
+                        if w.endswith(SCRIPT_SUFFIXES) or server_launcher(w, cwd)]
     return fed
 
 
-def inspect_bash(command: str, cwd: str = "", depth: int = 0) -> None:
-    # A heredoc puts the payload on later lines, which segment splitting separates
-    # from the interpreter that consumes it. So an interpreter anywhere in a command
-    # that mentions the SDK anywhere is treated as driving it.
-    whole_mentions_sdk = bool(SDK_MARKERS.search(command))
+def reads_session_folder(command: str) -> bool:
+    """Does a command hand a session folder, or a credential file in one, to a program
+    that reads it? `TOKEN_SNOOPING` knew only the literal token file name and the
+    machine-wide folder, so `cat .cirro/*` and `tar czf x.tgz .cirro` read the rest."""
+    for segment in segments(strip_heredocs(command)[0]):
+        words = tokens_of(segment)
+        index = program_index(words)
+        if index >= len(words) or Path(words[index]).name in FOLDER_HANDLERS:
+            continue
+        if any(SESSION_FOLDER_ARGUMENT.search(word) for word in words[index:]):
+            return True
+    return False
 
+
+def moved_to(here: str, arguments: list) -> str:
+    """Where `cd` or `pushd` leaves the shell. Without following it, `cd sub && python3
+    only.py` read `only.py` from the wrong directory, found nothing and allowed it."""
+    target = next((a for a in arguments if not a.startswith("-")), "~")
+    return str(local_path(target, here))
+
+
+def runs_unseen_code(words: list, index: int, program: str, places: list) -> bool:
+    """Code the gate cannot read before it runs: a program arriving on stdin, or a
+    script that is not there yet -- written by this same command, a moment earlier."""
+    if reads_stdin(words, index, program, places[0]):
+        return True
+    target = executed_script(words, index, program, places[0])
+    return bool(target) and all(read_script(target, place) is None for place in places)
+
+
+def inspect_bash(command: str, cwd: str = "", depth: int = 0) -> None:
     # Unconditional: this one guards secrets rather than the approval gate, and a
     # command that reads token storage is never incidental to ordinary development.
-    # Searched over the raw text, heredoc bodies included, like the SDK markers above.
-    if TOKEN_SNOOPING.search(command):
-        block("Blocked by the Cirro plugin: this command reads Cirro credential storage "
-              "or the machine-wide ~/.cirro. The plugin keeps credentials in a "
-              "folder-local session and never exposes token material to the model.\n")
+    # Searched over the raw text, heredoc bodies included.
+    if TOKEN_SNOOPING.search(command) or reads_session_folder(command):
+        block("Blocked by the Cirro plugin: this command reads Cirro credential storage, "
+              "a session folder, or the machine-wide ~/.cirro. The plugin keeps "
+              "credentials in a folder-local session and never exposes token material "
+              "to the model.\n")
 
     if not _ARMED:
         return
+
+    # A heredoc puts its payload on later lines, which segment splitting separates from
+    # the interpreter that consumes it -- so the SDK named anywhere counts against an
+    # interpreter whose code the gate cannot otherwise read. Only that one: applied to
+    # every interpreter it blocked `python3 -m pytest` beside a commit message naming
+    # the SDK, which is the kind of friction that gets a gate turned off.
+    whole_mentions_sdk = bool(SDK_MARKERS.search(command))
 
     # A body handed to a shell is a command payload like a `-c` argument, so it
     # re-enters the parser. A body written to a file is not, and is left alone.
@@ -661,8 +805,11 @@ def inspect_bash(command: str, cwd: str = "", depth: int = 0) -> None:
 
     values = assignments(command)
     for target in piped_scripts(command, values, cwd):
+        if server_launcher(target, cwd):
+            block(LAUNCHER_REFUSAL.format(path=target))
         judge_script(target, cwd, depth)
 
+    here = cwd
     for segment in segments(command):
         words = expand(tokens_of(segment), values)
         if not words:
@@ -670,93 +817,119 @@ def inspect_bash(command: str, cwd: str = "", depth: int = 0) -> None:
         index = program_index(words)
         if index >= len(words):
             continue
-        # `.` has no path name of its own, and it is a program: `. ./run.sh`.
-        program = Path(words[index]).name or words[index]
-
-        if INTERPRETERS.match(program):
-            for argument in words[index + 1:]:
-                entry_point = ENTRY_POINT_ARGUMENT.match(argument)
-                if entry_point:
-                    block(
-                        f"Blocked by the Cirro plugin: `{entry_point.group(1)}` is the "
-                        "plugin's own worker or MCP server. Run by hand, it executes "
-                        "whatever request it is given -- an apply included -- with no "
-                        "approval prompt.\n\n"
-                        f"{USE_INSTEAD}")
-
-        # The program when it is named by path, and the file a shell or `source` is
-        # handed: `scripts/mcp-server`, `bash scripts/mcp-server` and
-        # `. scripts/mcp-server` all start the server.
-        launched = [words[index]] if "/" in words[index] else []
-        if SHELLS.match(program) or program in SOURCING:
-            launched += [a for a in words[index + 1:] if not a.startswith("-")][:1]
-        for path in launched:
-            if server_launcher(path, cwd):
-                block(
-                    f"Blocked by the Cirro plugin: `{path}` launches the plugin's own MCP "
-                    "server. Its approval prompt is shown by Claude Code's connection to "
-                    "it; run by hand, it executes whatever tool call it is given -- an "
-                    "apply included -- with no prompt at all.\n\n"
-                    f"{USE_INSTEAD}")
-
-        target = executed_script(words, index, program, cwd)
-        if target:
-            judge_script(target, cwd, depth)
-
-        # A shell's -c payload is itself a command; re-enter the parser on it.
-        if SHELLS.match(program):
-            for offset, token in enumerate(words[index + 1:], start=index + 1):
-                if token == "-c" and offset + 1 < len(words) and depth < MAX_NESTING:
-                    inspect_bash(words[offset + 1], cwd, depth + 1)
+        if Path(words[index]).name in ("cd", "pushd"):
+            here = moved_to(here, words[index + 1:])
             continue
+        # A `cd` inside a subshell does not outlast it, and the parser cannot tell
+        # which one this was -- so a script is looked for in both places.
+        places = [here] if here == cwd else [here, cwd]
+        for start in code_runners(words, index):
+            judge_program(words, start, segment, command, places, depth,
+                          whole_mentions_sdk)
 
-        if program in PACKAGE_RUNNERS:
-            args = words[index + 1:]
-            executing = (program == "uvx"
-                         or any(a in EXECUTING_SUBCOMMANDS for a in args[:2]))
-            if executing and any(
-                    re.fullmatch(r"cirro(\[[^\]]*\])?(?:[=<>!~@].*)?", a) for a in args):
+
+def judge_program(words: list, index: int, segment: str, command: str, places: list,
+                  depth: int, whole_mentions_sdk: bool) -> None:
+    """Refuse what the program at `index` would do, if it bypasses the gate."""
+    # `.` has no path name of its own, and it is a program: `. ./run.sh`.
+    program = Path(words[index]).name or words[index]
+
+    if INTERPRETERS.match(program):
+        for argument in words[index + 1:]:
+            entry_point = ENTRY_POINT_ARGUMENT.match(argument)
+            if entry_point:
                 block(
-                    f"Blocked by the Cirro plugin: `{program}` is being used to fetch and "
-                    "run the cirro package directly, which bypasses the approval gate on "
-                    "every create, update and delete.\n\n"
+                    f"Blocked by the Cirro plugin: `{entry_point.group(1)}` is the "
+                    "plugin's own worker or MCP server. Run by hand, it executes "
+                    "whatever request it is given -- an apply included -- with no "
+                    "approval prompt.\n\n"
                     f"{USE_INSTEAD}")
 
-        if INTERPRETERS.match(program) and (SDK_MARKERS.search(segment)
-                                            or whole_mentions_sdk):
+    # The program when it is named by path, and the file a shell or `source` is
+    # handed: `scripts/mcp-server`, `bash scripts/mcp-server` and
+    # `. scripts/mcp-server` all start the server.
+    launched = [words[index]] if "/" in words[index] else []
+    if SHELLS.match(program) or program in SOURCING:
+        launched += [a for a in words[index + 1:] if not a.startswith("-")][:1]
+    for path in launched:
+        if any(server_launcher(path, place) for place in places):
+            block(LAUNCHER_REFUSAL.format(path=path))
+
+    for place in places:
+        target = executed_script(words, index, program, place)
+        if target:
+            judge_script(target, place, depth)
+
+    # A shell's -c payload is itself a command; re-enter the parser on it.
+    if SHELLS.match(program):
+        for offset, token in enumerate(words[index + 1:], start=index + 1):
+            if SHELL_COMMAND_OPTION.match(token) and offset + 1 < len(words) \
+                    and depth < MAX_NESTING:
+                inspect_bash(words[offset + 1], places[0], depth + 1)
+        return
+
+    if program in PACKAGE_RUNNERS:
+        args = words[index + 1:]
+        executing = (program == "uvx"
+                     or any(a in EXECUTING_SUBCOMMANDS for a in args[:2]))
+        if executing and any(
+                re.fullmatch(r"cirro(\[[^\]]*\])?(?:[=<>!~@].*)?", a) for a in args):
             block(
-                f"Blocked by the Cirro plugin: `{program}` is being used to drive the "
-                "Cirro SDK directly, which bypasses the approval gate on every create, "
-                "update and delete.\n\n"
+                f"Blocked by the Cirro plugin: `{program}` is being used to fetch and "
+                "run the cirro package directly, which bypasses the approval gate on "
+                "every create, update and delete.\n\n"
                 f"{USE_INSTEAD}")
 
-        if UPSTREAM_CLI.match(program):
-            first = next((w for w in words[index + 1:] if not w.startswith("-")), "")
-            if first not in UPSTREAM_CLI_READ_ONLY:
-                block(
-                    "Blocked by the Cirro plugin: the upstream `cirro` CLI performs "
-                    f"uploads, logins and downloads ({first or 'interactive mode'}) with "
-                    "no plan and no approval, and writes credentials to the global "
-                    "~/.cirro.\n\n"
-                    f"{USE_INSTEAD}")
+    if INTERPRETERS.match(program) and (
+            SDK_MARKERS.search(segment)
+            or (whole_mentions_sdk and runs_unseen_code(words, index, program, places))):
+        block(
+            f"Blocked by the Cirro plugin: `{program}` is being used to drive the "
+            "Cirro SDK directly, which bypasses the approval gate on every create, "
+            "update and delete.\n\n"
+            f"{USE_INSTEAD}")
 
-        if program == "cirro-agent" and words[index + 1:]:
-            if words[index + 1] not in ("read", "-h", "--help"):
-                block(
-                    "Blocked by the Cirro plugin: `cirro-agent` only has a `read` "
-                    "subcommand. Mutations go through the plan and apply MCP tools.\n")
+    if UPSTREAM_CLI.match(program):
+        first = next((w for w in words[index + 1:] if not w.startswith("-")), "")
+        if first not in UPSTREAM_CLI_READ_ONLY:
+            block(
+                "Blocked by the Cirro plugin: the upstream `cirro` CLI performs "
+                f"uploads, logins and downloads ({first or 'interactive mode'}) with "
+                "no plan and no approval, and writes credentials to the global "
+                "~/.cirro.\n\n"
+                f"{USE_INSTEAD}")
 
-        if program == "aws":
-            s3_args = words[index + 1:]
-            if "s3" in s3_args:
-                after = s3_args[s3_args.index("s3") + 1:]
-                verb = next((w for w in after if not w.startswith("-")), "")
-                if verb in AWS_DATA_MOVERS and re.search(r"cirro", segment, re.I):
-                    block(
-                        "Blocked by the Cirro plugin: moving data in or out of Cirro "
-                        "storage with the AWS CLI bypasses the approval gate and Cirro's "
-                        "own dataset bookkeeping.\n\n"
-                        "Use the plan and apply MCP tools instead.\n")
+    if program == "cirro-agent" and words[index + 1:]:
+        if words[index + 1] not in ("read", "-h", "--help"):
+            block(
+                "Blocked by the Cirro plugin: `cirro-agent` only has a `read` "
+                "subcommand. Mutations go through the plan and apply MCP tools.\n")
+
+    if moves_storage(program, words[index + 1:]) and CIRRO_STORAGE.search(command):
+        block(
+            "Blocked by the Cirro plugin: moving data in or out of Cirro storage with "
+            "an S3 client bypasses the approval gate and Cirro's own dataset "
+            "bookkeeping.\n\n"
+            "Use the plan and apply MCP tools instead.\n")
+
+
+def _verb_after(arguments: list, service: str) -> str:
+    if service not in arguments:
+        return ""
+    after = arguments[arguments.index(service) + 1:]
+    return next((w for w in after if not w.startswith("-")), "")
+
+
+def moves_storage(program: str, arguments: list) -> bool:
+    """Is this an S3 client writing, copying or deleting? Which bucket it names is
+    checked against the whole command, so a path held in a variable still counts."""
+    if program == "aws":
+        return (_verb_after(arguments, "s3") in AWS_DATA_MOVERS
+                or bool(S3API_WRITES.match(_verb_after(arguments, "s3api"))))
+    if program == "s5cmd":
+        return next((w for w in arguments if not w.startswith("-")), "") \
+            in S5CMD_DATA_MOVERS
+    return False
 
 
 # --------------------------------------------------------------------------- apply
@@ -879,10 +1052,13 @@ def main() -> None:
     session_id = str(event.get("session_id") or "")
 
     # Arming is checked before it is set, so the call that first reaches the plugin is
-    # itself allowed through. It is a use of the plugin, not a bypass of it.
+    # itself allowed through. It is a use of the plugin, not a bypass of it -- except a
+    # Bash command, which can carry a bypass beside the use: `cirro-agent read x &&
+    # python3 drive.py` passed as the call that armed. So that one is judged armed.
     _ARMED = session_is_armed(session_id)
     if arms_the_session(tool, tool_input):
         arm_session(session_id)
+        _ARMED = _ARMED or tool == "Bash"
 
     if tool == "Bash":
         inspect_bash(tool_input.get("command") or "", event.get("cwd") or "")

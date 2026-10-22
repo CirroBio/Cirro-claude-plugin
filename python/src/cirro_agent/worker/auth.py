@@ -45,15 +45,30 @@ def _read(path: Path) -> Optional[dict]:
         return None
 
 
-def _child_alive() -> bool:
-    raw = _read(_home() / PID_FILE)
-    if not raw:
-        return False
+def _login_pid(raw: Optional[dict]) -> Optional[int]:
+    """The pid in a login.pid record, if it is this plugin's login daemon.
+
+    The record lives in the session folder, and a folder can arrive in a copied
+    directory: a planted {"pid": -1} made logout signal every process the user owns,
+    and 0 their whole process group. So the pid must be an ordinary one and its
+    process must be this plugin's worker before anything signals it.
+    """
     try:
-        os.kill(int(raw["pid"]), 0)
-        return True
-    except (OSError, ValueError, KeyError):
-        return False
+        pid = int((raw or {})["pid"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if pid <= 1:
+        return None
+    try:
+        command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                                 capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return pid if "cirro_agent.worker" in command else None
+
+
+def _child_alive() -> bool:
+    return _login_pid(_read(_home() / PID_FILE)) is not None
 
 
 def _verify(base_url: str) -> dict:
@@ -419,13 +434,13 @@ def _stop_login(home: Path) -> bool:
     success writes the token straight back -- so a logout during a login handed the
     credential back moments after the user asked to be rid of it.
     """
-    raw = _read(home / PID_FILE)
-    if not raw:
+    pid = _login_pid(_read(home / PID_FILE))
+    if pid is None:
         return False
     try:
-        os.kill(int(raw["pid"]), signal.SIGTERM)
+        os.kill(pid, signal.SIGTERM)
         return True
-    except (OSError, ValueError, KeyError):
+    except OSError:
         return False
 
 

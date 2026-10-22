@@ -115,7 +115,11 @@ def renew_under_lock(auth) -> None:
     """
     if auth._token_info is None or not _refresh_due(auth):
         return
-    with open(Path(os.environ["CIRRO_HOME"], LOCK_NAME), "w") as handle:
+    # Not "w": that truncates, and through a link planted at the lock's name it
+    # truncated whatever the link pointed at. O_NOFOLLOW refuses the link instead.
+    lock = os.open(Path(os.environ["CIRRO_HOME"], LOCK_NAME),
+                   os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(lock, "w") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         persisted = auth._load_token_info()
         if persisted:

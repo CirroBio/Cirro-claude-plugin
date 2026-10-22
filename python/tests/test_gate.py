@@ -74,6 +74,29 @@ BYPASS_ATTEMPTS = [
     "aws s3 sync . s3://cirro-project-data/x",
     "cirro-agent apply --plan p1",
     "cirro-agent plan run_analysis",
+    # The session folder, or the credential files in one, handed to a reader.
+    "cat .cirro/*",
+    "head -c 400 .cirro/*.dat",
+    "grep -r access_token .cirro/",
+    "tar czf creds.tgz .cirro",
+    "cp -r .cirro /tmp/backup",
+    "cat ~/.local/share/cirro-agent/tenants/app.cirro.bio/.cirro/*",
+    # Cirro storage by its bucket shape, which needs no "cirro" in the path; s3api's
+    # write verbs; a bucket held in a variable; and s5cmd.
+    "aws s3 rm --recursive s3://project-1a2b3c4d-0000-0000-0000-000000006666/datasets/x/",
+    "aws --profile p s3 sync ./out s3://project-1a2b3c4d-0000-0000-0000-000000006666/x/",
+    "aws s3api delete-object --bucket cirro-project-data --key x",
+    "B=s3://project-1a2b3c4d-0000-0000-0000-000000006666; aws s3 rm $B/x",
+    "s5cmd rm 's3://project-1a2b3c4d-0000-0000-0000-000000006666/x/*'",
+    # The plugin's own entry points from inline code, which names no SDK at all.
+    "python3 -c 'from cirro_agent.worker.gated import do_apply'",
+    "python3 -c \"import runpy; runpy.run_module('cirro_agent.worker')\"",
+    "pypy3 -c 'import cirro'",
+    # `bash -lc` is the commonest way a model runs a shell, and only a bare -c was read.
+    "bash -lc \"python3 -c 'import cirro'\"",
+    "sh -ec 'python3 -m cirro_agent.worker < request.json'",
+    "for i in 1; do python3 -m cirro_agent.worker < request.json; done",
+    "(python3 -m cirro_agent.worker < request.json)",
 ]
 
 ORDINARY_WORK = [
@@ -89,6 +112,16 @@ ORDINARY_WORK = [
     "cirro list-datasets -p X",
     "echo hello | wc -l",
     "make build && ./bin/run",
+    # The SDK named in a message, beside an interpreter whose code the gate can see:
+    # these used to be blocked, which is the friction that gets a gate turned off.
+    "git commit -m 'Wrap DataPortal login' && python3 -m pytest python/tests -q",
+    "git log --oneline --grep=CirroApi; python3 --version",
+    # Naming a session folder without reading it.
+    "ls .cirro && cat .cirro/session.json",
+    "rm -rf .cirro",
+    "git rm -r --cached .cirro",
+    "aws s3 cp ./a s3://my-own-bucket/a",
+    "for f in *.txt; do wc -l $f; done",
 ]
 
 
@@ -147,10 +180,58 @@ SDK_SCRIPT = "from cirro import DataPortal\nDataPortal().list_projects()\n"
     "echo {path} | xargs python3",
     # shlex expands no parameter, so the program name stayed the literal `$PY`.
     "PY=python3; $PY {path}",
+    # Control flow and grouping put a keyword or a parenthesis where the program was.
+    "for d in a b; do python3 {path}; done",
+    "if true; then python3 {path}; fi",
+    "(python3 {path})",
+    "{{ python3 {path}; }}",
+    "bash -lc 'python3 {path}'",
+    # Wrapper options, and wrappers the gate does not know at all.
+    "env -i python3 {path}",
+    "timeout -s KILL 5 python3 {path}",
+    "timeout -k 5 10 python3 {path}",
+    "sudo -u root python3 {path}",
+    "arch -arm64 python3 {path}",
+    "micromamba run -n cirro python {path}",
+    # An option's value read as the script ended the search there.
+    "uv run --with pandas {path}",
+    "python3 -W ignore::DeprecationWarning {path}",
 ])
 def test_running_a_script_that_drives_the_sdk_is_denied(tmp_path, template):
     path = _script(tmp_path, "analyse.py", SDK_SCRIPT)
     assert run(bash(template.format(path=path))) == DENY
+
+
+def test_a_cd_is_followed_to_the_script_it_reaches(tmp_path):
+    """Without it, `only.py` was looked for in the wrong directory, found missing, and
+    allowed -- while the shell ran the one under `sub`."""
+    (tmp_path / "sub").mkdir()
+    _script(tmp_path, "sub/only.py", SDK_SCRIPT)
+    assert run(bash("cd sub && python3 only.py", cwd=tmp_path)) == DENY
+    assert run(bash("(cd sub && python3 only.py)", cwd=tmp_path)) == DENY
+
+
+def test_home_and_pwd_are_expanded_in_a_script_path(tmp_path):
+    _script(tmp_path, "drive.py", SDK_SCRIPT)
+    assert run(bash("python3 $PWD/drive.py", cwd=tmp_path)) == DENY
+
+
+def test_a_shell_reading_stdin_is_handed_the_piped_script(tmp_path):
+    _script(tmp_path, "drive.py", SDK_SCRIPT)
+    _script(tmp_path, "run.sh", "python3 drive.py\n")
+    assert run(bash("cat run.sh | bash", cwd=tmp_path)) == DENY
+
+
+def test_a_script_that_reads_credentials_is_judged_like_the_command(tmp_path):
+    path = _script(tmp_path, "peek.py", "print(open('.cirro/abc.token.dat').read())\n")
+    assert run(bash(f"python3 {path}", cwd=tmp_path)) == DENY
+
+
+def test_writing_a_script_and_running_it_in_one_command_is_still_judged(tmp_path):
+    """The script is not there for the gate to read yet, so the SDK named anywhere in
+    the command counts against it -- the one interpreter whose code is unseen."""
+    command = "printf 'import cirro\\n' > made.py && python3 made.py"
+    assert run(bash(command, cwd=tmp_path)) == DENY
 
 
 def test_a_module_is_the_code_that_runs(tmp_path):
@@ -817,6 +898,29 @@ def test_an_unidentifiable_session_is_gated(tmp_path):
     assert decide(bash(SDK_CALL), armed_env(tmp_path))[0] == DENY
     assert decide(sess(bash(SDK_CALL), ""), armed_env(tmp_path))[0] == DENY
     assert decide(sess(bash(SDK_CALL), "../escape"), armed_env(tmp_path))[0] == DENY
+
+
+def test_the_command_that_arms_is_judged_armed(tmp_path):
+    """A Bash use of the plugin can carry a bypass beside it; judging the arming call
+    as unarmed let the pair through."""
+    command = f"cirro-agent read projects && {SDK_CALL}"
+    assert decide(sess(bash(command)), armed_env(tmp_path))[0] == DENY
+
+
+def test_cirro_agent_by_path_arms_the_session(tmp_path):
+    env = armed_env(tmp_path)
+    decide(sess(bash("~/.claude/plugins/cache/cirro/bin/cirro-agent read projects")), env)
+    assert decide(sess(bash(SDK_CALL)), env)[0] == DENY
+
+
+def test_each_use_refreshes_the_marker(tmp_path):
+    """Markers are pruned by age; one written once disarmed a long session."""
+    env = armed_env(tmp_path)
+    decide(sess(bash("cirro-agent read projects")), env)
+    marker = tmp_path / "data" / "armed-sessions" / "sess-a"
+    os.utime(marker, (0, 0))
+    decide(sess(bash("cirro-agent read projects")), env)
+    assert marker.stat().st_mtime > 0
 
 
 def test_starting_the_worker_waits_for_arming_like_every_bypass_check(tmp_path):

@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from .session import write_private
+
 CONTRACT_VERSION = "1"
 
 # TTL follows the entity's own lifecycle: terminal things cache long, active
@@ -124,12 +126,12 @@ class SnapshotCache:
         )
         self.root.mkdir(parents=True, exist_ok=True)
         path = self._path(self.key(kind, **scope))
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({
+        # Private, like the plan and audit files: a snapshot holds dataset, sample and
+        # user names, and was readable by every local user at the process umask.
+        write_private(path, json.dumps({
             "label": snapshot.label, "kind": kind, "created_at": snapshot.created_at,
             "meta": snapshot.meta, "items": items,
         }, default=str))
-        tmp.replace(path)
         self._evict()
         return snapshot
 

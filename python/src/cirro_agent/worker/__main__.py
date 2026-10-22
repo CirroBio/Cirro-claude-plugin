@@ -10,6 +10,9 @@ import os
 import sys
 from pathlib import Path
 
+# Stdlib only, so importing it cannot import the SDK ahead of the guard below.
+from ..session import is_global_folder
+
 
 def _guard() -> Path:
     """Prove CIRRO_HOME took effect. The failure this catches is otherwise silent."""
@@ -22,7 +25,7 @@ def _guard() -> Path:
     if not home:
         raise RuntimeError("CIRRO_HOME is not set; refusing to fall back to ~/.cirro")
     resolved = Path(home).resolve()
-    if resolved == (Path.home() / ".cirro").resolve():
+    if is_global_folder(resolved):
         raise RuntimeError(f"CIRRO_HOME points at the global credential {resolved}")
     resolved.mkdir(parents=True, exist_ok=True)
 

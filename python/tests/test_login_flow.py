@@ -5,8 +5,10 @@ trips and tool calls standing between "log me in" and a URL on screen, and about
 starting a login when a refresh would have done.
 """
 import json
+import os
 import pathlib
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -437,6 +439,8 @@ def test_logging_out_stops_a_login_that_is_still_running(home, monkeypatch):
                         lambda _b: (_ for _ in ()).throw(
                             errors.NetworkUnavailable("offline", what="w",
                                                       user_action="retry")))
+    monkeypatch.setattr(auth.subprocess, "run", lambda *a, **k: SimpleNamespace(
+        stdout="/venv/bin/python -m cirro_agent.worker\n"))
     (home / auth.PID_FILE).write_text(json.dumps({"pid": 4242}))
     (home / "abc123.token.dat").write_text("")
 
@@ -445,6 +449,27 @@ def test_logging_out_stops_a_login_that_is_still_running(home, monkeypatch):
     assert signalled == [(4242, auth.signal.SIGTERM)]
     assert result["stopped_login"] is True
     assert not (home / auth.PID_FILE).exists()
+
+
+@pytest.mark.parametrize("pid", [-1, 0, 1, "os.getpid"])
+def test_a_planted_pid_is_never_signalled(home, monkeypatch, pid):
+    """The pid file sits in the session folder, which can arrive in a copied
+    directory: -1 signalled every process the user owns, 0 their process group, and
+    any other pid whatever process held it."""
+    signalled = []
+    monkeypatch.setattr(auth.os, "kill",
+                        lambda pid, sig: signalled.append((pid, sig)))
+    monkeypatch.setattr(auth.portal, "app_config",
+                        lambda _b: (_ for _ in ()).throw(
+                            errors.NetworkUnavailable("offline", what="w",
+                                                      user_action="retry")))
+    planted = os.getpid() if pid == "os.getpid" else pid
+    (home / auth.PID_FILE).write_text(json.dumps({"pid": planted}))
+
+    result = auth.logout({"base_url": BASE_URL})
+
+    assert signalled == []
+    assert result["stopped_login"] is False
 
 
 def test_logging_out_with_no_login_running_is_not_an_error(home, monkeypatch):

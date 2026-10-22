@@ -284,3 +284,8 @@ def test_editing_a_warning_on_disk_invalidates_the_plan(sess):
     with pytest.raises(errors.AgentError) as caught:
         claim(sess, plan)
     assert "does not match its own digest" in caught.value.message
+
+
+def test_a_plan_id_with_a_trailing_newline_is_not_one():
+    """`$` matches before a trailing newline, and the id becomes a path."""
+    assert not plans.PLAN_ID_PATTERN.match("plan_1700000000_abcdef01\n")

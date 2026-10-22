@@ -28,7 +28,10 @@ TENANTS_DIRNAME = "tenants"
 # A tenant folder is named after its host, and that name is used to both create and
 # delete a directory. `_normalize_base_url` strips the scheme and path but would
 # return `..` for `../..` quite happily, which as a tenant path is the virtualenv.
-TENANT_HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]*(:[0-9]{1,5})?$")
+TENANT_HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]*(:[0-9]{1,5})?\Z")
+
+# Credentials a worker would take from its environment ahead of the folder's own.
+AMBIENT_CREDENTIALS = ("CIRRO_ACCESS_TOKEN", "CIRRO_CLIENT_ID", "CIRRO_CLIENT_SECRET")
 
 # Session resolution runs on the way to every operation, so it waits only briefly on
 # git. Callers already inside a user's checkout pass their own, longer bound.
@@ -211,13 +214,12 @@ def find_session_dir(start: Optional[Path] = None) -> Path:
         )
     start = start.resolve()
     ceiling = _search_ceiling(start)
-    home = Path.home().resolve()
 
     here = start
     while True:
         candidate = here / SESSION_DIRNAME
         if (candidate / SESSION_FILE).is_file():
-            if candidate.resolve() == (home / SESSION_DIRNAME):
+            if is_global_folder(candidate):
                 raise errors.NoSessionFolder(
                     f"Refusing to use {candidate}: that is the global Cirro credential "
                     "shared by every tool on this machine, not a session folder.",
@@ -226,6 +228,20 @@ def find_session_dir(start: Optional[Path] = None) -> Path:
                         "Use session_init from the directory you are working in "
                         "to create a folder-local session."
                     ),
+                )
+            if is_git_tracked(candidate):
+                # A session folder decides which host every request goes to and holds
+                # the credential sent there. One that arrived in a checkout is the
+                # choice of whoever committed it -- and the nearest folder wins, ahead
+                # of the tenant this person signed in to.
+                raise errors.NoSessionFolder(
+                    f"Refusing to use {candidate}: it is tracked by git, so it came "
+                    "with the repository rather than from a sign-in on this machine.",
+                    what="A session folder is created by session_init, never committed.",
+                    user_action=(
+                        f"If it is yours, untrack it (git rm -r --cached {candidate}); "
+                        "its own .gitignore keeps it out after that. If not, delete it "
+                        "and sign in with session_init."),
                 )
             return candidate
         if here == ceiling or here.parent == here:
@@ -267,8 +283,19 @@ def find_session_dir(start: Optional[Path] = None) -> Path:
 def load(start: Optional[Path] = None) -> Session:
     session_dir = find_session_dir(start)
     raw = json.loads((session_dir / SESSION_FILE).read_text())
+    try:
+        # What session_init writes is always a bare host. Anything else was written by
+        # hand, and `app.cirro.bio@evil.example` reaches evil.example.
+        base_url = tenant_host(str(raw.get("base_url") or ""))
+    except errors.AgentError:
+        raise errors.NoSessionFolder(
+            f"{session_dir} names {raw.get('base_url')!r} as its tenant, which is not "
+            "a hostname.",
+            what="A session folder is bound to one Cirro host, by name.",
+            user_action=(f"Delete {session_dir} and sign in again with session_init."),
+        ) from None
     session = Session(
-        base_url=raw["base_url"],
+        base_url=base_url,
         auth=raw.get("auth", AUTH_DEVICE_CODE),
         client_id=raw.get("client_id"),
         dir=str(session_dir),
@@ -314,9 +341,8 @@ def init_tenant(base_url: str, auth: str = AUTH_DEVICE_CODE) -> Session:
 def init(workdir: Path, base_url: str, auth: str = AUTH_DEVICE_CODE) -> Session:
     """Create the session folder. Never called implicitly."""
     workdir = workdir.resolve()
-    home = Path.home().resolve()
     session_dir = workdir / SESSION_DIRNAME
-    if session_dir == home / SESSION_DIRNAME:
+    if is_global_folder(session_dir):
         raise errors.NoSessionFolder(
             "Refusing to create a session folder at ~/.cirro -- that path is the global "
             "Cirro credential.",
@@ -329,7 +355,7 @@ def init(workdir: Path, base_url: str, auth: str = AUTH_DEVICE_CODE) -> Session:
         (session_dir / sub).mkdir(parents=True, exist_ok=True)
 
     # Self-ignoring, so we never have to edit a file the user tracks.
-    (session_dir / ".gitignore").write_text("*\n")
+    write_private(session_dir / ".gitignore", "*\n")
 
     normalized = _normalize_base_url(base_url)
     existing = session_dir / SESSION_FILE
@@ -362,12 +388,33 @@ def save(session: Session) -> None:
 
 
 def write_private(path: Path, text: str) -> None:
-    """Write atomically, never leaving the content readable at the process umask."""
+    """Write atomically, at 0600, and never through a symlink.
+
+    A session folder can arrive in a copied directory, and a link planted at the
+    temporary name was followed: the write landed wherever the link pointed. The
+    temporary file is now created fresh -- O_EXCL refuses a link as well as a file --
+    and the rename replaces a link at the final name rather than writing through it.
+    """
     tmp = path.with_suffix(path.suffix + ".tmp")
-    handle = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    tmp.unlink(missing_ok=True)
+    handle = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(handle, "w") as stream:
         stream.write(text)
     tmp.replace(path)
+
+
+def is_global_folder(path: Path) -> bool:
+    """Is `path` the machine-wide ~/.cirro, under any spelling?
+
+    Compared by identity rather than by string: on a case-insensitive volume -- macOS
+    by default -- /Users/Me/.CIRRO is the same folder as ~/.cirro, and resolve() does
+    not canonicalize case, so a string comparison let it through.
+    """
+    try:
+        return (path.name.lower() == SESSION_DIRNAME
+                and os.path.samefile(path.parent, Path.home()))
+    except OSError:
+        return False
 
 
 def is_git_tracked(session_dir: Path) -> bool:
@@ -382,6 +429,12 @@ def child_env(session: Session) -> dict:
     interpreter starts, because cirro.config.Constants reads it at import time.
     """
     env = dict(os.environ)
+    if not os.environ.get("CIRRO_BASE_URL"):
+        # A credential in the environment is for the host the environment names, and
+        # `load` refuses a folder bound elsewhere when one is named. With none named,
+        # the folder's host would receive it -- whatever host a copied folder names.
+        for name in AMBIENT_CREDENTIALS:
+            env.pop(name, None)
     env["CIRRO_HOME"] = str(session.path.resolve())
     env["CIRRO_BASE_URL"] = session.base_url
     env.pop("PYTHONSTARTUP", None)

@@ -82,6 +82,26 @@ from opposite directions: a docstring naming the gate was blocked as though the 
 were being run. The SDK markers are still searched over the raw command, bodies
 included, so `python3 <<EOF ... import cirro` is unaffected.
 
+**Every interpreter in a segment is judged, not only the program it starts with.**
+`program_index` finds where a segment's program starts, past assignments, shell
+keywords (`do`, `then`, `!`) and the wrappers it models with their options. That alone
+let a model through with anything it did not model -- `arch -arm64 python3 x.py`,
+`micromamba run -n env python x.py`, `find -exec`, a `for` loop, `(python3 x.py)` --
+so `code_runners` also judges every interpreter or shell token further along, through
+the same `judge_program`. `bash -lc` and other option clusters holding `c` hand over a
+command like `-c`; an option's value (`-W ignore`, `--with pandas`) is no longer read as
+the script; `cd` and `pushd` are followed, and a script is looked for both where the
+shell went and where it started, since a subshell's `cd` does not outlast it.
+
+The SDK named anywhere in a command counts only against an interpreter whose code the
+gate cannot read: one reading stdin, or a script that is not there yet because the same
+command is writing it. Counted against every interpreter, it blocked `python3 -m pytest`
+beside a commit message naming the SDK, and three reviewers hit that within an hour.
+Reading a session folder is refused unconditionally, like the token file: `.cirro`,
+`.cirro/*` and credential files in one, handed to anything but `ls`, `rm`, `git` and the
+like -- `rm` because deleting the folder is the documented reset, `git` because
+untracking a committed one is the fix for it.
+
 **The bypass checks arm; they do not run from the start of every session.** The first
 use of a Cirro skill, MCP tool or `cirro-agent` writes a marker under
 `plugin_data()/armed-sessions/<session_id>`, and that session is gated from then on.
@@ -91,7 +111,9 @@ everyone whose project merely depends on the SDK -- the same complaint that kill
 a hole, and each has a test: `apply` is never conditional on arming, credential snooping
 is never conditional on arming, and a session with no usable `session_id` is treated as
 **armed**, not unarmed -- otherwise a host that stops sending the field switches the
-whole gate off silently. The marker is per session and pruned after 14 days.
+whole gate off silently. The marker is per session, touched on every use, and pruned
+after 14 days without one. A Bash command that arms the session is itself judged armed,
+because it can carry a bypass beside the use: `cirro-agent read x && python3 drive.py`.
 
 **Two surfaces, split by the gate.** Writes must prompt every time, which only an MCP
 tool can guarantee — `_meta["anthropic/requiresUserInteraction"]` is not defeated by an
@@ -153,6 +175,20 @@ Claude session can work across several bound folders without being moved -- whic
 what people actually do. A test asserts each tool still takes it. The safety rules are
 unchanged and do the work: the machine-wide global credential folder is still refused,
 nothing is created implicitly, and `session_dir` is inside `DIGEST_FIELDS`.
+
+**A session folder can arrive with the files around it, so nothing in one is trusted
+because of where it sits.** The nearest folder wins, ahead of the tenant a person signed
+in to, and it names the host every request goes to. So: a folder tracked by git is
+refused, with the `git rm --cached` fix in its message; `load` refuses a `base_url` that
+is not a bare hostname (`app.cirro.bio@evil.example` reaches evil.example); credentials
+in the environment reach a worker only when `CIRRO_BASE_URL` names their host, which
+`load` already holds the folder to; `write_private` and the auth lock never write
+through a link planted in the folder; a `login.pid` is signalled only if its process is
+this plugin's worker (a planted `-1` was every process the user owns); and
+`is_global_folder` compares by identity, because a case-insensitive volume made
+`/Users/Me/.CIRRO` a second spelling of `~/.cirro`. A folder that arrives untracked --
+a zip, a copied directory -- still answers ahead of a tenant login; these rules are what
+make that harmless.
 
 **When the walk finds nothing, one signed-in tenant answers; two never do.** A tenant
 folder is `plugin_data()/tenants/<host>/.cirro`, created by `init_tenant` and reached

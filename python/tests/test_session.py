@@ -245,3 +245,88 @@ def test_login_start_given_a_directory_still_binds_that_directory(tmp_path, monk
     assert mcp_server.login_start("app.cirro.bio", directory=str(tmp_path))["ok"]
     assert (tmp_path / ".cirro" / session_mod.SESSION_FILE).is_file()
     assert not session_mod.bound_tenants()
+
+
+# --- a session folder that arrived with the files around it -------------------------
+
+def _git(repo, *arguments):
+    import subprocess
+    subprocess.run(["git", "-C", str(repo), *arguments], check=True, capture_output=True)
+
+
+def test_a_session_folder_tracked_by_git_is_refused(tmp_path):
+    """The nearest folder wins, so a committed one chose the host every request went
+    to -- ahead of the tenant this person had signed in to."""
+    _git(tmp_path, "init", "-q")
+    session_mod.init(tmp_path, "app.cirro.bio")
+    _git(tmp_path, "add", "-f", ".cirro/session.json")
+    with pytest.raises(errors.AgentError) as caught:
+        session_mod.find_session_dir(tmp_path)
+    assert caught.value.code == "NO_SESSION_FOLDER"
+    assert "tracked by git" in caught.value.message
+    assert "git rm -r --cached" in caught.value.user_action
+
+
+def test_a_tenant_that_is_not_a_hostname_is_refused_on_load(tmp_path):
+    """`app.cirro.bio@evil.example` reaches evil.example."""
+    current = session_mod.init(tmp_path, "app.cirro.bio")
+    (current.path / session_mod.SESSION_FILE).write_text(
+        json.dumps({"base_url": "app.cirro.bio@evil.example/x"}))
+    with pytest.raises(errors.AgentError) as caught:
+        session_mod.load(tmp_path)
+    assert caught.value.code == "NO_SESSION_FOLDER"
+
+
+def test_a_trailing_newline_is_not_a_hostname():
+    with pytest.raises(errors.AgentError):
+        session_mod.tenant_host("app.cirro.bio\n/x")
+
+
+def test_a_planted_link_is_never_written_through(tmp_path):
+    target = tmp_path / "victim.txt"
+    target.write_text("keep")
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    (folder / "session.json.tmp").symlink_to(target)
+    session_mod.write_private(folder / "session.json", "{}")
+    assert target.read_text() == "keep"
+
+    (folder / "other.json").symlink_to(target)
+    session_mod.write_private(folder / "other.json", "{}")
+    assert target.read_text() == "keep"
+    assert not (folder / "other.json").is_symlink()
+
+
+def test_init_does_not_write_through_a_planted_gitignore(tmp_path):
+    target = tmp_path / "victim.txt"
+    target.write_text("keep")
+    (tmp_path / "work" / ".cirro").mkdir(parents=True)
+    (tmp_path / "work" / ".cirro" / ".gitignore").symlink_to(target)
+    session_mod.init(tmp_path / "work", "app.cirro.bio")
+    assert target.read_text() == "keep"
+
+
+def test_the_global_folder_is_known_under_any_spelling(tmp_path, monkeypatch):
+    """On a case-insensitive volume a respelled path is the same folder, and the
+    string comparison this replaced let it through."""
+    home = tmp_path / "Home"
+    (home / ".cirro").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    respelled = Path(str(home).swapcase())
+    if not respelled.exists():
+        pytest.skip("this volume is case-sensitive")
+    assert session_mod.is_global_folder(respelled / ".CIRRO")
+    with pytest.raises(errors.AgentError):
+        session_mod.init(respelled, "app.cirro.bio")
+
+
+def test_ambient_credentials_go_only_to_a_host_the_environment_names(tmp_path,
+                                                                     monkeypatch):
+    """With no host named, the folder's host would get them -- whichever host a
+    copied folder names."""
+    current = session_mod.init(tmp_path, "app.cirro.bio")
+    monkeypatch.setenv("CIRRO_CLIENT_SECRET", "not-a-real-secret")
+    monkeypatch.delenv("CIRRO_BASE_URL", raising=False)
+    assert "CIRRO_CLIENT_SECRET" not in session_mod.child_env(current)
+    monkeypatch.setenv("CIRRO_BASE_URL", "app.cirro.bio")
+    assert session_mod.child_env(current)["CIRRO_CLIENT_SECRET"] == "not-a-real-secret"
