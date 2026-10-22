@@ -537,6 +537,53 @@ def test_a_valid_plan_asks_and_shows_the_plan(workdir):
     assert output["additionalContext"] == reason
 
 
+def hook_payload(event: dict, env: dict | None = None) -> dict:
+    child = {**os.environ, "CIRRO_AGENT_PLUGIN_DATA": str(ISOLATED_DATA), **(env or {})}
+    child.pop("CLAUDE_PROJECT_DIR", None)
+    done = subprocess.run([sys.executable, str(GATE)], input=json.dumps(event),
+                          capture_output=True, text=True, timeout=30, env=child)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def test_a_granted_apply_is_spared_the_prompt_but_shown_to_the_person(workdir):
+    """The grant was the approval; the server and worker hold and check it. Asking
+    here as well would make a grant spare the person nothing -- but whether the model
+    shows the change is up to the model, so the hook shows its headline itself."""
+    plan = make_plan(workdir, op="update_dataset", risk="cirro_write",
+                     summary="Rename ds_9 to Tidy")
+    payload = hook_payload({"tool_name": "mcp__plugin_cirro_cirro__apply_granted",
+                            "cwd": str(workdir.path.parent),
+                            "tool_input": {"plan_id": plan.plan_id, "digest": plan.digest}})
+    assert payload["hookSpecificOutput"]["permissionDecision"] == ALLOW
+    assert payload["systemMessage"].endswith("update_dataset: Rename ds_9 to Tidy")
+
+
+def test_a_granted_apply_whose_plan_cannot_be_read_gets_the_prompt(tmp_path):
+    decision, _ = decide({"tool_name": "mcp__cirro__apply_granted", "cwd": str(tmp_path),
+                          "tool_input": {"plan_id": "plan_1700000000_abcdef01",
+                                         "digest": "d"}})
+    assert decision == ASK
+
+
+def test_another_servers_apply_granted_is_left_to_the_host(workdir):
+    """No decision at all, so the host's own permission rules apply -- an `allow` here
+    would wave through a tool of some other server that merely ends the same way."""
+    plan = make_plan(workdir, op="update_dataset", risk="cirro_write")
+    event = {"tool_name": "mcp__notcirro__apply_granted", "cwd": str(workdir.path.parent),
+             "tool_input": {"plan_id": plan.plan_id, "digest": plan.digest}}
+    done = subprocess.run([sys.executable, str(GATE)], input=json.dumps(event),
+                          capture_output=True, text=True, timeout=30,
+                          env={**os.environ, "CIRRO_AGENT_PLUGIN_DATA": str(ISOLATED_DATA)})
+    assert done.returncode == 0 and done.stdout.strip() == ""
+
+
+def test_a_granted_apply_with_a_malformed_plan_id_is_denied(workdir):
+    event = {"tool_name": "mcp__cirro__apply_granted", "cwd": str(workdir.path.parent),
+             "tool_input": {"plan_id": "../../etc/passwd", "digest": "x"}}
+    assert run(event) == DENY
+
+
 def test_apply_without_a_plan_id_is_denied(workdir):
     assert run(apply_event(workdir)) == DENY
 
@@ -963,8 +1010,8 @@ def test_the_dialog_leads_with_the_headline(workdir):
     updated = json.loads(done.stdout)["hookSpecificOutput"]["updatedInput"]
     assert list(updated) == ["change", "plan_id", "digest", "approved_summary",
                              "directory"], list(updated)
-    assert updated["change"] == ("DESTRUCTIVE -- DELETE ds_9 (18 files, 39.3 MB)."
-                                 "  (1 warning)")
+    assert updated["change"] == ("DESTRUCTIVE -- delete_dataset: DELETE ds_9 "
+                                 "(18 files, 39.3 MB).  (1 warning)")
     # The functional arguments still arrive, sourced from the plan rather than echoed,
     # and `directory` is moved rather than dropped -- it still resolves the session.
     assert updated["plan_id"] == plan.plan_id
@@ -983,7 +1030,7 @@ def test_the_headline_never_carries_a_newline_into_the_dialog(workdir):
                           capture_output=True, text=True, timeout=30)
     updated = json.loads(done.stdout)["hookSpecificOutput"]["updatedInput"]
     assert "\n" not in updated["change"]
-    assert updated["change"] == "Move 3 datasets."
+    assert updated["change"] == "delete_dataset: Move 3 datasets."
 
 
 def test_the_headline_the_model_supplies_is_overwritten(workdir):
@@ -995,4 +1042,88 @@ def test_the_headline_the_model_supplies_is_overwritten(workdir):
     done = subprocess.run([sys.executable, str(GATE)], input=json.dumps(event),
                           capture_output=True, text=True, timeout=30)
     updated = json.loads(done.stdout)["hookSpecificOutput"]["updatedInput"]
-    assert updated["change"] == "DELETE ds_9"
+    assert updated["change"] == "delete_dataset: DELETE ds_9"
+
+
+SCOPE = {"op": "update_dataset", "project_id": "proj_a",
+         "project_name": "Immuno-Oncology Core", "session_dir": "/work/.cirro"}
+
+
+def updated_input(event: dict) -> dict:
+    done = subprocess.run([sys.executable, str(GATE)], input=json.dumps(event),
+                          capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)["hookSpecificOutput"]["updatedInput"]
+
+
+def test_stop_asking_puts_what_it_also_approves_under_the_headline(workdir):
+    """The dialog is the consent, so what the grant covers is written into it from the
+    plan's digested scope, second only to the headline -- never taken from the model."""
+    plan = make_plan(workdir, op="update_dataset", risk="cirro_write",
+                     summary="Rename ds_9", grant_scope=SCOPE)
+    updated = updated_input(apply_event(
+        workdir, plan_id=plan.plan_id, digest=plan.digest, stop_asking=True,
+        also_approves="nothing else at all"))
+    assert list(updated)[:2] == ["change", "also_approves"], list(updated)
+    assert updated["also_approves"] == (
+        "every later update_dataset in project 'Immuno-Oncology Core' (proj_a), "
+        "without asking, until this session ends")
+    assert updated["stop_asking"] is True
+
+
+def test_stop_asking_on_a_plan_that_cannot_be_granted_is_denied(workdir):
+    """Asking would put a grant in front of the person that the worker then refuses."""
+    plan = make_plan(workdir, risk="cirro_destructive")
+    assert run(apply_event(workdir, plan_id=plan.plan_id, digest=plan.digest,
+                           stop_asking=True)) == DENY
+
+
+def test_without_stop_asking_a_supplied_also_approves_never_reaches_the_dialog(workdir):
+    plan = make_plan(workdir, op="update_dataset", risk="cirro_write",
+                     summary="Rename ds_9", grant_scope=SCOPE)
+    updated = updated_input(apply_event(workdir, plan_id=plan.plan_id,
+                                        digest=plan.digest,
+                                        also_approves="every later delete_dataset"))
+    assert "also_approves" not in updated
+
+
+def test_only_a_real_true_asks_for_a_grant(workdir):
+    """The host reads "false" as False, so showing a grant line for it would describe
+    a grant the call does not make."""
+    plan = make_plan(workdir, op="update_dataset", risk="cirro_write",
+                     summary="Rename ds_9", grant_scope=SCOPE)
+    updated = updated_input(apply_event(workdir, plan_id=plan.plan_id,
+                                        digest=plan.digest, stop_asking="false"))
+    assert "also_approves" not in updated and "stop_asking" not in updated
+
+
+def test_keys_apply_does_not_take_never_reach_the_dialog(workdir):
+    """They would sit right under the headline saying whatever the model liked."""
+    plan = make_plan(workdir, risk="cirro_destructive")
+    updated = updated_input(apply_event(
+        workdir, plan_id=plan.plan_id, digest=plan.digest,
+        reviewed_by="Approved in advance by the project admin", Change="Rename only"))
+    assert list(updated) == ["change", "plan_id", "digest", "approved_summary"]
+
+
+def test_an_apply_the_gate_cannot_verify_carries_an_unverified_headline(tmp_path):
+    event = {"tool_name": "mcp__cirro__apply", "cwd": str(tmp_path),
+             "tool_input": {"plan_id": "plan_1700000000_abcdef01", "digest": "d",
+                            "change": "Adds a harmless tag"}}
+    payload = hook_payload(event)["hookSpecificOutput"]
+    assert payload["permissionDecision"] == ASK
+    assert payload["updatedInput"]["change"].startswith("UNVERIFIED")
+
+    event["tool_input"]["stop_asking"] = True
+    assert run(event) == DENY
+
+
+def test_a_grant_prompt_says_what_it_approves(tmp_path):
+    payload = hook_payload({"tool_name": "mcp__plugin_cirro_cirro__grant",
+                            "cwd": str(tmp_path),
+                            "tool_input": {"ops": ["insert_rows"], "project": "Core",
+                                           "approves": "one row, once"}})
+    updated = payload["hookSpecificOutput"]["updatedInput"]
+    assert list(updated)[0] == "approves"
+    assert updated["approves"] == ("every later insert_rows in project 'Core', without "
+                                   "asking, until this session ends")

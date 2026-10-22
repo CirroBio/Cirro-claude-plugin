@@ -544,3 +544,29 @@ def test_read_sheet_shows_columns_and_row_ids(sheets_tenant, session_dir):
     assert [(r["_row_id"], r["sample_id"]) for r in result["rows"]] == [(2, "s2"), (3, "s3")]
     assert not any(k.startswith("sys_") for r in result["rows"] for k in r)
     assert result["matched"] == 2
+
+
+# --- which row writes a grant may cover -------------------------------------------
+
+def test_inline_rows_are_grantable_and_a_local_file_is_not(sheets_tenant, session_dir,
+                                                           tmp_path):
+    """A file source reads this computer; under a grant nobody would see which file."""
+    inline = plan(sheets_tenant, session_dir, "insert_rows", sheet_id="sheet-1",
+                  rows=[{"sample_id": "n1", "reads": 1}])
+    assert inline["grant_scope"]["op"] == "insert_rows"
+    table = tmp_path / "more.csv"
+    table.write_text("sample_id,reads\nn2,2\n")
+    from_file = plan(sheets_tenant, session_dir, "insert_rows", sheet_id="sheet-1",
+                     file=str(table))
+    assert from_file["grant_scope"] is None
+    assert "file from this computer" in from_file["not_grantable"]
+
+
+def test_an_update_that_blanks_cells_is_not_grantable(sheets_tenant, session_dir):
+    changed = plan(sheets_tenant, session_dir, "update_rows", sheet_id="sheet-1",
+                   where={"status": "failed"}, set={"status": "pending"})
+    assert changed["grant_scope"]["op"] == "update_rows"
+    blanked = plan(sheets_tenant, session_dir, "update_rows", sheet_id="sheet-1",
+                   where={"status": "failed"}, set={"reads": None})
+    assert blanked["grant_scope"] is None
+    assert "blanks cells" in blanked["not_grantable"]

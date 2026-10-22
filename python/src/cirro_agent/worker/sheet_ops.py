@@ -650,7 +650,9 @@ def plan_insert_rows(reader: reads.Reader, args: dict) -> Draft:
     return Draft(args={"op": "insert_rows", "project_id": project["id"],
                        "sheet_id": detail["id"], "rows": coerced,
                        "sheet_digest": S.sheet_digest(detail)},
-                 summary="\n".join(lines), invalidates=[_inv("sheets", project["id"])])
+                 summary="\n".join(lines), invalidates=[_inv("sheets", project["id"])],
+                 ungrantable=mutations.ungrantable(
+                     args.get("file") and "it uploads a file from this computer"))
 
 
 def apply_insert_rows(reader: reads.Reader, args: dict) -> dict:
@@ -749,11 +751,17 @@ def plan_update_rows(reader: reads.Reader, args: dict) -> Draft:
     lines += _batches_note(len(changing), S.UPDATE_BATCH)
     lines += ["", "  If any of these rows is edited before this is applied, it is refused."]
     selected = [current[i] for i in sorted(touched)]
+    blanked = any(v is None for u in changing for k, v in u["values"].items()
+                  if differs(u["rowId"], k, v))
     return Draft(args={"op": "update_rows", "project_id": project["id"],
                        "sheet_id": detail["id"], "updates": changing,
                        "row_ids": sorted(touched), "rows_digest": S.rows_digest(selected),
                        "sheet_digest": S.sheet_digest(detail)},
-                 summary="\n".join(lines), invalidates=[_inv("sheets", project["id"])])
+                 summary="\n".join(lines), invalidates=[_inv("sheets", project["id"])],
+                 ungrantable=mutations.ungrantable(
+                     blanked and "it blanks cells",
+                     len(changing) > mutations.GRANT_MAX_TARGETS
+                     and f"it changes more than {mutations.GRANT_MAX_TARGETS} rows"))
 
 
 def apply_update_rows(reader: reads.Reader, args: dict) -> dict:
@@ -864,9 +872,10 @@ SHEET_OPS = [
        accepts=UPDATE_ARGS),
     Op("delete_sheet", RISK_DESTRUCTIVE, plan_delete_sheet, apply_delete_sheet,
        accepts=SHEET_ARGS),
-    Op("insert_rows", RISK_WRITE, plan_insert_rows, apply_insert_rows, accepts=INSERT_ARGS),
+    Op("insert_rows", RISK_WRITE, plan_insert_rows, apply_insert_rows, accepts=INSERT_ARGS,
+       grantable=True),
     Op("update_rows", RISK_WRITE, plan_update_rows, apply_update_rows,
-       accepts=UPDATE_ROWS_ARGS),
+       accepts=UPDATE_ROWS_ARGS, grantable=True),
     Op("delete_rows", RISK_DESTRUCTIVE, plan_delete_rows, apply_delete_rows,
        accepts=DELETE_ROWS_ARGS),
     Op("refresh_sheet", RISK_WRITE, plan_refresh_sheet, apply_refresh_sheet,

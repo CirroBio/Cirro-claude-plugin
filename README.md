@@ -3,11 +3,13 @@
 Work with your data on the [Cirro](https://cirro.bio) platform by asking Claude, using
 your own Cirro identity.
 
-**Looking at things is free. Changing things asks you first — every time.**
+**Looking at things is free. Changing things asks you first.**
 
 You can let Claude explore your projects, datasets, runs and logs as freely as you like,
 because nothing on that path can alter anything. The moment something would create,
-modify or delete, it stops and shows you exactly what it is about to do.
+modify or delete, it stops and shows you exactly what it is about to do. For a few kinds
+of change you can tell it to stop asking for the rest of a session; anything that
+deletes always asks.
 
 ## Getting started
 
@@ -166,8 +168,10 @@ dataset. Claude will tell you when it is skipping those and how to ask for them.
 
 ## Making changes
 
-Every change goes through the same two steps. There is no way around it and no way to
-turn it off.
+Every change goes through the same two steps. There is no way around them and no way to
+turn them off. What you can relax, for a few kinds of change and only when you ask, is
+how often step 2 asks you — see
+[Approving a kind of change for a session](#approving-a-kind-of-change-for-a-session).
 
 **1. Claude works out exactly what would happen.** This step touches nothing. It resolves
 names to IDs, checks parameters against what the pipeline actually accepts, counts the
@@ -274,6 +278,64 @@ A few things worth knowing:
   editing a live share's conditions, billing changes. Those belong in the Cirro web UI
   where their effects are visible.
 
+### Approving a kind of change for a session
+
+When you are making many changes of one kind — filling in a sheet, renaming a batch of
+datasets, launching runs one after another — you can stop being asked about that kind
+of change in one project for the rest of the session. For a series of sheet inserts it
+goes like this:
+
+1. **The first insert** prompts as usual.
+2. **The second** comes with one extra line from Claude under the plan: whether to stop
+   asking about `insert_rows` in this project. Say no and nothing changes, and Claude
+   will not ask again. Say yes and the prompt for this insert carries a second line,
+   `also_approves`, naming exactly what else you are approving:
+
+   ```
+   change         insert_rows: Insert 12 row(s) into sheet 'Plate map' (sheet_8c1f,
+                  table lab.plate_map) in Immuno-Oncology Core.
+   also_approves  every later insert_rows in project 'Immuno-Oncology Core'
+                  (proj_8a2c), without asking, until this session ends
+   ```
+
+3. **Every insert after that** is still planned and shown to you, but is made without a
+   prompt. Claude Code also shows a notice for each one —
+   `Cirro, approved in advance this session: insert_rows: Insert 3 row(s) ...` — so a
+   change made under a grant is never silent, even when a subagent made it. Everything
+   else still asks.
+
+You do not have to wait for the offer. Tell Claude at any point — "stop asking me about
+new sheet rows in Immuno-Oncology Core" — and it asks for a grant directly, with one
+prompt that says what it approves and for how long.
+
+Only six operations can be granted: `insert_rows`, `update_rows`, `update_dataset`,
+`update_sample`, `run_analysis` and `resume_analysis`. Nothing that deletes anything or
+changes who has access can be, however you ask. Approve one deletion and ask for
+another, and Claude tells you once that deletions always ask, rather than leaving you
+to wonder where the offer went.
+
+Even among those six, a change that removes something or reaches far still prompts
+under a grant, and the plan says why:
+
+- retyping a dataset (it re-derives the project's sample records), removing tags, or
+  taking datasets out of a folder
+- deleting a sample's metadata keys or blanking their values
+- blanking sheet cells, or inserting rows from a file on your computer
+- a launch that emails addresses it was given rather than you
+- one plan touching more than 50 datasets or rows
+
+A grant covers the operations and the one project it names, as the Cirro user and in the
+session folder it was given under. It lasts until the Claude session ends — it is held
+in memory by the plugin's server for this session and never written to disk — or until
+you ask Claude to revoke it. Reconnecting the plugin's server with `/mcp` also ends it.
+Each change it approves is still re-checked against current facts when it is made, is
+still single-use, and is logged in `.cirro/runs/` together with the grant that approved
+it.
+
+Know what you are giving up: while a grant is in place, a change of that kind in that
+project runs without asking even if something Claude read — a dataset description, a
+cell in a sheet — is what steered it there. Grant narrowly, and revoke when you are done.
+
 ### What Claude can change
 
 | Area | Operations |
@@ -323,11 +385,14 @@ safely from here — use the web UI.
 
 Commands: `/cirro:setup` and `/cirro:doctor`.
 
-Behind the approval gate sit eight tools: `session_init`, `login_start`, `login_wait`,
-`whoami`, `logout`, `session_remove`, `plan` and `apply`. You will rarely name them —
-Claude uses them — and only two can change anything: `apply`, which makes every change
-in Cirro, and `session_remove`, which deletes a tenant's login folder on your own
-machine. Both prompt every time.
+Behind the approval gate sit eleven tools: `session_init`, `login_start`, `login_wait`,
+`whoami`, `logout`, `session_remove`, `plan`, `apply`, `grant`, `apply_granted` and
+`grants`. You will rarely name them — Claude uses them. Three can change anything:
+`apply`, which makes a change in Cirro and prompts every time — and, when you accept
+Claude's offer to stop asking, approves later changes like it in the same prompt;
+`apply_granted`, which makes only the changes a grant you approved covers; and `session_remove`, which deletes
+a tenant's login folder on your own machine and prompts every time. `grant` prompts
+every time as well, and `grants` lists the grants you have given or revokes them.
 
 ## Adding a pipeline to Cirro
 
@@ -469,7 +534,9 @@ add this to your own Claude Code settings:
 
 Allowing `cirro-agent read` outright is safe — that command has no ability to change
 anything, and a test fails if it ever gains one. `apply` is missing from the allow list
-on purpose, and could not be added anyway: it prompts regardless.
+on purpose, and could not be added anyway: it prompts regardless. The same is true of
+`grant`. `apply_granted` needs no rule: the plugin's own hook lets it through, and the
+server refuses any plan that no grant you approved covers.
 
 ## Status
 
@@ -560,6 +627,12 @@ deleting a tenant folder is still a path nobody has walked. Signing in for a sin
 directory is the older path and is unaffected. If a tenant login misbehaves,
 `cirro-agent read tenants` will show you what exists without needing a credential, and
 deleting the folder it names is always a safe reset.
+
+**Session grants are new and have not run against a live tenant.** `grant`,
+`apply_granted`, `grants` and `apply`'s `stop_asking` are tested against the simulated
+tenant only, and the `also_approves` line has not yet been seen in a real approval
+prompt. A grant lasts as long as the plugin's server process for the session, and that
+lifetime has not been checked against every way a session can be cleared or resumed.
 
 ## For maintainers
 

@@ -123,15 +123,16 @@ def test_remove_tenant_refuses_to_follow_a_symlinked_tenant_folder(tmp_path):
     assert (outside / ".cirro" / session_mod.SESSION_FILE).is_file()
 
 
-def test_only_apply_and_session_remove_prompt_every_time():
+def test_only_apply_session_remove_and_grant_prompt_every_time():
     """`session_remove` deletes a credential and an audit trail, so it carries the one
     enforcement primitive no allow rule or permission mode defeats -- the same one
-    `apply` relies on. Nothing else may quietly acquire or lose it."""
+    `apply` relies on, and the one that makes a `grant` the person's own approval
+    rather than the model's. Nothing else may quietly acquire or lose it."""
     from cirro_agent import mcp_server
     tools = asyncio.run(mcp_server.server.list_tools())
     interactive = {tool.name for tool in tools
                    if (tool.meta or {}).get("anthropic/requiresUserInteraction")}
-    assert interactive == {"apply", "session_remove"}
+    assert interactive == {"apply", "session_remove", "grant"}
 
 
 def test_session_remove_reports_what_is_left(tmp_path):

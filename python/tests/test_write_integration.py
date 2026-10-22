@@ -332,6 +332,18 @@ def notify_line(session_dir, plan_id):
     return lines[0]
 
 
+def test_a_launch_that_emails_given_addresses_is_not_grantable(writable_tenant,
+                                                               session_dir):
+    """A grant would otherwise send mail on the person's behalf to any address."""
+    assert plan_run(writable_tenant, session_dir)["grant_scope"]["op"] == "run_analysis"
+    assert plan_run(writable_tenant, session_dir,
+                    notification_emails=[])["grant_scope"] is not None
+    given = plan_run(writable_tenant, session_dir,
+                     notification_emails=["someone@elsewhere.example"])
+    assert given["grant_scope"] is None
+    assert "emails" in given["not_grantable"]
+
+
 def test_a_launch_notifies_the_authenticated_user_by_default(writable_tenant,
                                                              session_dir):
     """What the web UI does. The plugin sent notificationEmails=[] on every launch."""
@@ -529,6 +541,52 @@ def test_apply_refuses_a_plan_edited_on_disk(writable_tenant, session_dir):
     path.write_text(json.dumps(stored))
     result = apply_from(writable_tenant, session_dir, planned)
     assert result["error"]["code"] == "PLAN_INVALID"
+
+
+def forge(session_dir, plan_id, mutate):
+    """Rewrite a stored plan and recompute its digest -- which needs only hashlib, so
+    anything that can write the session folder can do it."""
+    path = session_dir.path / "plans" / f"{plan_id}.json"
+    stored = json.loads(path.read_text())
+    mutate(stored)
+    stored["digest"] = plans.canonical_digest(stored)
+    path.write_text(json.dumps(stored))
+    return stored["digest"]
+
+
+def writes(tenant):
+    return [c.request for c in tenant["router"].calls
+            if c.request.method in ("POST", "PUT", "PATCH", "DELETE")]
+
+
+def test_a_forged_record_with_no_request_is_re_planned_and_refused(writable_tenant,
+                                                                   session_dir):
+    """An empty `request_args` used to skip the re-plan, so whatever the record said
+    ran -- here a delete approved under a rename's text."""
+    planned = call(writable_tenant, session_dir, "plan", op="update_dataset",
+                   args={"project_id": "proj_a", "dataset_id": "ds_0007",
+                         "name": "Tidy name"})
+
+    def to_a_delete(stored):
+        stored.update(op="delete_dataset", request_args={},
+                      args={"project_id": "proj_a", "dataset_id": "ds_0007"})
+    digest = forge(session_dir, planned["plan_id"], to_a_delete)
+    before = len(writes(writable_tenant))
+
+    result = apply_from(writable_tenant, session_dir, planned, digest=digest)
+    assert result["error"]["code"] == "PLAN_STALE"
+    assert len(writes(writable_tenant)) == before
+
+
+def test_a_relabelled_risk_is_refused(writable_tenant, session_dir):
+    """The headline's DESTRUCTIVE mark comes from `risk`, so a delete relabelled as an
+    ordinary write would have reached the dialog unmarked."""
+    planned = call(writable_tenant, session_dir, "plan", op="delete_dataset",
+                   args={"project_id": "proj_a", "dataset_id": "ds_0000"})
+    digest = forge(session_dir, planned["plan_id"],
+                   lambda stored: stored.update(risk="cirro_write"))
+    result = apply_from(writable_tenant, session_dir, planned, digest=digest)
+    assert result["error"]["code"] == "PLAN_STALE"
 
 
 def test_apply_writes_an_audit_trail(writable_tenant, session_dir):

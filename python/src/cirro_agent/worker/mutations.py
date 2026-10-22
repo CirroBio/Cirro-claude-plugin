@@ -39,6 +39,19 @@ class Draft:
     # Set only where the risk depends on what was planned rather than on the operation
     # -- a chain's risk is the widest risk among its steps.
     risk: Optional[str] = None
+    # Why this plan needs its own prompt although its operation is grantable: an
+    # operation is granted as a kind, but a kind still has variants that remove data.
+    ungrantable: Optional[str] = None
+
+
+# Past this many datasets or rows, a plan of a grantable operation needs its own prompt.
+GRANT_MAX_TARGETS = 50
+
+
+def ungrantable(*reasons) -> Optional[str]:
+    """The reasons that apply, joined for `Draft.ungrantable`, or None. Each reason is
+    written `condition and "text"`, so the ones whose condition is false drop out."""
+    return "; ".join(r for r in reasons if r) or None
 
 
 # The argument keys shared resolvers read, named once so an op that uses a resolver
@@ -65,6 +78,13 @@ class Op:
     # exists so a person approves exactly what runs, and an argument dropped in
     # silence defeats it. `test_write_coverage.py` requires every op to declare this.
     accepts: tuple = ()
+    # May a person approve this operation once for the rest of a session, through
+    # `grant`, rather than each time? Opt-in by hand and never for a destructive op:
+    # a grant spares the prompt for every later plan of this kind in its project,
+    # including ones steered by something Claude read, so an operation belongs here
+    # only if it deletes nothing and changes no one's access.
+    # `test_write_coverage.py` pins the exact set.
+    grantable: bool = False
 
     def planned(self, reader, args: dict) -> Draft:
         """Check the argument surface, then plan. Every planner call comes through

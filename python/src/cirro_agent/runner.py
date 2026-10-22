@@ -116,7 +116,7 @@ def _transfer_op(request: dict, session: session_mod.Session) -> Optional[str]:
     verb = request.get("verb")
     if verb == "plan":
         return request["op"] if request.get("op") in TRANSFER_OPS else None
-    if verb != "apply":
+    if verb not in ("apply", "apply_granted"):
         return None
     from . import plans
     op = plans.stored_op(session, request.get("plan_id") or "")

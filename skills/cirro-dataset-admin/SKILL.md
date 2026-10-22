@@ -5,7 +5,9 @@ description: Rename, retag, retype, or delete a Cirro dataset, or replace its sa
 
 # Modify or remove a Cirro dataset
 
-Every operation here goes through `plan` → show the user → `apply`.
+Every operation here goes through `plan` → show the user → `apply`. For
+`update_dataset`, follow the plan's `offer` if it carries one, and call `apply_granted`
+instead of `apply` when the plan's `next` names it.
 
 ## Several datasets, one approval
 

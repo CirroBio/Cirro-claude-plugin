@@ -216,7 +216,10 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
                   "reports the dollars once they are incurred."]
 
     return Draft(args=resolved, summary="\n".join(lines), warnings=warnings,
-                 invalidates=[_inv("datasets", project["id"])])
+                 invalidates=[_inv("datasets", project["id"])],
+                 ungrantable=mutations.ungrantable(
+                     args.get("notification_emails")
+                     and "it emails addresses it was given"))
 
 
 def apply_run_analysis(reader: reads.Reader, args: dict) -> dict:
@@ -305,10 +308,10 @@ def apply_stop_analysis(reader: reads.Reader, args: dict) -> dict:
 
 ANALYSIS_OPS = [
     Op("run_analysis", RISK_WRITE, plan_run_analysis, apply_run_analysis,
-       outputs=("created_dataset_id",), accepts=RUN_ANALYSIS_ARGS),
+       outputs=("created_dataset_id",), accepts=RUN_ANALYSIS_ARGS, grantable=True),
     # Shares run_analysis's executor, so a resume records a created dataset too.
     Op("resume_analysis", RISK_WRITE, plan_resume_analysis, apply_run_analysis,
-       outputs=("created_dataset_id",), accepts=RUN_ANALYSIS_ARGS),
+       outputs=("created_dataset_id",), accepts=RUN_ANALYSIS_ARGS, grantable=True),
     Op("stop_analysis", RISK_WRITE, plan_stop_analysis, apply_stop_analysis,
        accepts=PROJECT_ARGS + ("dataset_id",)),
 ]

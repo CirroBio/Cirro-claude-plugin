@@ -35,8 +35,8 @@ TTL_SECONDS = 3600
 # `\Z`, not `$`: `$` also matches before a trailing newline, and the id becomes a path.
 PLAN_ID_PATTERN = re.compile(r"^plan_\d{10,}_[0-9a-f]{8}\Z")
 
-# Everything the human's approval depends on. `status` is excluded because claim()
-# advances it; everything else must be immutable once the plan is written.
+# Everything the human's approval depends on. `status` and `granted` are excluded
+# because claim() sets them; everything else must be immutable once the plan is written.
 #
 # The summary is in here deliberately. Covering only op/args/base_url left the approval
 # TEXT outside the integrity check, so editing it on disk kept the digest valid and a
@@ -47,8 +47,11 @@ PLAN_ID_PATTERN = re.compile(r"^plan_\d{10,}_[0-9a-f]{8}\Z")
 # warning could be deleted on disk and the plan still verified. Adding it stales every
 # plan already written, which is the safe direction -- they live an hour at most, and a
 # stale one is refused rather than admitted.
+#
+# `grant_scope` is approval text in the same way: when the person is asked to stop being
+# asked, the prompt states the operation and project from it.
 DIGEST_FIELDS = ("op", "args", "request_args", "base_url", "summary", "username",
-                 "expires_at", "session_dir", "risk", "warnings")
+                 "expires_at", "session_dir", "risk", "warnings", "grant_scope")
 
 # `mutations.RISK_DESTRUCTIVE` is the definition; this is a copy, because that module
 # imports cirro and this one is what `scripts/gate.py` reads a plan with. A test pins
@@ -58,6 +61,10 @@ DESTRUCTIVE_RISK = "cirro_destructive"
 # Long enough for an operation and its object, short enough to stay a headline. It
 # wraps on spaces where it is shown, so this is a budget rather than a hard width.
 HEADLINE_CHARS = 200
+
+# A Cirro name inside a consent line. Any project member chooses it, so it is quoted
+# and capped: long enough to recognise, too short to restate the line around it.
+NAME_CHARS = 60
 
 PENDING = "pending"
 APPLYING = "applying"
@@ -85,9 +92,11 @@ def canonical_digest(record: dict) -> str:
     This detects tampering with a stored plan. It does not prove provenance -- an
     unkeyed hash over a file the caller can write never could, and no secret kept in
     the session folder would help, since anything the user can read the agent can read.
-    Provenance is not what protects the user here: the approval prompt renders the
-    operation and its resolved arguments from the record itself, so a forged plan can
-    only be approved by showing the human what it actually does.
+    Provenance is not what protects the user here, and neither is the prompt, which
+    shows the record's own headline and summary. What protects them is that apply
+    re-plans from the stored request and refuses unless the record is exactly what
+    that planning produces now (`gated._revalidated`), so a forged record either is a
+    plan or does not run.
     """
     payload = json.dumps({k: record.get(k) for k in DIGEST_FIELDS},
                          sort_keys=True, default=str)
@@ -154,6 +163,12 @@ class Plan:
     risk: str = "cirro_write"
     warnings: list = field(default_factory=list)
     invalidates: list = field(default_factory=list)
+    # What a grant approving this plan would cover -- its operation, project and session
+    # folder -- or None for a plan that cannot be approved in advance.
+    grant_scope: Optional[dict] = None
+    # The standing grant that approved this plan in place of a prompt, set when
+    # apply_granted claims it. None for a plan approved through apply.
+    granted: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -193,7 +208,8 @@ def create(session: Session, *, op: str, args: dict, summary: str,
            username: Optional[str], risk: str = "cirro_write",
            warnings: Optional[list] = None,
            invalidates: Optional[list] = None,
-           request_args: Optional[dict] = None) -> Plan:
+           request_args: Optional[dict] = None,
+           grant_scope: Optional[dict] = None) -> Plan:
     now = time.time()
     plan = Plan(
         plan_id=f"plan_{int(now)}_{secrets.token_hex(4)}",
@@ -210,6 +226,7 @@ def create(session: Session, *, op: str, args: dict, summary: str,
         risk=risk,
         warnings=list(warnings or []),
         invalidates=list(invalidates or []),
+        grant_scope=grant_scope,
     )
     plan.digest = canonical_digest(plan.to_dict())
     path = _plan_path(session, plan.plan_id)
@@ -292,9 +309,15 @@ def _not_applicable(plan_id: str, plan: Plan, reason: str) -> errors.PlanInvalid
     )
 
 
-def claim(session: Session, plan_id: str, *, digest: str, approved_summary: str,
-          username: Optional[str]) -> Plan:
-    """Transition pending -> applying, atomically, or refuse with a reason."""
+def claim(session: Session, plan_id: str, *, digest: str, username: Optional[str],
+          approved_summary: Optional[str] = None,
+          granted: Optional[dict] = None) -> Plan:
+    """Transition pending -> applying, atomically, or refuse with a reason.
+
+    Approved one of two ways: `approved_summary`, the text the person read in the
+    prompt, or `granted`, a standing grant the caller has already matched to this
+    plan. Every other refusal applies to both.
+    """
     plan = load(session, plan_id)
 
     refusal = preflight(plan.to_dict(), supplied_digest=digest)
@@ -320,7 +343,7 @@ def claim(session: Session, plan_id: str, *, digest: str, approved_summary: str,
             what="Re-plan as the current user so permissions and intent match.",
             retry_with=[{"tool": "plan", "op": plan.op}],
         )
-    if approved_summary.strip() != plan.summary.strip():
+    if granted is None and (approved_summary or "").strip() != plan.summary.strip():
         # The approval the human saw must be the plan being executed, byte for byte.
         raise errors.PlanInvalid(
             "approved_summary does not match the plan's summary.",
@@ -340,6 +363,7 @@ def claim(session: Session, plan_id: str, *, digest: str, approved_summary: str,
         )
 
     plan.status = APPLYING
+    plan.granted = granted
     _save(session, plan)
     record(session, plan, phase="intent")
     return plan
@@ -475,6 +499,8 @@ def record(session: Session, plan: Plan, *, phase: str, result: Any = None,
         "phase": phase, "plan_id": plan.plan_id, "op": plan.op,
         "base_url": plan.base_url, "username": plan.username, "args": plan.args,
     }
+    if plan.granted is not None:
+        entry["granted"] = plan.granted
     if result is not None:
         entry["result"] = result
     if error is not None:
@@ -524,13 +550,20 @@ def headline(plan: dict) -> str:
     literal `\\n`, which is what makes the summary unreadable in that dialog however
     well it reads everywhere else.
 
-    Derived wholly from digested fields -- summary, risk and warnings are all in
+    Derived wholly from digested fields -- op, summary, risk and warnings are all in
     `DIGEST_FIELDS` -- so it cannot describe a plan other than the one it came from.
+    The operation is named by its own name as well as the summary's prose: the
+    dialog shows nothing else that says which operation runs.
+
+    Only the summary's line is ever cut. A long dataset name used to push the warning
+    count off the end, which is the one trace of the warnings the dialog shows.
     """
+    op = plan.get("op") or "an operation"
     summary = (plan.get("summary") or "").strip()
-    first = next((line.strip() for line in summary.splitlines() if line.strip()),
-                 f"Apply {plan.get('op') or 'an operation'}.")
-    line = f"DESTRUCTIVE -- {first}" if plan.get("risk") == DESTRUCTIVE_RISK else first
+    first = next((line.strip() for line in summary.splitlines() if line.strip()), None)
+    lead = "DESTRUCTIVE -- " if plan.get("risk") == DESTRUCTIVE_RISK else ""
+    text = f"{op}: {first}" if first else f"Apply {op}."
+    tail = ""
     warnings = plan.get("warnings")
     if isinstance(warnings, (list, tuple)) and warnings:
         # The count, not the prose: inlining warning text rebuilds the wall of
@@ -539,10 +572,38 @@ def headline(plan: dict) -> str:
         # them -- `approval_warnings` reaches only the hook's reason and the CLI.
         # Counting them is also what put `warnings` inside DIGEST_FIELDS.
         plural = "s" if len(warnings) > 1 else ""
-        line = f"{line}  ({len(warnings)} warning{plural})"
-    if len(line) > HEADLINE_CHARS:
-        line = line[:HEADLINE_CHARS - 3].rstrip() + "..."
-    return line
+        tail = f"  ({len(warnings)} warning{plural})"
+    room = HEADLINE_CHARS - len(lead) - len(tail)
+    if len(text) > room:
+        text = text[:room - 3].rstrip() + "..."
+    return f"{lead}{text}{tail}"
+
+
+def _quoted(name) -> str:
+    """A name as data: repr escapes control and bidirectional characters, and the cap
+    keeps a name from saying "nothing else is approved" at the length of a sentence."""
+    text = repr(str(name or ""))
+    return text if len(text) <= NAME_CHARS else text[:NAME_CHARS - 4] + "...'"
+
+
+def also_approves(scope: dict) -> str:
+    """What `apply` with stop_asking approves beyond this change, from a plan's scope.
+
+    The hook writes it into the prompt and the worker refuses a grant unless the prompt
+    carried exactly this, so text the model wrote cannot stand in for it. The project
+    is named by id as well as name: two projects can share a name, or look as if they
+    do.
+    """
+    return (f"every later {scope.get('op')} in project {_quoted(scope.get('project_name'))}"
+            f" ({scope.get('project_id')}), without asking, until this session ends")
+
+
+def grant_approves(ops, project) -> str:
+    """What `grant` approves, from its arguments as given: the hook writes it into the
+    prompt and the server refuses a grant whose prompt did not carry it."""
+    named = ", ".join(str(op) for op in ops or [])
+    return (f"every later {named} in project {_quoted(project)}, without asking, until "
+            "this session ends")
 
 
 def render(plan: dict) -> str:

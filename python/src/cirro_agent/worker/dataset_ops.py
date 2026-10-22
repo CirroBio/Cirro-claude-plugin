@@ -264,6 +264,14 @@ def plan_update_dataset(reader: reads.Reader, args: dict) -> Draft:
         args={"project_id": project["id"], "edits": actionable},
         summary="\n".join(lines).rstrip(), warnings=warnings,
         invalidates=scopes,
+        ungrantable=mutations.ungrantable(
+            retyped and "it retypes, which re-derives sample records",
+            any(set(e["was"]["tags"]) - set(e["tags"]) for e in actionable)
+            and "it removes tags",
+            any(set(e["was"]["folders"]) - set(e["folders"]) for e in actionable)
+            and "it takes datasets out of a folder",
+            len(actionable) > mutations.GRANT_MAX_TARGETS
+            and f"it edits more than {mutations.GRANT_MAX_TARGETS} datasets"),
     )
 
 
@@ -808,7 +816,7 @@ DATASET_OPS = [
     Op("update_dataset", RISK_WRITE, plan_update_dataset, apply_update_dataset,
        accepts=PROJECT_ARGS + FOLDER_ARGS + (
            "dataset_id", "dataset_ids", "name", "description", "tags", "process",
-           "ingest_samples", "rerun_transform")),
+           "ingest_samples", "rerun_transform"), grantable=True),
     Op("update_samplesheet", RISK_WRITE, plan_update_samplesheet, apply_update_samplesheet,
        accepts=PROJECT_ARGS + (
            "dataset_id", "contents", "file_path", "ingest_samples")),

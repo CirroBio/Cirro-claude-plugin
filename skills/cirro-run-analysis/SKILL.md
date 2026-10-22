@@ -162,8 +162,13 @@ apply(plan_id=..., digest=..., approved_summary=...)
 Copy `digest` and `approved_summary` verbatim from the plan result. `apply` takes no
 operation arguments at all — that is the point: what was approved is what runs.
 
-`apply` prompts the user for approval every time. That is expected; it cannot be
-turned off, and you should not try.
+`apply` prompts the user for approval every time. That is expected; you should not try
+to avoid it. The one exception is the person's own choice to stop being asked about
+launches in this project. If the plan result carries `offer`, follow it: one line
+asking, and `apply(..., stop_asking=true)` only if they say yes. If its `next` names
+`apply_granted`, a grant they approved covers this launch — call that instead of
+`apply`, after showing the rendered text exactly as before. Never request a grant they
+did not ask for or accept.
 
 ## 6. Hand off to monitoring
 

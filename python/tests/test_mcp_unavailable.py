@@ -47,7 +47,7 @@ def test_it_reaches_no_third_party_package():
         capture_output=True, text=True,
         env={**os.environ, "PYTHONPATH": str(ROOT / "python" / "src")})
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == "8"
+    assert proc.stdout.strip() == "11"
 
 
 def test_a_missing_runtime_answers_a_call_instead_of_killing_the_connection(no_runtime):

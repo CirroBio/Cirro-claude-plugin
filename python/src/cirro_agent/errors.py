@@ -110,6 +110,9 @@ PlanInvalid = _err("PLAN_INVALID", AGENT_ACTION)
 # from PLAN_INVALID because the remedy is to re-plan and show the person the new
 # figures, not to fix a malformed request.
 PlanStale = _err("PLAN_STALE", AGENT_ACTION)
+# No standing grant covers this plan, or the operation cannot be granted at all. The
+# plan is left pending, so the remedy is the ordinary apply and its prompt.
+NotGranted = _err("NOT_GRANTED", AGENT_ACTION)
 
 # Upstream.
 UpstreamError = _err("UPSTREAM_ERROR", RETRYABLE)

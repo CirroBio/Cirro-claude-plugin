@@ -227,9 +227,12 @@ def test_both_phases_of_one_apply_land_in_one_file(session_dir, monkeypatch):
 # description, not the hook's reason, which goes to the model. These pin the one
 # argument that exists to be read by a person.
 
-def test_the_headline_is_the_summarys_first_line(sess):
+def test_the_headline_names_the_op_then_the_summarys_first_line(sess):
+    """The dialog shows nothing else saying which operation runs, so the prose alone
+    is not trusted to name it."""
     plan = make(sess)
-    assert plans.headline(plan.to_dict()) == "DELETE dataset ds_9 (18 files, 39.3 MB)."
+    assert plans.headline(plan.to_dict()) == (
+        "delete_dataset: DELETE dataset ds_9 (18 files, 39.3 MB).")
 
 
 def test_the_headline_is_never_multiline(sess):
@@ -237,7 +240,7 @@ def test_the_headline_is_never_multiline(sess):
     whole reason a one-line field exists alongside the summary."""
     plan = make(sess, summary="Move 3 datasets.\n\n  folder\n    to  QC\n")
     line = plans.headline(plan.to_dict())
-    assert "\n" not in line and line == "Move 3 datasets."
+    assert "\n" not in line and line == "delete_dataset: Move 3 datasets."
 
 
 def test_a_destructive_plan_says_so_in_the_headline(sess):
@@ -258,6 +261,17 @@ def test_the_headline_is_bounded(sess):
     plan = make(sess, summary="Delete " + "x" * 400, risk=plans.DESTRUCTIVE_RISK)
     line = plans.headline(plan.to_dict())
     assert len(line) <= plans.HEADLINE_CHARS and line.endswith("...")
+
+
+def test_a_long_summary_never_pushes_the_warning_count_off_the_line(sess):
+    """The count is the one trace of the warnings the dialog shows, and a long dataset
+    name used to cut it off."""
+    plan = make(sess, summary="DELETE dataset " + "x" * 400, risk=plans.DESTRUCTIVE_RISK,
+                warnings=["two datasets were derived from this one"])
+    line = plans.headline(plan.to_dict())
+    assert len(line) <= plans.HEADLINE_CHARS
+    assert line.startswith("DESTRUCTIVE -- delete_dataset: DELETE dataset xxx")
+    assert line.endswith("...  (1 warning)")
 
 
 def test_the_headline_names_the_op_when_there_is_no_summary(sess):

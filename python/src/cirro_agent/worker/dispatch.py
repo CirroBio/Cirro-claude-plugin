@@ -31,6 +31,8 @@ HANDLERS = {
     "logout": auth.logout,
     "plan": gated.do_plan,
     "apply": gated.do_apply,
+    "grant": gated.do_grant,
+    "apply_granted": gated.do_apply_granted,
 }
 
 

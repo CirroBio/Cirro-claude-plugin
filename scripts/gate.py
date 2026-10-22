@@ -62,9 +62,9 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT / "python" / "src"))
 from cirro_agent.errors import NoSessionFolder  # noqa: E402
 from cirro_agent.plans import (DIGEST_MISMATCH, DIGEST_TAMPERED,  # noqa: E402
-                               EXPIRED, NOT_PENDING, PLAN_ID_PATTERN,
-                               approval_header, approval_warnings, headline,
-                               preflight)
+                               EXPIRED, NOT_PENDING, PLAN_ID_PATTERN, also_approves,
+                               approval_header, approval_warnings, grant_approves,
+                               headline, preflight)
 from cirro_agent.runner import plugin_data  # noqa: E402
 from cirro_agent.session import find_session_dir  # noqa: E402
 
@@ -327,7 +327,8 @@ PARAMETER = re.compile(r"^\$\{?([A-Za-z_]\w*)\}?$")
 SUBSTITUTIONS = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 
 
-def respond(decision: str, reason: str, extra: dict | None = None) -> NoReturn:
+def respond(decision: str, reason: str, extra: dict | None = None,
+            notice: str | None = None) -> NoReturn:
     payload = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -337,6 +338,10 @@ def respond(decision: str, reason: str, extra: dict | None = None) -> NoReturn:
     }
     if extra:
         payload["hookSpecificOutput"].update(extra)
+    if notice:
+        # Shown to the person, not the model -- the one channel a hook has to them
+        # when it is not asking anything.
+        payload["systemMessage"] = notice
     if decision == "ask":
         # The `ask` reason is documented as reaching Claude; whether it renders in the
         # human's dialog is not guaranteed, so also emit it as context.
@@ -935,7 +940,16 @@ def moves_storage(program: str, arguments: list) -> bool:
 # --------------------------------------------------------------------------- apply
 
 
-def inspect_apply(tool_input: dict, cwd: str) -> None:
+# This plugin's own tool names. An `allow` must not reach a tool of some other server
+# that happens to end the same way and mention cirro.
+APPLY_GRANTED_TOOL = re.compile(r"^mcp__(?:plugin_cirro_)?cirro__apply_granted$")
+GRANT_TOOL = re.compile(r"^mcp__(?:plugin_cirro_)?cirro__grant$")
+
+
+def stored_plan(tool_input: dict, cwd: str, unverifiable) -> tuple:
+    """(plan_id, plan) for an apply call, read and pre-flighted on the gate's own
+    reading of the file, or a refusal. `unverifiable(plan_id)` decides -- and never
+    returns -- when the session folder cannot be found."""
     plan_id = tool_input.get("plan_id")
     if not plan_id:
         block("Blocked by the Cirro plugin: apply requires a plan_id from a prior "
@@ -952,9 +966,7 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
     try:
         session_dir = find_session_dir(start)
     except NoSessionFolder:
-        # Cannot verify, so do not silently allow: make the human decide.
-        respond("ask", "The Cirro plugin could not locate the session folder to verify "
-                       f"plan {plan_id}. Approve only if you know what this applies.")
+        unverifiable(plan_id)
 
     path = session_dir / "plans" / f"{plan_id}.json"
     if not path.is_file():
@@ -973,6 +985,30 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
         block("Blocked by the Cirro plugin: "
               + REFUSALS[refusal].format(plan_id=plan_id, status=plan.get("status"))
               + "\n")
+    return plan_id, plan
+
+
+def inspect_apply(tool_input: dict, cwd: str) -> None:
+    # Only a real True grants: the host coerces "false" and "0" to False, so treating
+    # them as set here would show a grant line for a call that makes none.
+    stop_asking = tool_input.get("stop_asking") is True
+
+    def unverifiable(plan_id):
+        # Cannot verify, so do not silently allow: make the human decide -- under a
+        # headline the model did not write. A grant is another matter: nothing here
+        # could say what it would cover, so it is refused rather than asked about.
+        if stop_asking:
+            block("Blocked by the Cirro plugin: the session folder holding plan "
+                  f"{plan_id} could not be found, so what stop_asking would approve "
+                  "cannot be shown. Apply it without stop_asking.\n")
+        respond("ask", "The Cirro plugin could not locate the session folder to verify "
+                       f"plan {plan_id}. Approve only if you know what this applies.",
+                {"updatedInput": {
+                    "change": f"UNVERIFIED -- the Cirro plugin could not read plan {plan_id}",
+                    **{k: tool_input[k] for k in ("plan_id", "digest", "approved_summary",
+                                                  "directory") if k in tool_input}}})
+
+    plan_id, plan = stored_plan(tool_input, cwd, unverifiable)
 
     lines = approval_header(plan) + [""]
     # Derived from op/args, not from the plan's prose. The summary is advisory text;
@@ -1011,6 +1047,18 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
     except (KeyError, TypeError, ValueError):
         expires = "an unreadable time"
     lines.append(f"Plan {plan_id} is single-use and expires at {expires}.")
+    # A grant asked for alongside this change is stated from the plan's own scope, which
+    # is inside its digest, and refused here when the plan has none -- so nobody is asked
+    # to approve a grant the worker would then refuse.
+    also = {}
+    if stop_asking:
+        scope = plan.get("grant_scope")
+        if not isinstance(scope, dict):
+            block(f"Blocked by the Cirro plugin: this {plan.get('op')} cannot be approved "
+                  "in advance, so apply cannot take stop_asking for it. Call apply "
+                  "without it.\n")
+        also = {"also_approves": also_approves(scope), "stop_asking": True}
+        lines.append(f"Also approves {also['also_approves']}.")
     # Supplied from the stored plan rather than echoed by the model. apply requires
     # the approved text to match the plan byte for byte; sourcing it here means that
     # check costs nothing in context, and the value cannot be the model's paraphrase.
@@ -1020,15 +1068,10 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
     # the person there, only the model. Everything below it is either an identifier or
     # a value too long to read, so a headline placed last is a headline nobody sees.
     #
-    # `change` and `directory` are dropped from the incoming input before being
-    # re-added, because re-assigning a key keeps the position of its first appearance
-    # -- and for `change` the spread would also let a model-supplied value win on a key
-    # whose whole point is that the person reads it from the plan. Every other key
-    # keeps the order it arrived in.
-    supplied = {key: value for key, value in tool_input.items()
-                if key not in ("change", "directory")}
-    ordered = {"change": headline(plan),
-               **supplied,
+    # Rebuilt from the keys apply takes rather than from what arrived: any other key
+    # the model added would sit in the dialog right under the headline, saying
+    # whatever it liked, and the server would ignore it.
+    ordered = {"change": headline(plan), **also,
                "plan_id": plan_id,
                "digest": plan.get("digest") or "",
                "approved_summary": plan.get("summary") or ""}
@@ -1038,6 +1081,43 @@ def inspect_apply(tool_input: dict, cwd: str) -> None:
     if "directory" in tool_input:
         ordered["directory"] = tool_input["directory"]
     respond("ask", "\n".join(lines), {"updatedInput": ordered})
+
+
+def inspect_apply_granted(tool_input: dict, cwd: str) -> None:
+    """Spare a granted apply the host's ordinary permission prompt, and tell the person.
+
+    The grant was the approval, given once through its own prompt, and it is held and
+    checked where this hook cannot see: in the MCP server's memory, and by the worker
+    against the claimed plan. So allowing here grants nothing -- a call no grant
+    covers is refused before its plan is claimed -- while asking here would make the
+    grant spare the person nothing.
+
+    What it must not do is run unseen. Whether the model shows the plan is up to the
+    model, and a subagent's transcript is not shown at all, so the change's headline
+    goes to the person as a notice; a plan this hook cannot read gets the ordinary
+    prompt instead.
+    """
+    def unverifiable(plan_id):
+        respond("ask", "The Cirro plugin could not locate the session folder to read "
+                       f"plan {plan_id}, so it cannot show what would run unprompted.")
+
+    plan_id, plan = stored_plan(tool_input, cwd, unverifiable)
+    respond("allow", f"Plan {plan_id} runs only if a standing grant this session holds "
+                     "covers it; the Cirro server refuses it otherwise.",
+            notice=f"Cirro, approved in advance this session: {headline(plan)}")
+
+
+def inspect_grant(tool_input: dict) -> None:
+    """Put what a grant approves into its own prompt, in words the model did not write.
+
+    The prompt shows the call's arguments, and `ops` and `project` alone say nothing
+    about lasting the session or skipping prompts. The server refuses a grant whose
+    `approves` is not exactly this text, so without the hook it is still shown.
+    """
+    ordered = {"approves": grant_approves(tool_input.get("ops"), tool_input.get("project")),
+               **{k: tool_input[k] for k in ("ops", "project", "directory")
+                  if k in tool_input}}
+    respond("ask", f"Approves {ordered['approves']}.", {"updatedInput": ordered})
 
 
 def main() -> None:
@@ -1065,6 +1145,10 @@ def main() -> None:
     # Never conditional on arming: an apply is the approval itself.
     if tool.endswith("__apply") and "cirro" in tool:
         inspect_apply(tool_input, event.get("cwd") or "")
+    if APPLY_GRANTED_TOOL.match(tool):
+        inspect_apply_granted(tool_input, event.get("cwd") or "")
+    if GRANT_TOOL.match(tool):
+        inspect_grant(tool_input)
     passthrough()
 
 

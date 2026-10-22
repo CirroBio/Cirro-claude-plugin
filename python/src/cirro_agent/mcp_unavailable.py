@@ -22,7 +22,8 @@ from . import errors, runner
 # that module is the single thing this one exists to avoid; `test_mcp_unavailable.py`
 # pins the two lists together so a new tool cannot appear in only one of them.
 TOOLS = ("session_init", "login_start", "login_wait", "whoami",
-         "logout", "session_remove", "plan", "apply")
+         "logout", "session_remove", "plan", "apply",
+         "grant", "apply_granted", "grants")
 
 PROTOCOL_VERSION = "2025-06-18"
 

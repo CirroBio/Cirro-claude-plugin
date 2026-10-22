@@ -166,10 +166,23 @@ def test_the_destructive_risk_name_is_one_string():
     assert plans.DESTRUCTIVE_RISK == mutations.RISK_DESTRUCTIVE
 
 
+def test_the_grantable_operations_are_exactly_these():
+    """A grant spares the prompt for every later plan of its kind in its project, so
+    joining this set is a decision to make on purpose, never a default. The MCP server
+    names the set as well, because it cannot import the worker; the two must agree."""
+    from cirro_agent import mcp_server
+    from cirro_agent.worker import mutations
+    grantable = {name for name, op in mutations.OPS.items() if op.grantable}
+    assert grantable == {"insert_rows", "update_rows", "update_dataset",
+                         "update_sample", "run_analysis", "resume_analysis"}
+    assert set(mcp_server.GRANTABLE) == grantable
+    assert {mutations.OPS[name].risk for name in grantable} == {mutations.RISK_WRITE}
+
+
 def test_the_read_cli_cannot_reach_a_mutating_verb():
     from cirro_agent import cli
     from cirro_agent.worker import dispatch
-    mutating = {"plan", "apply", "login_daemon"}
+    mutating = {"plan", "apply", "grant", "apply_granted", "login_daemon"}
     assert not (cli.READ_VERBS & mutating)
     assert cli.READ_VERBS <= set(dispatch.HANDLERS), \
         "the CLI advertises a verb the worker cannot handle"

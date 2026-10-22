@@ -226,14 +226,18 @@ def plan_update_sample(reader: reads.Reader, args: dict) -> Draft:
     after = dict(supplied) if replace else {**before, **supplied}
     changed = {k: (before.get(k), v) for k, v in after.items() if before.get(k) != v}
     dropped = sorted(set(before) - set(after))
+    name = args.get("name") or row["name"]
 
     lines = [f"Update metadata on sample {row['name']} ({row['id']}) in "
              f"{project['name']}.", ""]
+    # Sent on every update, so a rename the text left out still happened.
+    if name != row["name"]:
+        lines.append(f"  name: {row['name']!r} -> {name!r}")
     for key, (old, new) in sorted(changed.items()):
         lines.append(f"  {key}: {old!r} -> {new!r}")
     if dropped:
         lines += ["", f"  REMOVED: {dropped}"]
-    if not changed and not dropped:
+    if not changed and not dropped and name == row["name"]:
         lines.append("  (no values differ from what is stored)")
 
     warnings = []
@@ -244,9 +248,13 @@ def plan_update_sample(reader: reads.Reader, args: dict) -> Draft:
             f"{len(set(before) - set(supplied))} existing metadata key(s) not named here "
             "are preserved; pass replace_metadata to delete them instead.")
     return Draft(args={"project_id": project["id"], "sample_id": row["id"],
-                       "name": args.get("name") or row["name"], "metadata": after},
+                       "name": name, "metadata": after},
                  summary="\n".join(lines), warnings=warnings,
-                 invalidates=[_inv("samples", project["id"])])
+                 invalidates=[_inv("samples", project["id"])],
+                 ungrantable=mutations.ungrantable(
+                     dropped and "it deletes metadata keys",
+                     any(new is None for _old, new in changed.values())
+                     and "it blanks metadata values"))
 
 
 def apply_update_sample(reader: reads.Reader, args: dict) -> dict:
@@ -342,7 +350,8 @@ PROJECT_OPS = [
     Op("invite_user", RISK_WRITE, plan_invite_user, apply_invite_user,
        accepts=("email", "name", "organization")),
     Op("update_sample", RISK_WRITE, plan_update_sample, apply_update_sample,
-       accepts=PROJECT_ARGS + ("sample_id", "name", "metadata", "replace_metadata")),
+       accepts=PROJECT_ARGS + ("sample_id", "name", "metadata", "replace_metadata"),
+       grantable=True),
     Op("update_project_schema", RISK_WRITE, plan_update_project_schema,
        apply_update_project_schema, accepts=PROJECT_ARGS + ("schema",)),
 ]
