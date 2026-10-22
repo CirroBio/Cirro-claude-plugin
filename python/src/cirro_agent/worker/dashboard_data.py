@@ -34,13 +34,47 @@ class SkipNode(Exception):
     """A node this runner cannot execute locally; its message says why."""
 
 
-def _connect():
+class Refused(Exception):
+    """A node asks for something this runner will not do; reported as its failure."""
+
+
+def _connect(files: Path):
+    """A DuckDB that can read the files a dashboard loads and reach nothing else.
+
+    The SQL it runs is not ours. A dashboard document is written by any member of its
+    project and a preview takes whatever the caller passes, and both arrive through
+    ungated paths -- a read and a plan. At DuckDB's defaults that SQL could COPY to any
+    path, read_text() any file and install extensions, so the connection sees one
+    directory, the download cache, and its settings are locked before any of it runs.
+    `allowed_directories` can only be set once the database has started and before
+    external access is turned off, which is the order below.
+    """
     import duckdb
 
-    con = duckdb.connect()
+    files.mkdir(parents=True, exist_ok=True)
     # One thread: an unordered result then comes back in one order, run to run.
-    con.execute("SET threads = 1")
+    con = duckdb.connect(config={"threads": 1, "autoinstall_known_extensions": False,
+                                 "autoload_known_extensions": False})
+    con.execute("SET allowed_directories = ?", [[str(files.resolve())]])
+    con.execute("SET enable_external_access = false")
+    con.execute("SET lock_configuration = true")
     return con
+
+
+def one_select(con, sql: str) -> str:
+    """`sql`, if it is exactly one SELECT; Refused otherwise.
+
+    The connection already cannot reach a file outside the download cache, but a COPY
+    can still write inside it, and nothing a view draws needs more than one query.
+    """
+    import duckdb
+
+    statements = con.extract_statements(sql)
+    if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
+        raise Refused("only a single SELECT runs here: no COPY, ATTACH, SET, INSTALL or "
+                      "other statement, and nothing after a ';'. A PIVOT has to list its "
+                      "values (ON column IN (...)) to stay one statement.")
+    return sql
 
 
 def _table(node_id: str) -> str:
@@ -133,8 +167,8 @@ class Runner:
         self.reader = reader
         self.project_id = project_id
         self.schema = schema
-        self.con = _connect()
-        self.cache = Path(reader.session_dir) / "cache" / "dashboard-files"
+        self.cache = (Path(reader.session_dir) / "cache" / "dashboard-files").resolve()
+        self.con = _connect(self.cache)
 
     # -------------------------------------------------------------- sources
 
@@ -144,7 +178,13 @@ class Runner:
             raise SkipNode(
                 f"{path} is {size / 2**20:.0f} MiB, over the {MAX_FILE_BYTES // 2**20} MiB "
                 "a plan downloads to check it; the portal will still load it")
-        local = self.cache / dataset_id / path
+        # Both come from a document anyone in the project can write, and pathlib drops
+        # everything before an absolute component -- so an absolute dataset id named a
+        # file anywhere on this machine, read with no download at all.
+        local = (self.cache / dataset_id / path).resolve()
+        if not local.is_relative_to(self.cache):
+            raise Refused(f"dataset {dataset_id!r} file {path!r} lies outside the "
+                          "download folder")
         if not (local.is_file() and (size is None or local.stat().st_size == size)):
             dataset = reads.portal_dataset(self.reader, self.project_id, dataset_id)
             self.reader.cost.call("files.download")
@@ -235,7 +275,7 @@ class Runner:
                 results[node_id] = self._run_node(document, node, upstream, sample_rows)
             except SkipNode as exc:
                 results[node_id] = {"skipped": str(exc)}
-            except duckdb.Error as exc:
+            except (duckdb.Error, Refused) as exc:
                 # A query that fails is the finding, reported against its node.
                 results[node_id] = {"error": _duck_message(exc)}
         return {k: v for k, v in results.items() if v is not None}
@@ -255,7 +295,7 @@ class Runner:
             if not sql:
                 raise SkipNode("no SQL")
             self._aliases(document, node, upstream)
-            sql = self._substitute(document, node, sql)
+            sql = one_select(self.con, self._substitute(document, node, sql))
             self.con.execute(f"CREATE OR REPLACE TABLE {table} AS {sql}")
         elif kind in ("chart", "result-grid", "legend", "chart-render"):
             data = next((e["from"]["node"] for e in upstream

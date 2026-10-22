@@ -142,8 +142,13 @@ def do_table_preview(request: dict) -> dict:
         name = D.file_table_name(entry["path"])
         source = {"dataset_id": request["dataset_id"], "path": entry["path"],
                   "size": entry.get("size")}
-        runner.load_file("cell_preview_out", request["dataset_id"], entry["path"],
-                         D.file_type(entry["path"]), entry.get("size"))
+        try:
+            runner.load_file("cell_preview_out", request["dataset_id"], entry["path"],
+                             D.file_type(entry["path"]), entry.get("size"))
+        except dashboard_data.Refused as exc:
+            raise errors.NotSupported(f"Cannot preview it: {exc}.",
+                                      what="The file's path leaves the download folder.",
+                                      user_action="Open the dataset in the Cirro web UI.")
         load_note = None
     con = runner.con
     con.execute("CREATE OR REPLACE TEMP VIEW query AS SELECT * FROM cell_preview_out")
@@ -154,8 +159,9 @@ def do_table_preview(request: dict) -> dict:
         import duckdb
 
         try:
-            con.execute(f"CREATE OR REPLACE TABLE cell_sql_out AS {request['sql']}")
-        except duckdb.Error as exc:
+            sql = dashboard_data.one_select(con, request["sql"])
+            con.execute(f"CREATE OR REPLACE TABLE cell_sql_out AS {sql}")
+        except (duckdb.Error, dashboard_data.Refused) as exc:
             raise errors.InvalidQuery(
                 f"The query failed: {dashboard_data._duck_message(exc)}",
                 what=f"The table is readable as `query` or `{name}`; fix the SQL "

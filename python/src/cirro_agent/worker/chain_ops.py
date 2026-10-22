@@ -21,6 +21,11 @@ from ..session import Session
 # Reviewability bounds. Eight steps is about what one approval can be read in full;
 # past five attempts a "retry" has stopped being a fix and become a compute budget.
 CHAIN_MAX_STEPS = 8
+# The keys a caller writes on a step. `resolved_args` and `invalidates` belong to the
+# planner, and apply runs `resolved_args` in place of `args`: set by a caller on a step
+# with a reference, which `_pre_plan` does not overwrite, they ran arguments the
+# approval never showed.
+STEP_KEYS = ("op", "args", "label")
 RETRY_MAX_ATTEMPTS = 5
 
 
@@ -255,6 +260,16 @@ def plan_chain(reader: reads.Reader, args: dict) -> Draft:
         return _plan_restart(reader, args)
 
     steps = [dict(step) for step in _chain_steps(args)]
+    for index, step in enumerate(steps):
+        unknown = sorted(set(step) - set(STEP_KEYS))
+        if unknown:
+            raise errors.InvalidQuery(
+                f"Step {index + 1} sets {unknown}, which only the planner fills in.",
+                what="A chain step is {op, args, label}.", field="steps", given=unknown,
+                retry_with=[{"op": "chain",
+                             "note": f"remove {', '.join(unknown)} from step {index + 1}"}],
+                accepted=list(STEP_KEYS),
+            )
     retry = _retry_policy(args, steps)
     drafts = _pre_plan(reader, steps)
 

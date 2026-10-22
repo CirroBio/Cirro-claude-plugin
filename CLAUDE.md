@@ -366,6 +366,20 @@ portal's promotions, not pandas' guesses. Dashboard and sheet routes are sent ra
 (`reads.send`) because the generated models cannot parse a sheet page and read a
 delete's empty 204 as a Dashboard.
 
+**The SQL a dashboard runs is not ours.** Any project member writes a dashboard's
+queries, and a preview takes whatever the caller passes, and both run during a read and
+a plan -- paths nothing gates and the README tells people to allow outright. At
+DuckDB's defaults that SQL could `COPY` to any path, `read_text()` any file and install
+extensions, so `dashboard_data._connect` is the only way to open a connection for it:
+one readable directory (the download cache), external access off, configuration
+locked. `allowed_directories` can only be set after the database starts and before
+external access is turned off, so the order there is not a style choice. `one_select`
+then refuses anything but a single SELECT, because a `COPY` into the cache is still
+possible, and a file source's dataset id and path must resolve inside the cache --
+pathlib drops everything before an absolute component, which read a file anywhere on
+the machine with no download. A dashboard that stops working under these rules was
+doing something no view needs.
+
 **A sheet write's value checks are not a second opinion.** Cirro-backend validates
 column names, required, unique, enum values and Cirro URIs, but it does not cast: each
 cell is bound straight into DuckDB, and a value DuckDB cannot cast comes back as a 500
@@ -425,7 +439,10 @@ bounded attempts, and a `may_change` allowlist that is enforced by refusing a di
 outside it rather than by rendering it and hoping. A step being re-run sheds the
 `resolved_args` the first attempt recorded and is planned again when it runs: apply
 prefers `resolved_args` over `args`, so carrying them forward rendered a changed field
-in the retry's diff and then executed the old value. A chain drops each step's declared
+in the retry's diff and then executed the old value. For the same reason a caller's
+step may set only `STEP_KEYS` -- op, args, label. `_pre_plan` overwrites
+`resolved_args` only on steps it can plan, so one supplied on a step with a reference
+used to run in place of what the approval showed as `<made_id of step 1>`. A chain drops each step's declared
 cache scopes as that step finishes rather than when the chain ends, because a later
 step plans against listings an earlier one has already changed -- deferring it is why
 `create_process` -> `upload_process_config` refused `NOT_FOUND` on the process the step

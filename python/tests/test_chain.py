@@ -131,6 +131,30 @@ def test_a_destructive_step_cannot_hide_inside_a_chain():
     assert "destructive" in caught.value.message
 
 
+@pytest.mark.parametrize("key", ["resolved_args", "invalidates", "carried"])
+def test_a_step_cannot_carry_what_the_planner_fills_in(key):
+    """apply runs `resolved_args` in place of `args`, and `_pre_plan` leaves a step with
+    a reference alone -- so a caller who set it on one ran arguments the approval
+    showed only as `<made_id of step 2>`."""
+    request = _steps()
+    request["steps"][2][key] = {"uses": "made-somewhere-else"}
+    with pytest.raises(errors.AgentError) as caught:
+        chain_ops.plan_chain(None, request)
+    assert caught.value.code == "INVALID_QUERY"
+    assert key in caught.value.message
+
+
+def test_a_planned_chain_runs_each_deferred_step_through_its_planner(fake_ops):
+    draft = chain_ops.plan_chain(None, {"steps": [
+        {"label": "make", "op": "producer", "args": {"tag": "alpha"}},
+        {"label": "use", "op": "consumer",
+         "args": {"uses": {"from_step": 0, "field": "made_id"}}},
+    ]})
+    assert "resolved_args" not in draft.args["steps"][1]
+    chain_ops.apply_chain(MagicMock(), draft.args)
+    assert fake_ops[-1] == ("consumer", {"uses": "made-alpha"})
+
+
 def test_a_chain_cannot_contain_a_chain():
     with pytest.raises(errors.AgentError):
         chain_ops._chain_steps({"steps": [{"op": "chain", "args": {}}]})
