@@ -1,4 +1,4 @@
-# Every safety property of this plugin is a test: the README drift guard, the check
+# Every safety property of this plugin is a test: the docs drift guard, the check
 # that no SDK write method is ungated, the runtime contract against the pinned
 # cirro-api-client, the hook's digest agreement with plans.py. None of them protect
 # anything unless they run without anyone remembering to run them.

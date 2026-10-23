@@ -1,0 +1,52 @@
+/* A hover diagram, on the pattern of the Cirro data governance diagram: hovering or focusing a
+   part shows its note and dims everything not involved in it. The markup is in the page;
+   hover-diagram.js wires it up. */
+.hover-diagram {
+  --hd-ink: #1b1e3a;
+  --hd-muted: #5b6070;
+  --hd-node: #e9ebf2;
+  --hd-teal: #0e7d9f;
+  --hd-teal-fill: #e3f2f6;
+  max-width: 760px;
+  margin: 1.5em auto;
+  font-family: var(--md-text-font, "Inter"), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--hd-ink);
+}
+.hover-diagram svg { display: block; width: 100%; height: auto; overflow: visible; }
+.hover-diagram text { fill: var(--hd-ink); font-size: 20px; font-weight: 500; }
+.hover-diagram text.hd-sub { fill: var(--hd-muted); font-size: 16px; font-weight: 400; }
+.hover-diagram text.hd-strong { font-weight: 600; }
+.hover-diagram .hd-node { fill: var(--hd-node); stroke: var(--hd-ink); stroke-width: 1.5; }
+.hover-diagram .hd-node-teal { fill: var(--hd-teal-fill); stroke: var(--hd-teal); stroke-width: 1.5; }
+.hover-diagram .hd-icon { fill: none; stroke: var(--hd-ink); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+.hover-diagram .hd-icon-sm { fill: none; stroke: var(--hd-ink); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.hover-diagram .hd-icon-teal { fill: none; stroke: var(--hd-teal); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+.hover-diagram .hd-line { fill: none; stroke: var(--hd-ink); stroke-width: 1.75; pointer-events: none; }
+.hover-diagram .hd-dotted { fill: none; stroke: var(--hd-ink); stroke-width: 1.5; stroke-dasharray: 4 5; pointer-events: none; }
+.hover-diagram .hd-path { fill: none; stroke: var(--hd-teal); stroke-width: 2; pointer-events: none; }
+.hover-diagram .hd-hit { fill: transparent; }
+.hover-diagram .hd-hot { cursor: pointer; outline: none; }
+.hover-diagram .hd-hot:focus-visible .hd-hit { stroke: var(--hd-teal); stroke-width: 2; stroke-dasharray: 2 4; }
+.hover-diagram [data-r] { transition: opacity 0.2s ease; }
+.hover-diagram .hd-dim { opacity: 0.18; }
+.hover-diagram .hd-panel {
+  display: grid;
+  margin-top: 0.75em;
+  padding: 0.9em 1.1em;
+  border-left: 3px solid var(--hd-teal);
+  background: #f2f7f8;
+}
+/* Every note shares one grid cell, so the panel is always as tall as the longest note and never jumps. */
+.hover-diagram .hd-note { grid-area: 1 / 1; visibility: hidden; opacity: 0; transition: opacity 0.2s ease; }
+.hover-diagram .hd-note.is-shown { visibility: visible; opacity: 1; }
+.hover-diagram .hd-note p { margin: 0 0 0.4em; line-height: 1.5; }
+.hover-diagram .hd-note p:last-child { margin-bottom: 0; }
+.hover-diagram .hd-note .hd-kicker {
+  margin: 0;
+  color: var(--hd-teal);
+  font-size: 0.75em;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.hover-diagram .hd-note .hd-title { font-size: 1.05em; font-weight: 600; }

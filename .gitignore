@@ -10,3 +10,6 @@ __pycache__/
 .coverage
 .coverage.*
 htmlcov/
+
+# a built docs site; build it outside the checkout instead (see mkdocs.yml)
+site/
