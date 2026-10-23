@@ -12,6 +12,9 @@
   font-family: var(--md-text-font, "Inter"), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: var(--hd-ink);
 }
+/* The drawing keeps the governance diagram's fixed light palette, so on the dark scheme
+   it sits on a light card rather than ink on a dark page. */
+[data-md-color-scheme="slate"] .hover-diagram { padding: 1em; border-radius: 0.4rem; background: #fff; }
 .hover-diagram svg { display: block; width: 100%; height: auto; overflow: visible; }
 .hover-diagram text { fill: var(--hd-ink); font-size: 20px; font-weight: 500; }
 .hover-diagram text.hd-sub { fill: var(--hd-muted); font-size: 16px; font-weight: 400; }

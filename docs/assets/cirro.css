@@ -1,0 +1,29 @@
+/* Cirro brand colors, as on docs.cirro.bio and in the logo. */
+:root {
+  --cirro-navy: #050b26;
+  --cirro-teal: #0e7d9f;
+  --cirro-teal-light: #25bfd3;
+}
+
+[data-md-color-scheme="default"],
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: var(--cirro-navy);
+  --md-primary-fg-color--light: #1b2550;
+  --md-primary-fg-color--dark: #02051a;
+}
+
+[data-md-color-scheme="default"] {
+  --md-typeset-a-color: var(--cirro-teal);
+  --md-accent-fg-color: var(--cirro-teal);
+}
+
+/* The dark teal is too dim on the slate background. */
+[data-md-color-scheme="slate"] {
+  --md-typeset-a-color: var(--cirro-teal-light);
+  --md-accent-fg-color: var(--cirro-teal-light);
+}
+
+/* The logo is a wide wordmark; Material sizes logos for square icons. */
+.md-header__button.md-logo img {
+  height: 1.6rem;
+}
