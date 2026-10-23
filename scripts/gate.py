@@ -23,7 +23,7 @@ defeated by a base64 payload, by an interpreter it does not know, and by any
 route to code it cannot see as text. It makes accidental bypass impossible and
 deliberate bypass conspicuous. It is not a sandbox. The real boundary is a
 `permissions.deny` rule in the user's own settings, which a plugin cannot ship --
-see the README.
+see docs/locking-down.md.
 """
 # The hook is launched by its shebang, so it runs on whatever `python3` is first on
 # PATH -- on a stock macOS that is still 3.9. Without this, the `X | None` annotations

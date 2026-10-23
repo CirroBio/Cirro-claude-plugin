@@ -56,10 +56,15 @@ carries `not_grantable` so the model can say why it still prompts. A reviewer ra
 retypes with sample re-ingest under a grant a rename had earned; that is what this is
 for. A new grantable op needs the same audit of its variants.
 
-## Keep the README current
+## Keep the docs current
 
-**The README is part of the change, not follow-up work.** On any change that makes it
-wrong, update it in the same commit:
+The documentation is split by reader. `docs/` is the site for people using the plugin,
+published to GitHub Pages; it describes what using the plugin is like and nothing of how
+it is built. The README is for people who clone the repo: the outline of the design, the
+development setup, how to contribute and how to release.
+
+**The docs are part of the change, not follow-up work.** On any change that makes them
+wrong, update them in the same commit:
 
 - a skill added, removed or renamed
 - a command added or removed
@@ -67,20 +72,30 @@ wrong, update it in the same commit:
 - a gated operation added or removed
 - an MCP tool added or removed
 - a change to how reads and writes are separated, or to the approval mechanism
-- a change to the session folder layout, the runtime pins, or the dependency override
-- a file named in the README moving or disappearing
+- a change to the session folder layout
+- a file named in the docs moving or disappearing
 
-`python/tests/test_readme_current.py` checks the mechanical half of this — every skill,
-command, read subcommand, gated operation and MCP tool is named in the README, and the
-README references no file that does not exist. It cannot check whether the prose is
-still *true*, so read the affected section rather than only satisfying the test.
+The same changes usually touch the README's outline of the design, and a change to the
+runtime pins, the development setup or the release steps touches it directly.
 
-Keep the Status section honest. It currently records that no mutation has run against a
-live tenant; when that changes, change it.
+`python/tests/test_docs_current.py` checks the mechanical half of this — every skill,
+command, read subcommand, gated operation and MCP tool is named in the docs, every page
+is in the `mkdocs.yml` navigation, neither the docs nor the README references a file
+that does not exist, and the docs carry none of the implementation vocabulary listed in
+it. It cannot check whether the prose is still *true*, so read the affected page rather
+than only satisfying the test. `mkdocs build --strict` checks the links between pages;
+the docs workflow runs it on every pull request that touches them.
+
+The How it works page carries a diagram whose notes restate the approval path in a few
+sentences each. A change to that path is a change to those notes too.
+
+Keep the Status page honest about what has and has not run against a live tenant; when
+that changes, change it.
 
 ## Why the architecture is shaped this way
 
-The README is for users and deliberately does not carry this. Keep it here.
+The docs site is for users and deliberately does not carry this, and the README gives
+contributors only the outline. Keep the reasons here.
 
 ```
 reads   (ungated) ──▶ bin/cirro-agent ─┐
@@ -314,6 +329,12 @@ the username and the SDK's token cache are copied into the plugin cache on every
 install. The token file happened to be empty when this was found; it is not always.
 Bind a scratch directory for testing, not the checkout.
 
+The docs site follows the same rule. `docs/` is source and ships with every install,
+so it holds text and the few small images the site needs and nothing generated. A
+built site never goes in the tree: `mkdocs serve` builds into a temporary directory,
+and a build takes `--site-dir` outside the checkout, as the docs workflow does.
+`site/` is in `.gitignore` as a backstop, which a directory install does not consult.
+
 **One data directory, named identically in every context.** `runner.plugin_data()`
 and the shell's `resolve_plugin_data` locate the runtime, and `tenants_root()` hangs
 off the same answer. Neither consults `CLAUDE_PLUGIN_DATA`, though the host sets it,
@@ -484,7 +505,7 @@ delete's empty 204 as a Dashboard.
 
 **The SQL a dashboard runs is not ours.** Any project member writes a dashboard's
 queries, and a preview takes whatever the caller passes, and both run during a read and
-a plan -- paths nothing gates and the README tells people to allow outright. At
+a plan -- paths nothing gates and the docs tell people to allow outright. At
 DuckDB's defaults that SQL could `COPY` to any path, `read_text()` any file and install
 extensions, so `dashboard_data._connect` is the only way to open a connection for it:
 one readable directory (the download cache), external access off, configuration
@@ -522,7 +543,7 @@ docstring says "Deletes a reference". 1.6.0 is the newest published `cirro-api-c
 and it bundles no spec to check against, so whether the server takes a parameter the
 generator dropped cannot be settled from here. Built on that route as it stands, a
 `delete_reference` operation would be a destructive op whose blast radius is every
-reference in the project. It stays unimplemented, and the README says to use the web UI.
+reference in the project. It stays unimplemented, and the docs say to use the web UI.
 
 **Never call `DataPortal()` bare.** With no cached token it enters a device-code login
 and blocks until the code expires. Build auth explicitly via `worker/portal.py`.
@@ -596,6 +617,11 @@ and never to zero suggestions.
 `pytest python/tests -q` and `flake8 python/src python/tests scripts/gate.py` before
 finishing. Tests use a fake tenant over recorded HTTP; nothing in the suite needs a live
 Cirro. When a live check is genuinely required, say so rather than marking work verified.
+
+After touching `docs/` or `mkdocs.yml`, build the site with `uv run --no-project
+--with-requirements docs/requirements.txt mkdocs build --strict --site-dir <outside the
+checkout>`. A diagram change needs a look in a browser as well; the build cannot tell
+whether a label collides with a line.
 
 Two opt-in live checks exist and are skipped without their variables.
 `test_live_reads.py` (`CIRRO_AGENT_E2E=1`) runs every read against the tenant the

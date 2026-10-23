@@ -1,0 +1,64 @@
+# The user documentation, published to GitHub Pages by .github/workflows/docs.yml.
+# Build outside the checkout (--site-dir): a directory marketplace copies the plugin root
+# verbatim into every install, so a built site/ left here would ship with the plugin.
+site_name: Cirro plugin for Claude Code
+site_description: Work with your data on Cirro by asking Claude, using your own Cirro identity.
+repo_url: https://github.com/CirroBio/Cirro-claude-plugin
+repo_name: CirroBio/Cirro-claude-plugin
+edit_uri: edit/main/docs/
+exclude_docs: requirements.txt
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - How it works: how-it-works.md
+  - Using it:
+      - Signing in: signing-in.md
+      - Looking at things: reading.md
+      - Making changes: changes.md
+      - Approving a kind of change: grants.md
+      - Adding a pipeline: pipelines.md
+      - Building dashboards: dashboards.md
+      - Working with sheets: sheets.md
+  - Reference:
+      - Skills and tools: skills-and-tools.md
+      - Locking it down: locking-down.md
+      - Status: status.md
+
+theme:
+  name: material
+  logo: img/logo-cirro.png
+  favicon: img/favicon.ico
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+  palette:
+    scheme: default
+    primary: teal
+    accent: teal
+  font:
+    text: Inter
+
+extra_css:
+  - assets/hover-diagram.css
+
+extra_javascript:
+  - assets/hover-diagram.js
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+  links:
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn

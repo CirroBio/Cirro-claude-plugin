@@ -1,8 +1,9 @@
-"""The README must name what the plugin actually has.
+"""The user documentation must name what the plugin actually has.
 
 Documentation drift is normally caught by nobody, so the mechanical half is enforced
 here: every skill, command, read subcommand, gated operation and MCP tool has to appear
-in the README, and the README may not point at files that do not exist.
+in the docs site, and neither the docs nor the README may point at files that do not
+exist. Links between the docs pages are checked by `mkdocs build --strict` instead.
 
 This cannot tell whether the prose is still true -- see CLAUDE.md.
 """
@@ -13,6 +14,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 README = (ROOT / "README.md").read_text()
+DOCS = "\n".join(p.read_text() for p in sorted((ROOT / "docs").glob("*.md")))
 
 
 def _read_subcommands() -> list:
@@ -39,27 +41,27 @@ def _mcp_tools() -> list:
 
 @pytest.mark.parametrize("skill", _skills())
 def test_every_skill_is_named(skill):
-    assert skill in README, f"skill {skill!r} is not mentioned in the README"
+    assert skill in DOCS, f"skill {skill!r} is not mentioned in the docs"
 
 
 @pytest.mark.parametrize("command", _commands())
 def test_every_command_is_named(command):
     slash = "/" + command.replace("cirro-", "cirro:", 1)
-    assert command in README or slash in README, \
-        f"command {command!r} (as {slash}) is not mentioned in the README"
+    assert command in DOCS or slash in DOCS, \
+        f"command {command!r} (as {slash}) is not mentioned in the docs"
 
 
 @pytest.mark.parametrize("subcommand", _read_subcommands())
 def test_every_read_subcommand_is_named(subcommand):
-    assert f"`{subcommand}`" in README or f"read {subcommand}" in README, \
-        f"read subcommand {subcommand!r} is not documented in the README"
+    assert f"`{subcommand}`" in DOCS or f"read {subcommand}" in DOCS, \
+        f"read subcommand {subcommand!r} is not documented in the docs"
 
 
 def test_every_gated_operation_is_named():
     from cirro_agent.worker import mutations
-    missing = [op for op in sorted(mutations.OPS) if f"`{op}`" not in README]
+    missing = [op for op in sorted(mutations.OPS) if f"`{op}`" not in DOCS]
     assert not missing, (
-        "these gated operations are not listed in the README's coverage table -- the "
+        "these gated operations are not listed in the docs' coverage table -- the "
         f"table is the user-facing statement of what the plugin can change: {missing}")
 
 
@@ -87,22 +89,38 @@ def test_the_plan_tool_lists_every_operation_it_accepts():
 
 def test_every_mcp_tool_is_named():
     missing = [t for t in _mcp_tools()
-               if t not in README and f"mcp__cirro__{t}" not in README]
-    assert not missing, f"MCP tools absent from the README: {missing}"
+               if t not in DOCS and f"mcp__plugin_cirro_cirro__{t}" not in DOCS]
+    assert not missing, f"MCP tools absent from the docs: {missing}"
+
+
+def _repo_paths(text: str) -> set:
+    return set(re.findall(r"`((?:python|scripts|runtime|bin|skills|commands|docs|"
+                          r"\.claude-plugin|\.github)/[A-Za-z0-9_./-]+)`", text))
 
 
 def test_the_readme_points_at_files_that_exist():
-    referenced = set(re.findall(r"\]\((?!https?:)([^)#]+)\)", README))
-    referenced |= set(re.findall(r"`((?:python|scripts|runtime|bin|skills|commands|"
-                                 r"\.claude-plugin)/[A-Za-z0-9_./-]+)`", README))
+    referenced = set(re.findall(r"\]\((?!https?:)([^)#]+)\)", README)) | _repo_paths(README)
     missing = sorted(p for p in referenced if not (ROOT / p).exists())
     assert not missing, f"the README references files that do not exist: {missing}"
+
+
+def test_the_docs_point_at_files_that_exist():
+    missing = sorted(p for p in _repo_paths(DOCS) if not (ROOT / p).exists())
+    assert not missing, f"the docs reference files that do not exist: {missing}"
+
+
+def test_every_docs_page_is_in_the_navigation():
+    """A page left out of `nav` still builds, but nobody can find it."""
+    nav = (ROOT / "mkdocs.yml").read_text().split("\nnav:\n", 1)[1].split("\n\n", 1)[0]
+    pages = sorted(p.name for p in (ROOT / "docs").glob("*.md"))
+    missing = [p for p in pages if f": {p}" not in nav]
+    assert not missing, f"docs pages missing from the mkdocs.yml nav: {missing}"
 
 
 def test_no_root_mcp_json_and_the_reason_is_recorded():
     """A root .mcp.json is read as a project config and breaks with ENOENT.
 
-    The reason is maintainer-facing, so it lives in CLAUDE.md rather than the README.
+    The reason is maintainer-facing, so it lives in CLAUDE.md rather than the docs.
     """
     assert not (ROOT / ".mcp.json").exists()
     assert "plugin.json" in (ROOT / "CLAUDE.md").read_text()
@@ -111,8 +129,8 @@ def test_no_root_mcp_json_and_the_reason_is_recorded():
 def test_claude_md_exists_and_carries_the_firm_rule():
     text = (ROOT / "CLAUDE.md").read_text()
     assert "gated on user approval" in text
-    assert "test_readme_current.py" in text, \
-        "CLAUDE.md should point at the test that enforces its README rule"
+    assert "test_docs_current.py" in text, \
+        "CLAUDE.md should point at the test that enforces its docs rule"
 
 
 MAINTAINER_ONLY = [
@@ -122,12 +140,12 @@ MAINTAINER_ONLY = [
 
 
 @pytest.mark.parametrize("term", MAINTAINER_ONLY)
-def test_the_readme_stays_user_facing(term):
-    """Implementation vocabulary belongs in CLAUDE.md.
+def test_the_docs_stay_user_facing(term):
+    """Implementation vocabulary belongs in CLAUDE.md or the README.
 
-    The README describes what using the plugin is like; every one of these terms is
+    The docs describe what using the plugin is like; every one of these terms is
     something a user never needs and a maintainer always does.
     """
-    assert term not in README, (
-        f"{term!r} is implementation detail -- move it to CLAUDE.md and describe the "
-        "user-visible consequence in the README instead")
+    assert term not in DOCS, (
+        f"{term!r} is implementation detail -- keep it in CLAUDE.md or the README and "
+        "describe the user-visible consequence in the docs instead")
