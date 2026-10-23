@@ -27,7 +27,9 @@ jobs:
         # rather than jobs.<id>.env because the runner context is not readable there.
         run: echo "CIRRO_AGENT_PLUGIN_DATA=$RUNNER_TEMP/cirro-agent" >> "$GITHUB_ENV"
 
-      - uses: astral-sh/setup-uv@v7
+      # A third-party action is pinned to a commit, not a tag: a tag can be moved to
+      # point at other code after this file is written.
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7.6.0
         with:
           version: "0.5.16"
 
