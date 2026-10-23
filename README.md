@@ -628,7 +628,7 @@ directory is the older path and is unaffected. If a tenant login misbehaves,
 `cirro-agent read tenants` will show you what exists without needing a credential, and
 deleting the folder it names is always a safe reset.
 
-**Session grants are new and have not run against a live tenant.** `grant`,
+**Session grants are new in 0.14.0 and have not run against a live tenant.** `grant`,
 `apply_granted`, `grants` and `apply`'s `stop_asking` are tested against the simulated
 tenant only, and the `also_approves` line has not yet been seen in a real approval
 prompt. A grant lasts as long as the plugin's server process for the session, and that
@@ -649,6 +649,28 @@ The environment lives outside the checkout deliberately. A directory marketplace
 copies the plugin root verbatim into every install — it honours no `.gitignore` and
 takes no exclude list — so a virtualenv inside the tree is shipped with the plugin,
 and a second one appears in every git worktree you open.
+
+`--plugin-dir` loads the checkout into one terminal session. To run an unreleased
+`main` everywhere instead — every session, the desktop app included — install it in
+place of the published plugin. Install from an export, not the checkout, for the same
+reason as above: the checkout holds `.claude/worktrees/`, and a directory install
+would copy every worktree in it.
+
+```bash
+EXPORT="${XDG_DATA_HOME:-$HOME/.local/share}/cirro-claude-plugin-main"
+rm -rf "$EXPORT" && mkdir -p "$EXPORT" && git archive main | tar -x -C "$EXPORT"
+claude plugin uninstall cirro@cirro --keep-data
+claude plugin marketplace remove cirro
+claude plugin marketplace add "$EXPORT"
+claude plugin install cirro@cirro
+```
+
+The export is a snapshot. When `main` moves, export it again, then uninstall and
+reinstall the plugin. `main` carries the last release's version number until the next
+release, so the number cannot tell you which code a session is running. Sessions already open keep the MCP
+server they started with, so test in a new one. To go back to the published plugin,
+uninstall it, remove the `cirro` marketplace, and follow [Getting started](#getting-started).
+Tenant folders and the runtime live outside the plugin and survive both.
 
 `python/tests/test_readme_current.py` fails when this file falls out of step with the
 code, so drift breaks the build rather than accumulating.
