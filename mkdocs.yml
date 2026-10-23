@@ -33,14 +33,27 @@ theme:
     - navigation.sections
     - navigation.top
     - content.code.copy
+  # The header and palette match the Cirro App Kit site; assets/cirro.css is its copy.
   palette:
-    scheme: default
-    primary: teal
-    accent: teal
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
   font:
     text: Inter
 
 extra_css:
+  - assets/cirro.css
   - assets/hover-diagram.css
 
 extra_javascript:
