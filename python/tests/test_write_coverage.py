@@ -52,6 +52,10 @@ GATED = {
     "WorkspaceService.start": "start_workspace",
     "WorkspaceService.stop": "stop_workspace",
     "WorkspaceService.delete": "delete_workspace",
+    "ProcessService.create_custom_process": "create_process",
+    "ProcessService.update_custom_process": "update_process",
+    "ProcessService.sync_custom_process": "sync_process_config",
+    "ProcessService.archive": "archive_process",
     "DashboardService.create": "create_dashboard",
     "DashboardService.update": "edit_dashboard",
     "DashboardService.delete": "delete_dashboard",
@@ -80,14 +84,6 @@ UNSUPPORTED = {
         "renaming or re-billing a project is a web-UI action; only update_tags is exposed",
     "ShareService.update":
         "editing a live share's conditions silently changes who can read what; web UI only",
-    "ProcessService.archive":
-        "process lifecycle belongs to pipeline developers, not this plugin",
-    "ProcessService.create_custom_process":
-        "pipeline registration is owned by the cirro-pipeline-config plugin",
-    "ProcessService.update_custom_process":
-        "pipeline registration is owned by the cirro-pipeline-config plugin",
-    "ProcessService.sync_custom_process":
-        "pipeline registration is owned by the cirro-pipeline-config plugin",
     "BillingService.update":
         "billing changes have contractual consequences; web UI only",
     "FileService.create_file":
