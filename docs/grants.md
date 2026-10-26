@@ -43,8 +43,8 @@ Claude tells you why:
 
 - one plan that edits more than 50 datasets, inserts or updates more than 50 sheet
   rows, or launches an analysis on more than 50 input datasets
-- changing a dataset's data type (it re-derives the project's sample records), removing
-  tags, or taking datasets out of a folder
+- changing a dataset's data type, removing tags, or taking datasets out of a folder,
+  which includes moving them from one folder to another
 - deleting a sample's metadata keys or blanking their values
 - blanking sheet cells, or inserting rows from a file on your computer
 - a launch given its own list of addresses to email; leaving the default, which emails
@@ -57,8 +57,8 @@ and with the login it was given under. It lasts until the Claude Code session en
 until you ask Claude to revoke it. Ask Claude what you have granted at any point and it
 lists them. Reconnecting the plugin's server with `/mcp` also ends every grant, because
 grants are held in that server's memory and never stored on disk as an approval.
-Whether clearing the conversation with `/clear` ends them has not been checked; if it
-matters, revoke them first.
+Clearing the conversation with `/clear` does not end them, so revoke them first if you
+are clearing it to start on something else.
 
 Each change a grant approves is still checked again against current facts when it is
 made, is still single use, and is recorded in `.cirro/runs/` together with the grant
@@ -68,6 +68,3 @@ that approved it.
     While a grant is in place, a change of that kind in that project runs without asking
     even if something Claude read, such as a dataset description or a cell in a sheet, is
     what steered it there. Grant narrowly, and revoke when you are done.
-
-Grants are new in 0.14.0 and have not yet run against a live tenant; see
-[Status](status.md).

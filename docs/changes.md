@@ -83,7 +83,7 @@ A change to a field the policy does not allow is refused. Ask Claude where a cha
 stands and it shows each attempt, what it produced and where it stopped.
 
 Every change is recorded in your login folder, in `.cirro/runs/`: what was done, when,
-and as whom. Ask Claude which tenants you are signed in to and it names the folder.
+and as whom. Ask Claude who you are signed in as and it names the folder.
 
 ## Worth knowing
 
@@ -138,6 +138,3 @@ also have a time limit: if the bytes could not move within it, the plan says so 
 you approve rather than after the transfer is cut off.
 
 Deleting a reference is not supported yet; use the Cirro portal.
-
-Not every operation in this table has run against a real Cirro tenant yet.
-[Status](status.md) says which have.

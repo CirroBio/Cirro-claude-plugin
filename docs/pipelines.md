@@ -41,12 +41,9 @@ case, because the files are already yours and already where you put them.
 - **Claude only edits pipelines you own.** One belonging to a colleague, or curated by
   Cirro, is refused rather than changed.
 - **Configuration is checked before it goes anywhere**, whether generated or written by
-  hand. `cirro-agent read check-config` catches the failures the portal reports
+  hand, against rules calibrated on the configuration of 213 pipelines already running
+  in Cirro. `cirro-agent read check-config` catches the failures the portal reports
   unhelpfully or not at all — form fields the renderer will ignore, file pickers that
   will show an empty list, parameters wired to fields that do not exist. Nothing in that
   check can tell you whether the form makes sense to a biologist, so open it in the
   Cirro portal once before sharing it.
-- **Registering a pipeline has not yet been done against a live tenant.** The generated
-  configuration is checked by a validator calibrated on the configuration of 213
-  pipelines already running in Cirro, but treat your first registration as untested;
-  see [Status](status.md).

@@ -12,12 +12,12 @@ drawing. A dashboard that would come out blank, because a column is missing or a
 was given the wrong kind of column, is refused with the reason instead of saved. You can
 ask Claude to skip this check, and the plan then says it was skipped.
 
-To run that check, and when you ask Claude what a dashboard shows, the plugin downloads
-the dashboard's source files into a cache in your login folder, without asking. Files
-over 500 MiB are skipped, and the plan says so.
+To run that check, and whenever Claude runs a dashboard's data to show you what it
+draws, the plugin downloads the dashboard's source files into a cache in your login
+folder, without asking. Files over 500 MiB are skipped, and the plan says so.
 
 A dashboard's queries are written by anyone in the project, so they run locked down: a
-single SELECT against the files already downloaded for it, with no other file and no
+single SELECT that can read only that download cache, with no other file and no
 network.
 
 The dashboard's structure is checked against what your Cirro portal says it can draw,
@@ -30,6 +30,3 @@ Your tab picks up Claude's change when you have no unsaved edits, and warns you 
 of overwriting it when you do. The other direction holds too: if you save in the portal
 after Claude has planned an edit, the edit is refused as stale rather than written over
 your work.
-
-The portal half of this needs a portal build that is not yet deployed everywhere; until
-it reaches yours, an open tab can still overwrite an edit. See [Status](status.md).

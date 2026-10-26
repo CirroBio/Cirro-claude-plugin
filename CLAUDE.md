@@ -89,8 +89,10 @@ the docs workflow runs it on every pull request that touches them.
 The How it works page carries a diagram whose notes restate the approval path in a few
 sentences each. A change to that path is a change to those notes too.
 
-Keep the Status page honest about what has and has not run against a live tenant; when
-that changes, change it.
+Keep the Status page honest about what has run against a live tenant, and about known
+limits that still bite; when either changes, change it. Operations that share the
+tested plan/apply path are not listed one by one as untested, and the docs never name
+the tenants, projects or people a live check used.
 
 ## Why the architecture is shaped this way
 
@@ -219,8 +221,9 @@ headline to the person as a `systemMessage`: whether the model shows a granted c
 is up to the model, and a subagent's transcript is not shown at all. A plan it cannot
 read gets the ordinary prompt instead of an `allow`. Subagents
 that name this server share the parent's connection, and so its grants (per the
-sub-agents documentation). Not verified: whether `/clear` restarts the server; if it
-does not, a grant outlives it.
+sub-agents documentation). Checked on Claude Code 2.1.310 by watching the server's PID:
+`/clear` keeps the server, so a grant outlives it, and `/mcp` reconnect starts a new
+one, so every grant ends.
 
 **Declare the MCP server in `.claude-plugin/plugin.json`, never a root `.mcp.json`.** A
 file at that path is also read as a project-scoped config by anyone running Claude Code

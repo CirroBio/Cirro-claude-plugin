@@ -55,7 +55,8 @@ and tells you what was in the folder. Logins for a single directory are not remo
 this way; delete their `.cirro/` folder yourself.
 
 On macOS the token itself is stored in your login Keychain, and neither of these erases
-it. To remove it as well, run `security delete-generic-password -s cirro-client`.
+it. To remove it as well, run `security delete-generic-password -s cirro-client`, once
+for each login you had.
 
 ## If you sign in for one directory
 
@@ -67,7 +68,7 @@ directory is refused, since that is where the standalone `cirro` tool keeps its 
 
 **Not inside a folder you will delete or copy.** Deleting a git worktree deletes the
 login in it, and a copied folder takes the login with it: your tenant, your username
-and, where your system has no keychain, the token in plain text.
+and, on Linux, the token itself in plain text.
 
 **A `.cirro/` that git tracks is refused.** It arrived with the repository rather than
 from a sign-in on your machine, and the nearest folder decides which host every request

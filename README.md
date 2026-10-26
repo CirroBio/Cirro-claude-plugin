@@ -122,7 +122,11 @@ variables. `python/tests/test_live_reads.py` runs every read against the tenant 
 working directory is bound to, and changes nothing; set `CIRRO_AGENT_E2E=1`.
 `python/tests/test_live_writes.py` is the smallest real check of the change path — add
 a tag, take it off again — and runs only when you also name a disposable project in
-`CIRRO_AGENT_E2E_WRITE_PROJECT`. Never point it at anything that is not disposable.
+`CIRRO_AGENT_E2E_WRITE_PROJECT`. Naming a dataset in `CIRRO_AGENT_E2E_WRITE_DATASET`
+adds a tag round trip on it, and `CIRRO_AGENT_E2E_RETYPE_TO` a retype and back. It
+resolves the session folder from the checkout unless `CIRRO_AGENT_E2E_DIR` names a
+directory bound to the tenant you mean, which is what you want on a machine signed in
+to more than one. Never point it at anything that is not disposable.
 
 ## Contributing
 
@@ -139,7 +143,7 @@ add one, and the tests are built to make forgetting fail:
 3. Exercise its request construction in `python/tests/test_request_models.py`. The
    generated request models replace whole records, so an omitted field is blanked.
 4. Name it in the `plan` tool's description in `mcp_server.py` and in the coverage table
-   in `docs/changes.md`. Both are checked.
+   in `docs/changes.md`. Tests check that both name it.
 
 `bin/cirro-agent` must never gain a write path. Making an operation grantable widens
 what a person can approve in advance; it is a decision about the approval rule, pinned
@@ -153,11 +157,11 @@ folder; a file the docs name moving — update `docs/` in the same commit.
 has is named in the docs, no page is missing from the navigation, and neither the docs
 nor this file names a file that does not exist. It cannot tell whether the prose is
 still true, so read the affected page. Keep [Status](docs/status.md) honest about
-what has and has not run against a live tenant.
+what has run against a live tenant and what known limits remain.
 
 **Before you push**, run the suite and the lint as above, and `claude plugin validate
-./`. CI (`.github/workflows/ci.yml`) runs all three on every push and pull request, and
-again weekly so a new `cirro` release that breaks the pinned client is caught by
+./`. CI (`.github/workflows/ci.yml`) runs all three on every pull request and every push to
+`main`, and again weekly so a new `cirro` release that breaks the pinned client is caught by
 `test_runtime_contract.py` rather than by a user. Coverage has a floor that only moves
 up.
 
@@ -194,8 +198,8 @@ marked `data-key="x"` shows the note `data-note="x"` and dims every element whos
 3. Tag it `vX.Y.Z` with an annotated tag and push the tag — never in the same push as
    `main`.
 4. Publish the GitHub release from the tag (`gh release create vX.Y.Z --verify-tag`),
-   with notes written for users: what changed for them, what has not run against a live
-   tenant, and whether they need to update and start a new session.
+   with notes written for users: what changed for them, any known limit it leaves, and
+   whether they need to update and start a new session.
 
 ## License
 

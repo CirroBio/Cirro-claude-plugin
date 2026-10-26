@@ -46,8 +46,9 @@ you gave:
   time.
 
 `grant` asks every time as well, and `grants` lists the grants you have given or revokes
-them. `plan` only works out what a change would do; it changes nothing.
+them. `plan` only works out what a change would do; it changes nothing in Cirro.
 
-Three more write only to your login folder, without asking: `session_init` and
-`login_start` create the folder and lead to a stored sign-in, and `logout` removes the
-sign-in from it.
+Others write only to a login folder on your computer, without asking: `session_init`
+creates one, `login_start` and `login_wait` store your sign-in in it, `logout` removes
+the sign-in, and `plan` keeps the plan it worked out there until you approve or it
+expires.

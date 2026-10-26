@@ -29,16 +29,17 @@ SDK is ordinary work; only running it through Claude is checked.
 
 ## When the check applies
 
-The check switches on the first time a session uses a Cirro skill, one of the plugin's
-tools, or `cirro-agent`, and stays on for the rest of that session. Before that there is
+The check switches on the first time a session uses a skill or tool with Cirro in its
+name, or `cirro-agent`, and stays on for the rest of that session. Before that there is
 no approval to go around, so a project that merely depends on the Cirro SDK is not
 affected by having the plugin installed.
 
 Some things never wait for that:
 
 - `apply` always shows the plan and asks.
-- A command that names Cirro's credential storage or the machine-wide `~/.cirro` is
-  always refused, even one that only mentions it, such as a commit message.
+- A command that reads passwords from the macOS Keychain, names a Cirro token file, or
+  names the machine-wide `~/.cirro` is always refused, even one that only mentions it,
+  such as a commit message.
 - Handing a `.cirro/` folder or its credential files to anything that reads them is
   always refused.
 
@@ -79,6 +80,6 @@ terminal.
 
 Allowing `cirro-agent read` outright is safe: that command has no ability to change
 anything, and a test fails if it ever gains one. `apply` is missing from the allow list
-on purpose, and could not be added anyway: it asks regardless. The same is true of
+on purpose, and adding it would change nothing: it asks regardless. The same is true of
 `grant`. `apply_granted` needs no rule: the plugin lets it through itself, and the
 plugin's server refuses any plan that no grant you approved covers.
