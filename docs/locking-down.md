@@ -45,6 +45,15 @@ Some things never wait for that:
 
 If a session cannot be identified, the checks apply as though it had used Cirro.
 
+## Cirro's AI settings
+
+The plugin works with each person's own Cirro login, as the Cirro command-line tool and
+SDK do, so what Claude can see and change follows that person's project roles alone.
+An organization's setting to allow AI services, and a project's **Allow AI
+functionality on this project** setting, do not apply to the plugin. Anyone who can
+open a project in Cirro can ask Claude about it, and can approve the changes their role
+allows.
+
 ## A hard boundary in your own settings
 
 A plugin cannot add standing allow or deny rules to your settings; it can only

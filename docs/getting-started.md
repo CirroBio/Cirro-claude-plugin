@@ -110,6 +110,10 @@ sheet rows and run logs, becomes part of the conversation and is sent to the Cla
 model like anything you type. Your sign-in token is not. Check your organization's
 policy before using the plugin on restricted data.
 
+What Claude can reach follows your project roles alone. Cirro's settings that allow AI
+services for an organization and AI functionality on a project do not apply to the
+plugin: it works with your own login, as the Cirro command-line tool and SDK do.
+
 ## If something seems off
 
 ```

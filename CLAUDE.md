@@ -158,6 +158,14 @@ whole gate off silently. The marker is per session, touched on every use, and pr
 after 14 days without one. A Bash command that arms the session is itself judged armed,
 because it can carry a bypass beside the use: `cirro-agent read x && python3 drive.py`.
 
+**Cirro's AI settings do not gate the plugin, by decision.** A project's `isAiEnabled`
+and the organization's AI-services setting are enforced only by Cirro's MCP server
+(`McpProjectValidator.requireAiEnabled` in Cirro-backend). The plugin reaches the
+ordinary API with the person's own login, as the CLI and SDK do, so its access follows
+project roles alone. On 2026-10-26 that was chosen over refusing AI-disabled projects
+in the plugin: the docs say so on Getting started and Locking it down. Do not add such a
+check without revisiting that decision.
+
 **Two surfaces, split by the gate.** Writes must be approved by the person -- per plan
 through `apply`, or in advance through `grant` -- which only an MCP tool can guarantee — `_meta["anthropic/requiresUserInteraction"]` is not defeated by an
 allow rule, any permission mode, or a hook returning `allow`. Bash has no equivalent.
