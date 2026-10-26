@@ -23,11 +23,10 @@ nav:
       - Adding a pipeline: pipelines.md
   - Trust and safety:
       - How it works: how-it-works.md
-      - Status: status.md
       - Locking it down: locking-down.md
   - Reference:
       - Skills and tools: skills-and-tools.md
-      - Words you will see: glossary.md
+      - Glossary: glossary.md
 
 theme:
   name: material

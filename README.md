@@ -156,8 +156,7 @@ folder; a file the docs name moving — update `docs/` in the same commit.
 `python/tests/test_docs_current.py` checks the mechanical half: everything the plugin
 has is named in the docs, no page is missing from the navigation, and neither the docs
 nor this file names a file that does not exist. It cannot tell whether the prose is
-still true, so read the affected page. Keep [Status](docs/status.md) honest about
-what has run against a live tenant and what known limits remain.
+still true, so read the affected page.
 
 **Before you push**, run the suite and the lint as above, and `claude plugin validate
 ./`. CI (`.github/workflows/ci.yml`) runs all three on every pull request and every push to

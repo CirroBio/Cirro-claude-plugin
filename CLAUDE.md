@@ -86,13 +86,14 @@ it. It cannot check whether the prose is still *true*, so read the affected page
 than only satisfying the test. `mkdocs build --strict` checks the links between pages;
 the docs workflow runs it on every pull request that touches them.
 
-The How it works page carries a diagram whose notes restate the approval path in a few
-sentences each. A change to that path is a change to those notes too.
+The home page and the How it works page each carry a diagram whose notes restate the
+approval path in a few sentences each. A change to that path is a change to those notes
+too.
 
-Keep the Status page honest about what has run against a live tenant, and about known
-limits that still bite; when either changes, change it. Operations that share the
-tested plan/apply path are not listed one by one as untested, and the docs never name
-the tenants, projects or people a live check used.
+The docs carry no status page and no per-operation "untested" notes: operations share
+the tested plan/apply path. A known limit goes on the page for the feature it limits,
+and in the release notes. The docs never name the tenants, projects or people a live
+check used.
 
 ## Why the architecture is shaped this way
 

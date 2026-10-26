@@ -1,4 +1,4 @@
-# Words you will see
+# Glossary
 
 **Tenant.** Your organization's Cirro site, such as `app.cirro.bio`. The Cirro
 documentation also calls it an organization or a Cirro instance.

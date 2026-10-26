@@ -4,7 +4,7 @@ Work with your data on the [Cirro](https://cirro.bio) platform by asking Claude,
 your own Cirro account.
 
 <div class="hover-diagram">
-<svg viewBox="0 0 1000 670" role="group" aria-label="How the plugin signs you in, reads and makes changes. Select a part of the diagram to read about it.">
+<svg viewBox="0 0 1000 670" role="group" aria-label="What asks for your approval and what does not. Select a part of the diagram to read about it.">
   <defs>
     <marker id="home-arrow-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto">
       <path d="M1,1 L9,5 L1,9" fill="none" stroke="#1b1e3a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
@@ -13,98 +13,86 @@ your own Cirro account.
       <path d="M1,1 L9,5 L1,9" fill="none" stroke="#0e7d9f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
   </defs>
-  <path class="hd-dotted" data-r="change" d="M128,90 H430 V212"/>
-  <path class="hd-dotted" data-r="grant" d="M128,90 H560 V112"/>
-  <path class="hd-dotted" data-r="grant" d="M560,148 V230"/>
-  <path class="hd-line" data-r="read change grant" d="M90,172 V318" marker-end="url(#home-arrow-ink)"/>
-  <path class="hd-path" data-r="change grant" d="M128,360 H160 V230 H222"/>
-  <path class="hd-path" data-r="change grant" d="M298,230 H412"/>
-  <path class="hd-path" data-r="change" d="M448,230 H560"/>
-  <path class="hd-path" data-r="change grant" d="M560,230 H620"/>
-  <path class="hd-path" data-r="read" d="M128,360 H160 V480 H262"/>
-  <path class="hd-path" data-r="read" d="M338,480 H620"/>
-  <path class="hd-path" data-r="login read change grant" d="M620,230 V480"/>
-  <path class="hd-path" data-r="login read change grant" d="M620,230 H669 M721,230 H831" marker-end="url(#home-arrow-teal)"/>
-  <path class="hd-path" data-r="login read change grant" d="M620,480 H669 M721,480 H831" marker-end="url(#home-arrow-teal)"/>
+  <g class="hd-hot" data-key="change" tabindex="0" aria-label="Changes ask you first">
+    <g data-r="change grant">
+      <rect x="190" y="110" width="480" height="245" rx="22" fill="#f7f8fb" stroke="#5b6070" stroke-width="1.5" stroke-dasharray="8 7"/>
+      <text x="214" y="146" class="hd-strong">Changes ask you first</text>
+      <text x="214" y="170" class="hd-sub">uploads, runs, edits, deletes</text>
+      <circle class="hd-node" cx="300" cy="245" r="38"/>
+      <g class="hd-icon" transform="translate(300,245)"><rect x="-12" y="-16" width="24" height="32" rx="3"/><path d="M-6,-8 H6 M-6,-1 H6 M-6,6 H2"/></g>
+      <text x="300" y="312" text-anchor="middle">Plan</text>
+      <text x="300" y="336" text-anchor="middle" class="hd-sub">nothing changes yet</text>
+    </g>
+    <g data-r="change">
+      <circle class="hd-node" cx="470" cy="245" r="18"/>
+      <g transform="translate(470,245)"><rect x="-11" y="-6" width="22" height="12" rx="6" fill="none" stroke="#1b1e3a" stroke-width="2"/><circle cx="5" cy="0" r="3.5" fill="#1b1e3a"/></g>
+      <text x="470" y="292" text-anchor="middle">Your approval</text>
+      <text x="470" y="314" text-anchor="middle" class="hd-sub">each change</text>
+    </g>
+  </g>
+  <g class="hd-hot" data-key="read" tabindex="0" aria-label="Reading never asks">
+    <g data-r="read">
+      <rect x="190" y="395" width="480" height="200" rx="22" fill="#f7f8fb" stroke="#5b6070" stroke-width="1.5" stroke-dasharray="8 7"/>
+      <text x="214" y="431" class="hd-strong">Reading never asks</text>
+      <text x="214" y="455" class="hd-sub">projects, datasets, runs, logs, costs</text>
+      <circle class="hd-node" cx="330" cy="510" r="38"/>
+      <g class="hd-icon" transform="translate(330,510)"><circle cx="-4" cy="-4" r="10"/><path d="M3.5,3.5 L13,13"/></g>
+      <text x="330" y="577" text-anchor="middle">cirro-agent read</text>
+    </g>
+  </g>
+  <path class="hd-dotted" data-r="change" d="M128,70 H470 V227"/>
+  <path class="hd-dotted" data-r="grant" d="M128,70 H600 V142"/>
+  <path class="hd-dotted" data-r="grant" d="M600,178 V245"/>
+  <path class="hd-line" data-r="read change grant" d="M90,152 V336" marker-end="url(#home-arrow-ink)"/>
+  <path class="hd-path" data-r="change grant" d="M128,378 H160 V245 H262"/>
+  <path class="hd-path" data-r="change grant" d="M338,245 H452"/>
+  <path class="hd-path" data-r="change" d="M488,245 H600"/>
+  <path class="hd-path" data-r="change grant login" d="M600,245 H700 C750,245 750,378 786,378"/>
+  <path class="hd-path" data-r="read" d="M128,378 H160 V510 H292"/>
+  <path class="hd-path" data-r="read login" d="M368,510 H700 C750,510 750,378 786,378"/>
+  <path class="hd-path" data-r="login read change grant" d="M838,378 H874" marker-end="url(#home-arrow-teal)"/>
   <g data-r="login read change grant">
-    <circle class="hd-node" cx="90" cy="360" r="38"/>
-    <g class="hd-icon" transform="translate(90,360)">
+    <circle class="hd-node" cx="90" cy="378" r="38"/>
+    <g class="hd-icon" transform="translate(90,378)">
       <path d="M-16,-13 H16 A3,3 0 0 1 19,-10 V7 A3,3 0 0 1 16,10 H-2 L-10,17 V10 H-16 A3,3 0 0 1 -19,7 V-10 A3,3 0 0 1 -16,-13 Z"/>
       <path d="M-9,-2 H9"/>
     </g>
-    <text x="90" y="427" text-anchor="middle">Claude</text>
-    <text x="90" y="451" text-anchor="middle" class="hd-sub">in Claude Code</text>
+    <text x="90" y="445" text-anchor="middle">Claude</text>
+    <text x="90" y="469" text-anchor="middle" class="hd-sub">in Claude Code</text>
   </g>
   <g class="hd-hot" data-key="change" tabindex="0" aria-label="You">
-    <rect class="hd-hit" x="30" y="36" width="120" height="132" rx="12"/>
+    <rect class="hd-hit" x="30" y="16" width="120" height="132" rx="12"/>
     <g data-r="change grant">
-      <circle class="hd-node" cx="90" cy="90" r="38"/>
-      <g class="hd-icon" transform="translate(90,90)"><circle cx="0" cy="-9" r="8"/><path d="M-15,18 a15,15 0 0 1 30,0"/></g>
-      <text x="90" y="157" text-anchor="middle">You</text>
+      <circle class="hd-node" cx="90" cy="70" r="38"/>
+      <g class="hd-icon" transform="translate(90,70)"><circle cx="0" cy="-9" r="8"/><path d="M-15,18 a15,15 0 0 1 30,0"/></g>
+      <text x="90" y="137" text-anchor="middle">You</text>
     </g>
   </g>
-  <g class="hd-hot" data-key="change" tabindex="0" aria-label="Changing: a plan, then your approval">
-    <rect class="hd-hit" x="182" y="186" width="318" height="146" rx="12"/>
-    <g data-r="change grant">
-      <circle class="hd-node" cx="260" cy="230" r="38"/>
-      <g class="hd-icon" transform="translate(260,230)"><rect x="-12" y="-16" width="24" height="32" rx="3"/><path d="M-6,-8 H6 M-6,-1 H6 M-6,6 H2"/></g>
-      <text x="260" y="297" text-anchor="middle">Plan</text>
-      <text x="260" y="321" text-anchor="middle" class="hd-sub">nothing changes yet</text>
-    </g>
-    <g data-r="change">
-      <circle class="hd-node" cx="430" cy="230" r="18"/>
-      <g transform="translate(430,230)"><rect x="-11" y="-6" width="22" height="12" rx="6" fill="none" stroke="#1b1e3a" stroke-width="2"/><circle cx="5" cy="0" r="3.5" fill="#1b1e3a"/></g>
-      <text x="430" y="277" text-anchor="middle" class="hd-sub">Your approval</text>
-    </g>
-  </g>
-  <g class="hd-hot" data-key="grant" tabindex="0" aria-label="Approving a kind of change for a session">
-    <rect class="hd-hit" x="530" y="100" width="170" height="64" rx="12"/>
+  <g class="hd-hot" data-key="grant" tabindex="0" aria-label="Or approve one kind of change for this session">
+    <rect class="hd-hit" x="476" y="128" width="164" height="70" rx="12"/>
     <g data-r="grant">
-      <circle class="hd-node" cx="560" cy="130" r="18"/>
-      <g class="hd-icon-sm" transform="translate(560,130)"><circle cx="-4" cy="0" r="4.5"/><path d="M0.5,0 H10 M7,0 V4"/></g>
-      <text x="584" y="126">Grant</text>
-      <text x="584" y="150" class="hd-sub">this session</text>
+      <circle class="hd-node" cx="600" cy="160" r="18"/>
+      <g class="hd-icon-sm" transform="translate(600,160)"><circle cx="-4" cy="0" r="4.5"/><path d="M0.5,0 H10 M7,0 V4"/></g>
+      <text x="576" y="156" text-anchor="end">Grant</text>
+      <text x="576" y="178" text-anchor="end" class="hd-sub">this session</text>
     </g>
   </g>
-  <g class="hd-hot" data-key="read" tabindex="0" aria-label="Reading: cirro-agent read">
-    <rect class="hd-hit" x="205" y="436" width="190" height="146" rx="12"/>
-    <g data-r="read">
-      <circle class="hd-node" cx="300" cy="480" r="38"/>
-      <g class="hd-icon" transform="translate(300,480)"><circle cx="-4" cy="-4" r="10"/><path d="M3.5,3.5 L13,13"/></g>
-      <text x="300" y="547" text-anchor="middle">cirro-agent read</text>
-      <text x="300" y="571" text-anchor="middle" class="hd-sub">never asks</text>
-    </g>
-  </g>
-  <g class="hd-hot" data-key="login" tabindex="0" aria-label="Your logins, one for each tenant">
-    <rect class="hd-hit" x="660" y="172" width="70" height="340" rx="12"/>
-    <rect class="hd-hit" x="760" y="112" width="232" height="476" rx="12"/>
+  <g class="hd-hot" data-key="login" tabindex="0" aria-label="Your login and your Cirro tenant">
+    <rect class="hd-hit" x="776" y="344" width="72" height="94" rx="12"/>
+    <rect class="hd-hit" x="852" y="255" width="136" height="246" rx="22" stroke="#0e7d9f" stroke-width="1.5" stroke-dasharray="8 7"/>
     <g data-r="login read change grant">
-      <rect x="770" y="120" width="215" height="210" rx="26" fill="none" stroke="#0e7d9f" stroke-width="1.5" stroke-dasharray="8 7"/>
-      <text x="877" y="156" text-anchor="middle" class="hd-strong">app.cirro.bio</text>
-      <circle class="hd-node-teal" cx="877" cy="230" r="44"/>
-      <g class="hd-icon-teal" transform="translate(877,230)">
+      <circle class="hd-node" cx="812" cy="378" r="26"/>
+      <g class="hd-icon-sm" transform="translate(812,378)"><path d="M-12,-8 H-4 L-1,-5 H12 V9 H-12 Z"/></g>
+      <text x="812" y="426" text-anchor="middle" class="hd-sub">your login</text>
+      <text x="920" y="291" text-anchor="middle" class="hd-strong">Cirro</text>
+      <text x="920" y="315" text-anchor="middle" class="hd-sub">your tenant</text>
+      <circle class="hd-node-teal" cx="920" cy="378" r="44"/>
+      <g class="hd-icon-teal" transform="translate(920,378)">
         <ellipse cx="0" cy="-12" rx="16" ry="6"/>
         <path d="M-16,-12 V12 A16,6 0 0 0 16,12 V-12"/>
         <path d="M-16,0 A16,6 0 0 0 16,0"/>
       </g>
-      <text x="877" y="304" text-anchor="middle" class="hd-sub">projects and data</text>
-      <rect x="770" y="370" width="215" height="210" rx="26" fill="none" stroke="#0e7d9f" stroke-width="1.5" stroke-dasharray="8 7"/>
-      <text x="877" y="406" text-anchor="middle" class="hd-strong">institute.cirro.bio</text>
-      <circle class="hd-node-teal" cx="877" cy="480" r="44"/>
-      <g class="hd-icon-teal" transform="translate(877,480)">
-        <ellipse cx="0" cy="-12" rx="16" ry="6"/>
-        <path d="M-16,-12 V12 A16,6 0 0 0 16,12 V-12"/>
-        <path d="M-16,0 A16,6 0 0 0 16,0"/>
-      </g>
-      <text x="877" y="554" text-anchor="middle" class="hd-sub">projects and data</text>
-    </g>
-    <g data-r="login read change grant">
-      <circle class="hd-node" cx="695" cy="230" r="26"/>
-      <g class="hd-icon-sm" transform="translate(695,230)"><path d="M-12,-8 H-4 L-1,-5 H12 V9 H-12 Z"/></g>
-      <text x="695" y="190" text-anchor="middle" class="hd-sub">your login</text>
-      <circle class="hd-node" cx="695" cy="480" r="26"/>
-      <g class="hd-icon-sm" transform="translate(695,480)"><path d="M-12,-8 H-4 L-1,-5 H12 V9 H-12 Z"/></g>
-      <text x="695" y="440" text-anchor="middle" class="hd-sub">your login</text>
+      <text x="920" y="448" text-anchor="middle" class="hd-sub">your data</text>
     </g>
   </g>
   <g aria-hidden="true">
@@ -113,38 +101,38 @@ your own Cirro account.
     <text x="98" y="646" class="hd-sub">Your approval</text>
     <circle class="hd-node" cx="270" cy="640" r="18"/>
     <g class="hd-icon-sm" transform="translate(270,640)"><path d="M-9,-6 H-3 L-1,-4 H9 V7 H-9 Z"/></g>
-    <text x="298" y="646" class="hd-sub">Your login to one tenant</text>
-    <path class="hd-dotted" d="M540,640 H582"/>
-    <text x="596" y="646" class="hd-sub">Your decision</text>
-    <path class="hd-path" d="M760,640 H806"/>
-    <text x="820" y="646" class="hd-sub">Path to your data</text>
+    <text x="298" y="646" class="hd-sub">Your login</text>
+    <path class="hd-dotted" d="M450,640 H492"/>
+    <text x="506" y="646" class="hd-sub">Your decision</text>
+    <path class="hd-path" d="M680,640 H726"/>
+    <text x="740" y="646" class="hd-sub">Path to your data</text>
   </g>
 </svg>
 <div class="hd-panel" aria-live="polite">
   <div class="hd-note is-shown" data-note="">
     <p class="hd-kicker">The plugin</p>
-    <p class="hd-title">How Claude reaches your data in Cirro</p>
-    <p>Teal lines are the paths from Claude to your data: changes along the top, reads along the bottom. Both reach every tenant you are signed in to, with your own login. The switch is an approval only you can give, and the dotted lines are your decisions. Hover over or tap any part of the diagram to learn more.</p>
+    <p class="hd-title">What asks for your approval, and what does not</p>
+    <p>Teal lines are the paths from Claude to your data. Anything in the top box changes something in Cirro, so it waits for your approval. Anything in the bottom box only reads, so it never asks. Hover over or tap any part of the diagram to learn more.</p>
   </div>
-  <div class="hd-note" data-note="login">
-    <p class="hd-kicker">Your logins</p>
-    <p class="hd-title">Sign in once for each tenant</p>
-    <p>Ask Claude to connect to a tenant, such as app.cirro.bio, and it gives you a sign-in link to approve in your own browser. The plugin keeps that login on your computer, outside your projects, and every request to that tenant goes as you, with its login. Signed in to both app.cirro.bio and institute.cirro.bio, Claude asks which one you mean, unless the directory you are working in has a login of its own.</p>
+  <div class="hd-note" data-note="change">
+    <p class="hd-kicker">Changes</p>
+    <p class="hd-title">Every change waits for your approval</p>
+    <p>Uploading, launching a run, editing or deleting: anything that creates, changes or deletes is first worked out as a plan, without touching anything, and shown to you. It runs only when you approve it in Claude Code's own prompt, which Claude cannot answer for you. What runs is what you read: the plan is checked again as it is applied, used once, and logged.</p>
+  </div>
+  <div class="hd-note" data-note="grant">
+    <p class="hd-kicker">In advance</p>
+    <p class="hd-title">Or approve one kind of change for this session</p>
+    <p>For repetitive work, such as filling in a sheet or launching runs one after another, you can approve one kind of change in one project for the rest of the session. Each change is still planned, shown and logged, with a notice as it is made. Nothing that deletes or changes who has access can be approved this way.</p>
   </div>
   <div class="hd-note" data-note="read">
     <p class="hd-kicker">Reading</p>
     <p class="hd-title">Looking never asks</p>
-    <p>Questions about your data go through cirro-agent read, a command with no way to change anything, so it never needs your approval and you can let Claude Code run it without asking. Claude can look around as much as a question needs.</p>
+    <p>Questions about your projects, datasets, runs, logs and costs go through cirro-agent read, a command with no way to change anything. It never needs your approval, and you can let Claude Code run it without asking at all.</p>
   </div>
-  <div class="hd-note" data-note="change">
-    <p class="hd-kicker">Changing</p>
-    <p class="hd-title">Every change waits for you</p>
-    <p>Anything that creates, changes or deletes starts as a plan, worked out without touching anything and shown to you in the conversation. It runs only when you approve it in Claude Code's own prompt, which Claude cannot answer for you. What runs is what you read: the plan is checked again as it is applied, used once, and logged.</p>
-  </div>
-  <div class="hd-note" data-note="grant">
-    <p class="hd-kicker">In advance</p>
-    <p class="hd-title">Stop being asked about one kind of change</p>
-    <p>For repetitive work, such as filling in a sheet or launching runs one after another, you can approve one kind of change in one project for the rest of the session. Each change is still planned, shown and logged, with a notice as it is made. Nothing that deletes or changes who has access can be approved this way.</p>
+  <div class="hd-note" data-note="login">
+    <p class="hd-kicker">Your login</p>
+    <p class="hd-title">Claude works as you</p>
+    <p>You sign in once for each Cirro tenant you use, on Cirro's own page in your browser, and the plugin keeps the login on your computer. Every request, a read or a change, goes with your login, so Claude can see and do what your account can and nothing more.</p>
   </div>
 </div>
 </div>
@@ -188,9 +176,6 @@ goes through a plan that you read and an approval prompt that Claude cannot answ
 you, and Claude works as you, with your project roles and nothing more.
 [How it works](how-it-works.md) shows the same path in more detail, including how a
 login is found for the directory you work in and the check on Claude's shell commands.
-
-Reading, and the changes people make most often, have run many times against real
-Cirro tenants; [Status](status.md) lists what has.
 
 ## The plugin and the Cirro MCP server
 

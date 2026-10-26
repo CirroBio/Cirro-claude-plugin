@@ -20,7 +20,9 @@ something like *"Turn github.com/nf-core/fetchngs into a Cirro pipeline."*
 You choose: uploaded into Cirro, kept in the workflow's own repository, or kept in a
 separate configuration repository. If it lives in a repository, Claude writes and
 commits the files and **you** push them — it does not push, and it does not open pull
-requests.
+requests. Cirro reads configuration from a private repository only once the pipeline's
+GitHub connection is authorized in the Cirro portal; until then Claude tells you so
+before asking you to approve a sync.
 
 Either way you keep the files. Uploading into Cirro also saves a copy in a
 `pipeline-config/` folder next to the design spec, so months later you can read what a
