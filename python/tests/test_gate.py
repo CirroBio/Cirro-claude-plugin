@@ -1141,3 +1141,23 @@ def test_a_grant_prompt_says_what_it_approves(tmp_path):
     assert list(updated)[0] == "approves"
     assert updated["approves"] == ("every later insert_rows in project 'Core', without "
                                    "asking, until this session ends")
+
+
+def test_every_hook_command_runs_from_a_plugin_root_with_a_space_in_it(tmp_path):
+    """The hook commands named ${CLAUDE_PLUGIN_ROOT} unquoted, so under a home folder
+    such as `/Users/Jane Doe` the shell split the path, the gate never started, and
+    Claude Code reported a hook error rather than a block: every check silently off."""
+    spaced = tmp_path / "Jane Doe" / "plugin"
+    spaced.parent.mkdir()
+    spaced.symlink_to(PLUGIN_ROOT)
+    registered = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text())
+    commands = {hook["command"] for entry in registered["hooks"]["PreToolUse"]
+                for hook in entry["hooks"]}
+    for command in commands:
+        done = subprocess.run(
+            ["/bin/sh", "-c", command],
+            input=json.dumps(bash("python3 -c 'import cirro'")),
+            capture_output=True, text=True, timeout=30,
+            env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(spaced),
+                 "CIRRO_AGENT_PLUGIN_DATA": str(ISOLATED_DATA)})
+        assert done.returncode == 2, (command, done.stderr[-300:])
