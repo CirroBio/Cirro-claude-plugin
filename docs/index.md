@@ -177,11 +177,7 @@ you, and Claude works as you, with your project roles and nothing more.
 [How it works](how-it-works.md) shows the same path in more detail, including how a
 login is found for the directory you work in and the check on Claude's shell commands.
 
-## The plugin and the Cirro MCP server
-
-Cirro also has an MCP server for AI assistants such as Claude Desktop, described in the
-[Cirro documentation](https://docs.cirro.bio/cli-sdk/mcp/). This plugin is for Claude
-Code: it runs on your computer and can also make changes, each one approved by you.
+## Source code
 
 The plugin is developed in
 [CirroBio/Cirro-claude-plugin](https://github.com/CirroBio/Cirro-claude-plugin). Its
