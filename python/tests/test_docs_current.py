@@ -46,9 +46,11 @@ def test_every_skill_is_named(skill):
 
 @pytest.mark.parametrize("command", _commands())
 def test_every_command_is_named(command):
-    slash = "/" + command.replace("cirro-", "cirro:", 1)
-    assert command in DOCS or slash in DOCS, \
-        f"command {command!r} (as {slash}) is not mentioned in the docs"
+    """Claude Code names a plugin command `/<plugin>:<file stem>`, so commands/setup.md
+    is `/cirro:setup`, the name the runtime's own messages tell people to type. A file
+    named cirro-setup.md would be `/cirro:cirro-setup`, and every one of them wrong."""
+    slash = f"/cirro:{command}"
+    assert slash in DOCS, f"command {command!r} (as {slash}) is not mentioned in the docs"
 
 
 @pytest.mark.parametrize("subcommand", _read_subcommands())
