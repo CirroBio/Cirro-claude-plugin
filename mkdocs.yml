@@ -10,20 +10,24 @@ exclude_docs: requirements.txt
 
 nav:
   - Home: index.md
-  - Getting started: getting-started.md
-  - How it works: how-it-works.md
-  - Using it:
+  - Start here:
+      - Getting started: getting-started.md
       - Signing in: signing-in.md
+      - Troubleshooting: troubleshooting.md
+  - Using it:
       - Looking at things: reading.md
       - Making changes: changes.md
       - Approving a kind of change: grants.md
-      - Adding a pipeline: pipelines.md
-      - Building dashboards: dashboards.md
       - Working with sheets: sheets.md
+      - Building dashboards: dashboards.md
+      - Adding a pipeline: pipelines.md
+  - Trust and safety:
+      - How it works: how-it-works.md
+      - Status: status.md
+      - Locking it down: locking-down.md
   - Reference:
       - Skills and tools: skills-and-tools.md
-      - Locking it down: locking-down.md
-      - Status: status.md
+      - Words you will see: glossary.md
 
 theme:
   name: material
