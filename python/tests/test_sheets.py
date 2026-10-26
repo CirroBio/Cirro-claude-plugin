@@ -562,6 +562,17 @@ def test_inline_rows_are_grantable_and_a_local_file_is_not(sheets_tenant, sessio
     assert "file from this computer" in from_file["not_grantable"]
 
 
+def test_an_insert_of_more_than_fifty_rows_is_not_grantable(sheets_tenant, session_dir):
+    """Under a grant, one plan could otherwise insert up to MAX_PLAN_ROWS unseen."""
+    rows = [{"sample_id": f"bulk{i}", "reads": i} for i in range(51)]
+    fifty = plan(sheets_tenant, session_dir, "insert_rows", sheet_id="sheet-1",
+                 rows=rows[:50])
+    assert fifty["grant_scope"]["op"] == "insert_rows"
+    many = plan(sheets_tenant, session_dir, "insert_rows", sheet_id="sheet-1", rows=rows)
+    assert many["grant_scope"] is None
+    assert "more than 50 rows" in many["not_grantable"]
+
+
 def test_an_update_that_blanks_cells_is_not_grantable(sheets_tenant, session_dir):
     changed = plan(sheets_tenant, session_dir, "update_rows", sheet_id="sheet-1",
                    where={"status": "failed"}, set={"status": "pending"})

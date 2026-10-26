@@ -219,7 +219,9 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
                  invalidates=[_inv("datasets", project["id"])],
                  ungrantable=mutations.ungrantable(
                      args.get("notification_emails")
-                     and "it emails addresses it was given"))
+                     and "it emails addresses it was given",
+                     len(inputs) > mutations.GRANT_MAX_TARGETS
+                     and f"it reads more than {mutations.GRANT_MAX_TARGETS} input datasets"))
 
 
 def apply_run_analysis(reader: reads.Reader, args: dict) -> dict:

@@ -41,16 +41,14 @@ offer went.
 Even among those six, some changes still ask for your approval under a grant, and
 Claude tells you why:
 
-- an edit to more than 50 datasets, or an update to more than 50 sheet rows, in one plan
+- one plan that edits more than 50 datasets, inserts or updates more than 50 sheet
+  rows, or launches an analysis on more than 50 input datasets
 - changing a dataset's data type (it re-derives the project's sample records), removing
   tags, or taking datasets out of a folder
 - deleting a sample's metadata keys or blanking their values
 - blanking sheet cells, or inserting rows from a file on your computer
 - a launch given its own list of addresses to email; leaving the default, which emails
   you, is covered
-
-Inserting rows and launching analyses have no size limit under a grant: one plan can
-insert many rows, or launch on many datasets, without a prompt. Grant those narrowly.
 
 ## How long a grant lasts
 

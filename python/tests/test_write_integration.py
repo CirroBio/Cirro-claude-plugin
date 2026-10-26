@@ -344,6 +344,17 @@ def test_a_launch_that_emails_given_addresses_is_not_grantable(writable_tenant,
     assert "emails" in given["not_grantable"]
 
 
+def test_a_launch_on_more_than_fifty_datasets_is_not_grantable(writable_tenant,
+                                                               session_dir):
+    """resume_analysis plans through the same function, so this covers it too."""
+    inputs = [f"ds_{i:04d}" for i in range(0, 102, 2)]
+    fifty = plan_run(writable_tenant, session_dir, source_dataset_ids=inputs[:50])
+    assert fifty["grant_scope"]["op"] == "run_analysis"
+    many = plan_run(writable_tenant, session_dir, source_dataset_ids=inputs)
+    assert many["grant_scope"] is None
+    assert "more than 50 input datasets" in many["not_grantable"]
+
+
 def test_a_launch_notifies_the_authenticated_user_by_default(writable_tenant,
                                                              session_dir):
     """What the web UI does. The plugin sent notificationEmails=[] on every launch."""

@@ -652,7 +652,9 @@ def plan_insert_rows(reader: reads.Reader, args: dict) -> Draft:
                        "sheet_digest": S.sheet_digest(detail)},
                  summary="\n".join(lines), invalidates=[_inv("sheets", project["id"])],
                  ungrantable=mutations.ungrantable(
-                     args.get("file") and "it uploads a file from this computer"))
+                     args.get("file") and "it uploads a file from this computer",
+                     len(coerced) > mutations.GRANT_MAX_TARGETS
+                     and f"it inserts more than {mutations.GRANT_MAX_TARGETS} rows"))
 
 
 def apply_insert_rows(reader: reads.Reader, args: dict) -> dict:
