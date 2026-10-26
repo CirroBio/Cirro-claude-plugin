@@ -112,12 +112,12 @@ the directory you are working in.
       <text x="578" y="188" text-anchor="end" class="hd-sub">this session</text>
     </g>
   </g>
-  <g class="hd-hot" data-key="gate" tabindex="0" aria-label="The Bash check">
+  <g class="hd-hot" data-key="gate" tabindex="0" aria-label="The command check">
     <rect class="hd-hit" x="222" y="442" width="96" height="84" rx="12"/>
     <g data-r="read gate">
       <circle class="hd-node" cx="270" cy="470" r="18"/>
       <g transform="translate(270,470)"><rect x="-11" y="-6" width="22" height="12" rx="6" fill="none" stroke="#1b1e3a" stroke-width="2"/><circle cx="5" cy="0" r="3.5" fill="#1b1e3a"/></g>
-      <text x="270" y="517" text-anchor="middle" class="hd-sub">Bash check</text>
+      <text x="270" y="517" text-anchor="middle" class="hd-sub">Command check</text>
     </g>
   </g>
   <g class="hd-hot" data-key="tenant" tabindex="0" aria-label="Your projects and data in Cirro">
@@ -157,30 +157,30 @@ the directory you are working in.
   <div class="hd-note" data-note="find">
     <p class="hd-kicker">Your login</p>
     <p class="hd-title">Each request finds its login from where you work</p>
-    <p>The plugin walks up from the directory Claude is working in to the nearest .cirro/ folder. If there is none, the tenant you signed in to answers. If you are signed in to two and nothing nearer decides, Claude names both and asks. A folder also keeps a cache, plans waiting for your approval and a log of every change.</p>
+    <p>The plugin looks upward from the directory Claude is working in, as far as the top of its git repository or Claude Code project, for the nearest .cirro/ folder. If there is none, the tenant you signed in to answers. If you are signed in to two and nothing nearer decides, Claude names both and asks. A folder also keeps a cache, plans waiting for your approval and a log of every change.</p>
   </div>
   <div class="hd-note" data-note="read">
     <p class="hd-kicker">Reading</p>
     <p class="hd-title">Looking never asks</p>
-    <p>Questions about your data go through cirro-agent read, a command with no way to change anything, so it needs no approval and you can allow it outright. A large answer comes back as the shape of everything that matched, with a few examples and follow-up questions that already know how many results they will return.</p>
+    <p>Questions about your data go through cirro-agent read, a command with no way to change anything, so it never needs your approval and you can let Claude Code run it without asking. A large answer comes back as the shape of everything that matched, with a few examples and follow-up questions that already know how many results they will return.</p>
   </div>
   <div class="hd-note" data-note="plan">
     <p class="hd-kicker">Changing, step 1 of 2</p>
     <p class="hd-title">A change starts as a plan</p>
-    <p>Anything that creates, changes or deletes is first worked out without touching anything: names resolved to IDs, parameters checked against what the pipeline accepts, what would be affected counted, and consequences flagged. An instruction the operation does not understand stops it here. Claude shows you the plan in the conversation.</p>
+    <p>Anything that creates, changes or deletes is first worked out without touching anything: names resolved to IDs, parameters checked against what the pipeline accepts, what would be affected counted, and consequences flagged. An argument the operation does not accept stops it here. Claude shows you the plan in the conversation.</p>
   </div>
   <div class="hd-note" data-note="approve">
     <p class="hd-kicker">Changing, step 2 of 2</p>
     <p class="hd-title">Only you can approve it</p>
-    <p>Applying a plan always brings up Claude Code's own approval prompt. Claude cannot answer it, and no setting or permission mode turns it off. What runs is what you read: the plan is worked out again as it is applied and refused if anything moved, it is good for one change, and the change is logged.</p>
+    <p>Applying a plan brings up Claude Code's own approval prompt, unless you approved that kind of change in advance. Claude cannot answer the prompt, and no setting or permission mode turns it off. What runs is what you read: the plan is worked out again as it is applied and refused if anything moved, it is good for one change, and the change is logged.</p>
   </div>
   <div class="hd-note" data-note="grant">
     <p class="hd-kicker">In advance</p>
     <p class="hd-title">Approve a kind of change for a session</p>
-    <p>For repetitive work you can approve every later change of one kind, in one project, until the session ends. Only six kinds qualify, and none that deletes or changes who has access. Each change is still planned, shown, checked again and logged, and Claude Code shows a notice for every one.</p>
+    <p>For repetitive work you can approve every later change of a kind you name, in one project, until the session ends. Only six kinds qualify, and none that deletes or changes who has access. Each change is still planned, shown, checked again and logged, and Claude Code shows a notice for every one.</p>
   </div>
   <div class="hd-note" data-note="gate">
-    <p class="hd-kicker">The Bash check</p>
+    <p class="hd-kicker">The command check</p>
     <p class="hd-title">No way around the approval</p>
     <p>Once a session has used Cirro, every shell command is checked. Running a script that drives the Cirro SDK, starting the plugin's own worker or server by hand, or handing a .cirro/ folder's login to anything that reads it is refused. Reads pass, and editing files is never blocked. It stops accidents; it is not a sandbox.</p>
   </div>
@@ -194,16 +194,17 @@ the directory you are working in.
 
 ## What this means for you
 
-- **Reading never changes anything and never asks.** You can allow it outright — see
+- **Reading never changes anything and never needs your approval**; see
   [Looking at things](reading.md).
 - **Every change is shown to you as a plan first**, and applied only after you approve it
-  in a prompt Claude cannot answer — see [Making changes](changes.md).
+  in a prompt Claude cannot answer, or under a grant you gave; see
+  [Making changes](changes.md).
 - **What runs is what you read.** A plan is checked again when it is applied, used once,
-  and logged.
-- **Approving in advance is narrow**: one kind of change, one project, this session, and
-  never a deletion or a change to who has access — see
+  and recorded.
+- **Approving in advance is narrow**: the kinds of change you name, one project, this
+  session, and never a deletion or a change to who has access; see
   [Approving a kind of change](grants.md).
 - **Your login stays on your computer**, in a folder the plugin finds from where you are
-  working — see [Signing in](signing-in.md).
+  working; see [Signing in](signing-in.md).
 - **The way around the approval is closed off**, as far as reading commands as text
-  allows — see [Locking it down](locking-down.md).
+  allows; see [Locking it down](locking-down.md).

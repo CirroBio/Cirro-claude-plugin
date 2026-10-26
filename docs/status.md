@@ -1,11 +1,30 @@
 # Status
 
-Reading is complete and verified against a live Cirro tenant.
+Every read has been checked against a real Cirro tenant. The changes have been tested
+against a simulated tenant, and the ones below have also run against a real one.
 
-Most of the change path has only run against a simulated tenant. The sections below say
-exactly what has been exercised against a real one. Four bugs found on 2026-08-27 were
-exactly the kind that surface only on a real call, so **treat your first use of any
-operation not named here as untested and pick something disposable.**
+!!! warning "Try new things on something disposable"
+    Four bugs found on 2026-08-27 were exactly the kind that surface only on a real call.
+    Treat your first use of any change not marked as run live as untested, and try it on
+    a project, dataset or sheet you would not mind losing.
+
+| Area | Run against a real tenant? | When |
+|---|---|---|
+| Reading | Yes, every read | |
+| Uploading a dataset; renaming, retagging and describing one | Yes | 2026-09-06 |
+| Changing a dataset's data type | Yes | 2026-09-18 |
+| Launching analyses, alone and in chains | Yes, launches only | 2026-09-09 |
+| Dashboards: create, edit, delete | Yes | 2026-09-29 |
+| Sheets: create, insert, update, change columns, delete | Yes | 2026-09-30 |
+| Refreshing a materialized view | Tried, failed inside the tenant | 2026-09-30 |
+| Signing in for a tenant | Yes | 2026-09-09 |
+| Removing a tenant login | No | |
+| Registering a pipeline | No | |
+| Targeting AWS HealthOmics | No | |
+| Approving a kind of change (grants) | No | |
+| Everything else in [What Claude can change](changes.md#what-claude-can-change) | No | |
+
+The sections below give the detail.
 
 ## Run against a live tenant
 
@@ -72,14 +91,14 @@ reset.
 
 ## Not yet run against a live tenant
 
-**Registering a pipeline.** Pipeline configuration is built and its generated output is
-checked against the configuration of 213 pipelines already running in Cirro, but no
-registration has yet been done against a live tenant.
+**Registering a pipeline.** Pipeline configuration is built, and its generated output is
+checked by a validator calibrated on the configuration of 213 pipelines already running
+in Cirro, but no registration has yet been done against a live tenant.
 
 **Targeting AWS HealthOmics** is new in 0.10.0 and has not been through a real run. The
-argument is validated, the approval text names the target, and the field is checked on
-the request that is sent — but no launch has yet reached HealthOmics through the
-plugin. The Batch default is the older path and is unchanged. After a run lands,
+argument is validated, the approval text names the target, and tests check that the
+field is on the request the plugin sends, but no launch has yet reached HealthOmics
+through the plugin. The Batch default is the older path and is unchanged. After a run lands,
 `cirro-agent read dataset <id> -p <project> --include info` is the reliable check:
 `info.omicsRunUuid` and `info.jobId` are present exactly when the run reached
 HealthOmics, and dataset status is not a substitute.

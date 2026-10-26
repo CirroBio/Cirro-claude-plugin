@@ -1,7 +1,7 @@
 # Skills and tools
 
-You will rarely name any of these — Claude picks them up from what you ask. They are
-listed here so you know what is there.
+You will rarely name any of these: Claude picks them up from what you ask. They are
+listed so you recognize them in prompts and in permission rules.
 
 ## What Claude brings to each task
 
@@ -26,7 +26,7 @@ listed here so you know what is there.
 
 | Command | Does |
 |---|---|
-| `/cirro:setup` | Builds the plugin's Python runtime, once per machine |
+| `/cirro:setup` | Builds the plugin's Python runtime: once per machine, and again after each update |
 | `/cirro:doctor` | Reports which tenant this directory uses, whether the runtime is installed, and who you are signed in as |
 
 ## Tools behind the approval gate
@@ -36,13 +36,18 @@ and changing things go through eleven tools: `session_init`, `login_start`,
 `login_wait`, `whoami`, `logout`, `session_remove`, `plan`, `apply`, `grant`,
 `apply_granted` and `grants`.
 
-Three of them can change anything:
+Three of them make changes, and each one either asks you or runs only under a grant
+you gave:
 
-- `apply` makes a change in Cirro and prompts every time — and, when you accept Claude's
-  offer to stop asking, approves later changes like it in the same prompt.
+- `apply` makes a change in Cirro and asks every time. When you accept Claude's offer to
+  stop asking, the same prompt also approves later changes like it.
 - `apply_granted` makes only the changes a grant you approved covers.
-- `session_remove` deletes a tenant's login folder on your own machine and prompts every
+- `session_remove` deletes a tenant's login folder on your own computer, and asks every
   time.
 
-`grant` prompts every time as well, and `grants` lists the grants you have given or
-revokes them. `plan` only works out what a change would do; it changes nothing.
+`grant` asks every time as well, and `grants` lists the grants you have given or revokes
+them. `plan` only works out what a change would do; it changes nothing.
+
+Three more write only to your login folder, without asking: `session_init` and
+`login_start` create the folder and lead to a stored sign-in, and `logout` removes the
+sign-in from it.
