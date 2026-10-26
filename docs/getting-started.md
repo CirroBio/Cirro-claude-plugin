@@ -38,16 +38,23 @@ In Claude Code, once:
 This builds the isolated Python environment the plugin runs in, with the Cirro SDK in
 it. It takes up to two minutes the first time, and nothing runs it for you.
 
-When it finishes, reconnect the plugin's server: run `/mcp`, choose the **cirro**
-server and reconnect it, or restart Claude Code. Until you do, the Cirro tools keep saying the
-runtime is missing, because the server started before the runtime existed.
+!!! warning "Then reconnect the plugin's server"
+    When setup finishes, run `/mcp`, choose the **cirro** server and reconnect it, or
+    restart Claude Code. Until you do, the Cirro tools keep saying the runtime is
+    missing, because the server started before the runtime existed.
 
 ## 3. Sign in
 
-Ask Claude to connect to Cirro. It asks for your Cirro address; paste the address from
-your browser's address bar if that is easier, since only the hostname is kept. Claude
-then gives you a sign-in link. Open it in your browser and approve. Nothing opens a
-browser for you.
+In Claude Code, run the sign-in skill with the hostname you sign in to Cirro at:
+
+```
+/cirro:cirro-session app.cirro.bio
+```
+
+Pasting the address from your browser's address bar works too, since only the hostname
+is kept. Asking Claude in your own words to connect to Cirro does the same thing; it
+asks for the hostname if you have not given one. Claude then gives you a sign-in link.
+Open it in your browser and approve. Nothing opens a browser for you.
 
 The link appears in the conversation. When Claude Code runs in a terminal, the plugin
 also prints it there directly.

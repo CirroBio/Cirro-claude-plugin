@@ -1,7 +1,9 @@
 # Signing in
 
-You sign in by asking Claude to connect to Cirro; [Getting started](getting-started.md)
-walks through the first time. This page covers what happens after that.
+You sign in with `/cirro:cirro-session` and your hostname, such as
+`/cirro:cirro-session app.cirro.bio`, or by asking Claude to connect to Cirro;
+[Getting started](getting-started.md) walks through the first time. This page covers
+what happens after that.
 
 ## Who am I signed in as?
 

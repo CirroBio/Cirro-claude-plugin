@@ -1,7 +1,9 @@
 # Skills and tools
 
 You will rarely name any of these: Claude picks them up from what you ask. They are
-listed so you recognize them in prompts and in permission rules.
+listed so you recognize them in prompts and in permission rules. You can also run a
+skill directly, as `/cirro:` and its name: `/cirro:cirro-session app.cirro.bio` signs
+you in to that tenant.
 
 ## What Claude brings to each task
 

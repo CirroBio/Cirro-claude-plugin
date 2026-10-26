@@ -19,8 +19,8 @@ reports; Claude usually explains them in its own words.
 
 | You see | What it means | What to do |
 |---|---|---|
-| Not signed in (`NO_SESSION_FOLDER`) | No login was found for the directory you are working in | Ask Claude to connect to Cirro |
-| `AUTH_REQUIRED` or `AUTH_EXPIRED` | The login has lapsed | Ask Claude to sign in again |
+| Not signed in (`NO_SESSION_FOLDER`) | No login was found for the directory you are working in | Run `/cirro:cirro-session` with your hostname |
+| `AUTH_REQUIRED` or `AUTH_EXPIRED` | The login has lapsed | Run `/cirro:cirro-session` with your hostname to sign in again |
 | Claude names two tenants and asks which | You are signed in to two, and this directory has no login of its own | Name one, or remove the login you no longer need |
 | Claude is talking to the wrong Cirro | A `.cirro/` in a folder above you is answering first | Run `/cirro:doctor` to see which folder; delete it if you did not mean it |
 | `TENANT_MISMATCH` | `CIRRO_BASE_URL` in your environment names a different Cirro, or a plan was made against a different tenant | Unset `CIRRO_BASE_URL`, or work in a directory signed in to that tenant |

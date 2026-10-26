@@ -1,6 +1,7 @@
 ---
 name: cirro-session
 description: Set up a Cirro session folder and authenticate, or repair a broken one. Use when the user asks to connect to Cirro, log in, switch tenants, or check who they are logged in as — and whenever any Cirro operation returns no_session_folder, not_authenticated, AUTH_REQUIRED, AUTH_EXPIRED, CREDENTIAL_STORE_UNAVAILABLE, TENANT_MISMATCH, or RUNTIME_NOT_INSTALLED.
+argument-hint: "<hostname, e.g. app.cirro.bio>"
 ---
 
 # Connect to Cirro
@@ -24,9 +25,11 @@ for problems that the login itself will report.
 ### 1. Ask for the hostname
 
 You need the Cirro hostname, and you must **ask for it — never guess a tenant.** It
-looks like `app.cirro.bio` or `cirro.your-institution.org`. If the directory already
-has a session folder, it is already bound to one; `login_start` will use it and you do
-not need to ask at all.
+looks like `app.cirro.bio` or `cirro.your-institution.org`. A hostname the person has
+already given — as the argument to `/cirro:cirro-session`, or in their message — is
+not a guess: use it and do not ask again. A pasted URL is fine too; `login_start` keeps
+only the hostname. If the directory already has a session folder, it is already bound
+to one; `login_start` will use it and you do not need to ask at all.
 
 ### 2. Call `login_start`
 
