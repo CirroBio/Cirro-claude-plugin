@@ -48,12 +48,38 @@ def _invalid(exc: S.SheetError, op: str) -> errors.InvalidQuery:
                                field=exc.field, retry_with=[{"op": op}])
 
 
+# Cirro-backend's 400 for a write to a sheet whose status is not COMPLETED, whatever
+# the status is and whatever the write was.
+SHEET_NOT_READY = "Sheet is not ready"
+
+# What each unfinished status means, which that one message does not say.
+NOT_READY = {
+    "PENDING": "it is still being created",
+    "RUNNING": "a job is running on it (an import, a refresh, or a column change)",
+    "FAILED": "its last job failed",
+}
+
+
 def _refusals(what: str, field: str, op: str) -> dict:
     """What a sheet route's refusals mean to the caller: the backend's 400s carry the
-    rule that was broken, and a 409 is a schema version that moved."""
-    return {400: lambda message: errors.InvalidQuery(
-                f"{what}: {message}", what="Fix the request and plan again.", field=field,
-                retry_with=[{"op": op}]),
+    rule that was broken, and a 409 is a schema version that moved.
+
+    One 400 is about the sheet rather than the request: "not ready" means its status
+    left COMPLETED after the plan checked it, and nothing in the request needs fixing.
+    """
+    def bad_request(message: str) -> errors.AgentError:
+        if message == SHEET_NOT_READY:
+            return errors.WrongStatus(
+                f"{what}: {message}.",
+                what="The sheet stopped being COMPLETED after the plan checked it: a "
+                     "job started on it, or its last one failed. Nothing was written.",
+                retry_with=[{"tool": "plan", "op": op,
+                             "note": "plan again once the sheet read shows COMPLETED"}])
+        return errors.InvalidQuery(
+            f"{what}: {message}", what="Fix the request and plan again.", field=field,
+            retry_with=[{"op": op}])
+
+    return {400: bad_request,
             403: lambda message: errors.Forbidden(
                 f"{what}: {message}", what="Your role in this project does not allow it.",
                 user_action="Ask a project admin for access, or have them make the change."),
@@ -102,11 +128,20 @@ def _writable(detail: dict, op: str, *, table_only: bool = True,
             what="A view's rows come from its SQL. Change the table it reads, or change "
                  "the view with update_sheet.",
             user_action="Pick a table sheet.")
-    if detail.get("status") not in statuses:
+    status = detail.get("status")
+    if status not in statuses:
+        failed = status == "FAILED"
         raise errors.WrongStatus(
-            f"Sheet {detail['name']!r} is {detail.get('status')}.",
-            what="Only a sheet that finished its last job can be written.",
-            retry_with=[{"verb": "sheet", "id": detail["id"]}])
+            f"Sheet {detail['name']!r} is {status}: "
+            f"{NOT_READY.get(status, 'its last job has not finished')}, so Cirro will "
+            f"not accept {op} on it.",
+            what=("The sheet read shows the failed job's error." if failed else
+                  "Wait for the job to finish, then plan again; the sheet read shows "
+                  "its status and its jobs."),
+            retry_with=[{"verb": "sheet", "id": detail["id"]}],
+            user_action=("Cirro still deletes a failed sheet (delete_sheet); to repair "
+                         "it in place, change its definition in the Cirro web UI."
+                         if failed else None))
 
 
 def _label(detail: dict) -> str:
@@ -335,6 +370,13 @@ def _insert(reader, project_id: str, sheet_id: str, rows: list, op: str) -> int:
                 exc.message += (f" ({written:,} of {len(rows):,} rows were already written; "
                                 f"re-plan with the rest.)")
                 exc.detail["rows_written"] = written
+                # A refusal says what one request did; the batches before it stand,
+                # and planning the whole insert again would write them twice.
+                exc.what = (f"The first {written:,} rows were written and stay written; "
+                            "the rest were not.")
+                exc.retry_with = [{"tool": "plan", "op": op,
+                                   "note": f"insert only the rows after the first "
+                                           f"{written:,}"}]
             raise
         written += (response or {}).get("rowsAffected", len(batch))
     return written
@@ -786,6 +828,9 @@ def apply_update_rows(reader: reads.Reader, args: dict) -> dict:
             if written:
                 exc.message += f" ({written:,} of {len(updates):,} rows were already updated.)"
                 exc.detail["rows_updated"] = written
+                exc.what = (f"The first {written:,} rows were updated and stay updated; the "
+                            "rest were not. Planning the update again sets the same values "
+                            "on those rows, which changes nothing further.")
             raise
         written += (response or {}).get("rowsAffected", len(batch))
     return {"sheet_id": args["sheet_id"], "rows_updated": written,

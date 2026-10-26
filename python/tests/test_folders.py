@@ -144,6 +144,17 @@ def test_removing_from_a_folder_is_explicit_and_warned(writable_tenant, session_
     assert any("no longer appear under any folder" in w for w in planned["warnings"])
 
 
+def test_a_folder_entry_in_tags_is_refused(writable_tenant, session_dir):
+    """`folder://` in `tags` would file the dataset while the approval's folder line
+    said its folder was unchanged. A folder is named as a folder."""
+    planned = _plan_update(writable_tenant, session_dir,
+                           tags=["qc-pass", "folder://Archive"])
+    assert planned["error"]["code"] == "INVALID_QUERY"
+    assert planned["error"]["field"] == "tags"
+    assert planned["error"]["remediation"]["retry_with"] == [{"tags": ["qc-pass"]}]
+    assert "`folder`" in planned["error"]["remediation"]["what"]
+
+
 def test_a_no_op_folder_change_is_refused(writable_tenant, session_dir):
     planned = _plan_update(writable_tenant, session_dir, folder="Immuno")
     assert planned["ok"] is False

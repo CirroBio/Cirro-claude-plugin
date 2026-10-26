@@ -25,7 +25,7 @@ reports; Claude usually explains them in its own words.
 | Claude is talking to the wrong Cirro | A `.cirro/` in a folder above you is answering first | Run `/cirro:doctor` to see which folder; delete it if you did not mean it |
 | `TENANT_MISMATCH` | `CIRRO_BASE_URL` in your environment names a different Cirro, or a plan was made against a different tenant | Unset `CIRRO_BASE_URL`, or work in a directory signed in to that tenant |
 | A `.cirro/` *tracked by git* is refused | The folder came with a repository | If it is yours, `git rm -r --cached .cirro` |
-| `CREDENTIAL_STORE_UNAVAILABLE` | On macOS, the login Keychain locked during a long operation | Unlock the login Keychain and run it again |
+| `CREDENTIAL_STORE_UNAVAILABLE` | On macOS, the login Keychain refused to read or save your sign-in, usually because it locked during a long operation | Do what the message says: usually unlock the login Keychain and run it again; if two Cirro operations saved at once, just run it again |
 | `NETWORK_UNAVAILABLE` | Cirro could not be reached | Check your connection, any VPN, and the hostname |
 
 ## Using it
@@ -33,14 +33,17 @@ reports; Claude usually explains them in its own words.
 | You see | What it means | What to do |
 |---|---|---|
 | Claude Code asks every time Claude reads | Reading is not allowed in your settings yet | Allow `cirro-agent read`; see [Two kinds of prompts](getting-started.md#two-kinds-of-prompts) |
-| `FORBIDDEN` | Your project role does not allow this | Ask a project owner |
+| `FORBIDDEN` | Your project role does not allow this, or a pipeline's GitHub connection is not authorized in Cirro | Ask a project owner, or authorize the connection from the pipeline's page in the Cirro portal |
 | `PLAN_STALE` | Something in Cirro changed between the plan and your approval | Ask Claude to plan it again; nothing was changed |
+| `RATE_LIMITED` | Cirro asked the plugin to slow down | Wait a minute, then ask Claude to try again |
+| `OUTCOME_UNKNOWN` | A change was sent, and Cirro's reply did not say whether it took effect, such as whether a run started | Ask Claude to check before trying again; trying blindly could make the change twice |
 | A change still asks for approval under a grant | That variant of the change can never be approved in advance | See [what can be granted](grants.md#what-can-be-granted) |
 | Claude says running a script is blocked | Once a session uses Cirro, scripts that drive the Cirro SDK cannot run through Claude | Run the script yourself in a terminal; see [Locking it down](locking-down.md) |
 
 ## Starting over
 
-Ask Claude which tenants you are signed in to; it names each login folder. Removing
-one, or deleting a directory's `.cirro/`, is always a safe reset: the next request asks
-you to sign in again. [Uninstalling](getting-started.md#uninstalling) covers removing
+Ask Claude which tenants you are signed in to, and it names each tenant's login folder;
+ask who you are signed in as, and it names the folder the directory you are working in
+uses. Removing a tenant login, or deleting a directory's `.cirro/`, is always a safe
+reset: the next request asks you to sign in again. [Uninstalling](getting-started.md#uninstalling) covers removing
 everything.

@@ -10,9 +10,10 @@ says otherwise, which is what the web UI does; `_notify` explains the mechanics.
 from typing import Optional, Tuple
 
 from .. import errors, summarize as S
-from . import mutations, reads, rows as R
-from .mutations import (_tag_models, Draft, Op, RISK_WRITE, _inv, _need, _project, _dataset,
-                        _target_folders, _wire_tags, FOLDER_ARGS, PROJECT_ARGS)
+from . import mutations, portal, reads, rows as R
+from .mutations import (_tag_models, Draft, Op, RISK_WRITE, _check_dataset_name, _check_tags,
+                        _inv, _need, _project, _dataset, _target_folders, _wire_tags,
+                        FOLDER_ARGS, PROJECT_ARGS)
 
 # run_analysis' whole argument surface, shared with resume_analysis: that planner
 # copies the caller's args, fills in whatever the previous run implies, and hands the
@@ -95,6 +96,8 @@ def _environment_type(args: dict, process: dict) -> Optional[str]:
 
 def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
     _need(args, "run_analysis", "name", "process")
+    _check_dataset_name(args["name"])
+    _check_tags(args)
     project = _project(reader, args)
     process = reader.resolve_process(args["process"], ingest=False)
     if process["is_archived"]:
@@ -247,8 +250,11 @@ def apply_run_analysis(reader: reads.Reader, args: dict) -> dict:
     combined = _wire_tags(args.get("folders"), args.get("tags"))
     if combined:
         request.tags = _tag_models(combined)
-    response = reader.client.execution.run_analysis(project_id=args["project_id"],
-                                                    request=request)
+    execution = reader.client.execution
+    try:
+        response = execution.run_analysis(project_id=args["project_id"], request=request)
+    except Exception as exc:
+        raise _launch_failure(exc, args) from exc
     created = R.plain(getattr(response, "id", None))
     return {"created_dataset_id": created,
             "message": R.plain(getattr(response, "message", None)),
@@ -256,6 +262,59 @@ def apply_run_analysis(reader: reads.Reader, args: dict) -> dict:
             "follow_with": {"verb": "get", "entity": "dataset", "id": created,
                             "scope": {"project_ids": [args["project_id"]]},
                             "freshness": "fresh"}}
+
+
+# The generated route a launch is posted through. The SDK reads the parameter spec
+# before it posts, so a failure that never passed through here came before the launch.
+LAUNCH_ROUTE = "cirro_api_client.v1.api.execution.run_analysis"
+
+
+def _launch_failure(exc: Exception, args: dict) -> errors.AgentError:
+    """What a failed launch call means for whether a run now exists.
+
+    A refusal (a 4xx) or a failure before the launch was sent started nothing, so
+    planning again is safe. Anything else may follow a launch Cirro went ahead with: a
+    2xx whose body could not be read, a 5xx (a gateway gives up on a request the
+    backend goes on to finish), or a connection that ended before the reply. Reported
+    as a retryable upstream fault, any of these invites a second launch -- a bare
+    `JSONDecodeError` reached people that way, with nothing saying whether the run had
+    started.
+    """
+    reply = portal.http_response(exc)
+    # A token is fetched, and refreshed if due, inside the route's own frames but
+    # before the request leaves; failing there sent nothing, and is a sign-in problem
+    # rather than an unknown launch.
+    signing_in = portal.raised_in(exc, "cirro.auth") or portal.raised_in(
+        exc, "msal_extensions")
+    if signing_in or not portal.raised_in(exc, LAUNCH_ROUTE) or (
+            reply is not None and reply.is_client_error):
+        return portal.wrap_upstream(
+            exc, what="No run was started: Cirro refused the launch, or the failure "
+                      "came before it was sent. Planning again is safe.",
+            retry_with=[{"tool": "plan", "op": "run_analysis"}])
+    if reply is not None and reply.is_success:
+        said = (f"The launch of {args['name']!r} was accepted (HTTP {reply.status_code}) "
+                f"but the reply had {portal.describe_body(reply)}, so the run has most "
+                "likely started and its dataset id is not known.")
+    else:
+        answer = ("the connection ended before any reply" if reply is None else
+                  f"Cirro answered HTTP {reply.status_code} with "
+                  f"{portal.describe_body(reply)}")
+        said = (f"The launch of {args['name']!r} was sent and {answer}, so whether the "
+                "run started is not known.")
+    return errors.OutcomeUnknown(
+        said,
+        what="Cirro may have started it, and planning the launch again could start a "
+             "second run.",
+        retry_with=[{"verb": "query", "entity": "dataset",
+                     "scope": {"project_ids": [args["project_id"]]},
+                     "filter": {"field": "name", "op": "eq", "value": args["name"]},
+                     "freshness": "fresh"}],
+        user_action=("Check the project for a dataset of this name created just now "
+                     "before launching again; launch again only if there is none."),
+        http_status=None if reply is None else reply.status_code,
+        raised=f"{type(exc).__name__}: {exc}",
+    )
 
 
 def plan_resume_analysis(reader: reads.Reader, args: dict) -> Draft:

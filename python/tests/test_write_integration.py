@@ -7,6 +7,7 @@ import dataclasses
 import json
 import time
 
+import pytest
 
 from cirro_agent import plans
 from cirro_agent.worker import dispatch
@@ -485,6 +486,22 @@ def test_apply_invalidates_the_snapshot_it_made_stale(writable_tenant, session_d
     assert refetched["cost"]["by_kind"].get("datasets.list", 0) >= 1
 
 
+def test_a_failed_apply_still_drops_the_snapshot_it_may_have_made_stale(
+        writable_tenant, session_dir):
+    """A failure can leave a change behind -- an upload registers its dataset before
+    the transfer fails, a launch may have started -- and every error points at a fresh
+    plan or read, which must not answer from a listing taken before the apply."""
+    call(writable_tenant, session_dir, "query", entity="dataset",
+         scope={"project_ids": ["proj_a"]})
+    planned = plan_run(writable_tenant, session_dir)
+    writable_tenant["router"].post(f"{API}/projects/proj_a/execution").respond(
+        status_code=502, content=b"")
+    assert not apply_from(writable_tenant, session_dir, planned)["ok"]
+    refetched = call(writable_tenant, session_dir, "query", entity="dataset",
+                     scope={"project_ids": ["proj_a"]})
+    assert refetched["cost"]["by_kind"].get("datasets.list", 0) >= 1
+
+
 def test_a_chain_step_can_resolve_what_the_step_before_it_created(
         writable_tenant, session_dir):
     """The chain invalidated only once it had finished, so step 2 resolved its subject
@@ -622,6 +639,103 @@ def test_a_failed_apply_is_recorded_and_reported(writable_tenant, session_dir):
     files = sorted((session_dir.path / "runs").glob("*.jsonl"))
     entries = [json.loads(line) for line in files[-1].read_text().splitlines()]
     assert "error" in entries[-1]
+
+
+THROTTLE = {"message": "Too Many Requests"}
+
+
+def test_a_throttled_read_says_to_wait_not_to_check_service_status(
+        fake_tenant, session_dir):
+    """Observed live as UPSTREAM_ERROR "UnexpectedStatus: 429" with advice to check
+    Cirro's service status. A throttle turns the request away; the service is up."""
+    fake_tenant["router"].get(f"{API}/projects").respond(status_code=429, json=THROTTLE)
+    result = call(fake_tenant, session_dir, "query", entity="project")
+    error = result["error"]
+    assert error["code"] == "RATE_LIMITED" and error["severity"] == "retryable"
+    assert "GET /api/projects" in error["message"]
+    assert "service status" not in (error["remediation"]["user_action"] or "")
+    assert error["remediation"]["retry_with"][0]["wait_s"] > 0
+
+
+def test_a_throttled_write_says_nothing_was_launched_and_to_plan_again(writable_tenant,
+                                                                       session_dir):
+    """update_samplesheet failed this way three times. The plan is spent by then, so
+    the way forward is a fresh plan after a wait, never applying the same one again."""
+    planned = plan_run(writable_tenant, session_dir)
+    writable_tenant["router"].post(f"{API}/projects/proj_a/execution").respond(
+        status_code=429, json=THROTTLE)
+    error = apply_from(writable_tenant, session_dir, planned)["error"]
+    assert error["code"] == "RATE_LIMITED"
+    assert error["remediation"]["what"].startswith("No run was started")
+    step = error["remediation"]["retry_with"][0]
+    assert (step["tool"], step["op"]) == ("plan", "run_analysis") and step["wait_s"] > 0
+
+
+def test_an_unreadable_read_reply_names_the_status_and_the_body(fake_tenant,
+                                                                session_dir):
+    """A bare "JSONDecodeError: Expecting value: line 1 column 1 (char 0)" said
+    neither what was asked nor what came back."""
+    fake_tenant["router"].get(f"{API}/projects").respond(status_code=200, content=b"")
+    error = call(fake_tenant, session_dir, "query", entity="project")["error"]
+    assert error["code"] == "UPSTREAM_ERROR"
+    assert "GET /api/projects with HTTP 200 and an empty body" in error["message"]
+
+
+@pytest.mark.parametrize("status,body,said", [
+    (200, b"", "accepted (HTTP 200) but the reply had an empty body"),
+    (200, b"<html>gateway</html>", "the reply had a body that is not JSON"),
+    (502, b"", "Cirro answered HTTP 502 with an empty body"),
+])
+def test_a_launch_whose_reply_cannot_confirm_it_is_not_reported_as_retryable(
+        writable_tenant, session_dir, status, body, said):
+    """Observed on ocra twice: a launch failed with a bare JSONDecodeError, retryable,
+    with nothing saying whether the run had started. A 2xx means Cirro took it and a
+    5xx may follow a launch the backend finished, so planning it again could start a
+    second run. The way forward is the read that settles it."""
+    planned = plan_run(writable_tenant, session_dir)
+    writable_tenant["router"].post(f"{API}/projects/proj_a/execution").respond(
+        status_code=status, content=body)
+    error = apply_from(writable_tenant, session_dir, planned)["error"]
+    assert error["code"] == "OUTCOME_UNKNOWN" and error["severity"] == "agent_action"
+    assert said in error["message"]
+    assert "second run" in error["remediation"]["what"]
+    check = error["remediation"]["retry_with"][0]
+    assert check["verb"] == "query" and check["freshness"] == "fresh"
+    assert check["filter"] == {"field": "name", "op": "eq", "value": "RNAseq batch 32"}
+    assert plans.outcome(session_dir, plans.load(session_dir, planned["plan_id"]))[
+        "error"].startswith("OUTCOME_UNKNOWN")
+
+
+def test_a_launch_whose_reply_body_breaks_off_is_not_reported_as_retryable(
+        writable_tenant, session_dir):
+    """The headers of a 200 arrive and the connection drops in the body. Describing that
+    reply read its content, which raised ResponseNotRead from inside the error handler,
+    and the escape was wrapped as a retryable fault -- under a grant, a second launch
+    with no prompt."""
+    import httpx
+
+    class BrokenOff(httpx.SyncByteStream):
+        def __iter__(self):
+            raise httpx.RemoteProtocolError("peer closed connection mid-body")
+
+    planned = plan_run(writable_tenant, session_dir)
+    writable_tenant["router"].post(f"{API}/projects/proj_a/execution").respond(
+        status_code=200, stream=BrokenOff())
+    error = apply_from(writable_tenant, session_dir, planned)["error"]
+    assert error["code"] == "OUTCOME_UNKNOWN"
+    assert "did not arrive in full" in error["message"]
+
+
+def test_a_refused_launch_with_an_unreadable_body_started_nothing(writable_tenant,
+                                                                  session_dir):
+    """A 4xx is a refusal whatever its body, so this one may be planned again."""
+    planned = plan_run(writable_tenant, session_dir)
+    writable_tenant["router"].post(f"{API}/projects/proj_a/execution").respond(
+        status_code=403, content=b"<html><title>403 Forbidden</title></html>")
+    error = apply_from(writable_tenant, session_dir, planned)["error"]
+    assert error["code"] == "UPSTREAM_ERROR"
+    assert "POST /api/projects/proj_a/execution with HTTP 403" in error["message"]
+    assert error["remediation"]["what"].startswith("No run was started")
 
 
 # --- destructive operations carry their blast radius ---
@@ -999,6 +1113,26 @@ def test_the_samplesheet_executor_writes_the_csv_and_then_ingests(monkeypatch):
     assert declined["samples_ingested"] is False
 
 
+def test_a_samplesheet_whose_ingest_is_refused_is_still_reported_replaced(monkeypatch):
+    """A 429 on the ingest made the audit say update_samplesheet failed, when the new
+    CSV had already been written; the change stands, and the ingest is what to redo."""
+    from unittest.mock import MagicMock
+    from cirro_api_client.v1.api.datasets import ingest_samples
+    from cirro_agent.worker import dataset_ops
+
+    def throttled(**kw):
+        raise RuntimeError("Unexpected status code: 429")
+    monkeypatch.setattr(ingest_samples, "sync_detailed", throttled)
+    reader = MagicMock()
+    result = dataset_ops.apply_update_samplesheet(reader, {
+        "project_id": "proj_a", "dataset_id": "ds_1",
+        "contents": "sample,fastq_1\n", "ingest_samples": True})
+    reader.client.datasets.update_samplesheet.assert_called_once()
+    assert result["samples_ingested"] is False
+    assert "429" in result["ingest_failed"]
+    assert "replaced" in result["note"]
+
+
 def test_a_samplesheet_update_can_decline_the_re_ingest(writable_tenant, session_dir):
     """Opting out must say so in the text the person approves, not just omit a line."""
     planned = call(writable_tenant, session_dir, "plan", op="update_samplesheet",
@@ -1233,3 +1367,247 @@ def test_the_last_tag_can_be_taken_off_a_project(writable_tenant, session_dir):
                    args={"project_id": "proj_a"})
     assert missing["ok"] is False
     assert missing["error"]["code"] == "INVALID_QUERY"
+
+
+@pytest.mark.parametrize("status,code,safe_to_replan", [
+    (400, "UPSTREAM_ERROR", True),
+    (504, "OUTCOME_UNKNOWN", False),
+])
+def test_a_failed_write_points_at_a_re_plan_only_when_cirro_refused_it(
+        writable_tenant, session_dir, status, code, safe_to_replan):
+    """A re-plan cannot see a write that went through and comes back "unchanged", so
+    pointing every failed apply at one invited the same change twice -- rows inserted
+    again, a run launched again, under a grant with no prompt. Only a refusal says
+    nothing happened; a gateway timeout says nothing either way."""
+    planned = call(writable_tenant, session_dir, "plan", op="update_project_tags",
+                   args={"project_id": "proj_a", "tags": ["qc"]})
+    writable_tenant["router"].put(f"{API}/projects/proj_a:tags").respond(
+        status_code=status, json={"message": "no"})
+    error = apply_from(writable_tenant, session_dir, planned)["error"]
+    assert error["code"] == code
+    replans = [step for step in error["remediation"]["retry_with"]
+               if step.get("renew_from")]
+    assert bool(replans) is safe_to_replan
+    if not safe_to_replan:
+        assert "twice" in error["remediation"]["what"]
+
+
+# --- what Cirro would refuse at apply is refused before the approval ----------
+
+def _upload_args(tmp_path, **overrides):
+    source = tmp_path / "run"
+    source.mkdir(exist_ok=True)
+    (source / "sample_R1.fastq.gz").write_text("@read\n")
+    return {"project_id": "proj_a", "process": "proc_ingest", "name": "Run 12",
+            "source_dir": str(source), **overrides}
+
+
+def test_tags_given_as_key_value_objects_are_refused_before_the_approval(
+        writable_tenant, session_dir, tmp_path):
+    """2026-10-13, inside a chain: the objects were stored as given, went onto the wire
+    as {"value": {...}}, and Cirro refused the upload ("expected VALUE_STRING") after
+    the approval was spent. Cirro has deprecated the tag key, so there is no faithful
+    form to normalise to; the refusal hands back the values instead."""
+    tags = [{"key": "batch", "value": "3"}, {"key": "site", "value": "FHCC"}]
+    result = call(writable_tenant, session_dir, "plan", op="upload_dataset",
+                  args=_upload_args(tmp_path, tags=tags))
+    assert result["error"]["code"] == "INVALID_QUERY"
+    assert result["error"]["field"] == "tags"
+    assert result["error"]["remediation"]["retry_with"] == [{"tags": ["3", "FHCC"]}]
+
+    chained = call(writable_tenant, session_dir, "plan", op="chain", args={"steps": [
+        {"label": "upload", "op": "upload_dataset",
+         "args": _upload_args(tmp_path, tags=tags)}]})
+    assert chained["error"]["code"] == "INVALID_QUERY"
+    assert chained["error"]["field"] == "tags"
+
+
+def test_every_op_that_writes_tags_holds_them_to_a_list_of_strings(
+        writable_tenant, session_dir):
+    """update_dataset did not reach the wire with an object: it crashed planning, on
+    sorting and hashing the tag list. A bare string would have been split into
+    characters by `list()`."""
+    edited = call(writable_tenant, session_dir, "plan", op="update_dataset",
+                  args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                        "tags": [{"value": "qc-pass"}, {"value": "batch-3"}]})
+    assert edited["error"]["code"] == "INVALID_QUERY"
+    assert edited["error"]["remediation"]["retry_with"] == [
+        {"tags": ["qc-pass", "batch-3"]}]
+
+    bare = call(writable_tenant, session_dir, "plan", op="update_dataset",
+                args={"project_id": "proj_a", "dataset_id": "ds_0000", "tags": "qc"})
+    assert bare["error"]["remediation"]["retry_with"] == [{"tags": ["qc"]}]
+
+    project = call(writable_tenant, session_dir, "plan", op="update_project_tags",
+                   args={"project_id": "proj_a", "tags": [{"key": "k", "value": "v"}]})
+    assert project["error"]["code"] == "INVALID_QUERY"
+
+    launched = plan_run(writable_tenant, session_dir, tags=[{"value": "rnaseq"}])
+    assert launched["error"]["code"] == "INVALID_QUERY"
+
+
+def test_a_dataset_name_cirro_would_refuse_is_refused_before_the_approval(
+        writable_tenant, session_dir, tmp_path):
+    """2026-09-21: "uploadDatasetRequest.name: size must be between 0 and 100", after
+    the approval. Cirro-backend puts `@Size(max = 100)` on the name of every request
+    that creates or renames a dataset, so all four are held to it."""
+    too_long = "RNAseq " + "x" * 94
+    assert len(too_long) == 101
+    for op, args in [
+            ("upload_dataset", _upload_args(tmp_path)),
+            ("update_dataset", {"project_id": "proj_a", "dataset_id": "ds_0000"}),
+            ("import_public", {"project_id": "proj_a", "public_ids": ["SRR9984183"]}),
+            ("run_analysis", {"project_id": "proj_a", "process": "proc_rnaseq",
+                              "source_dataset_ids": ["ds_0000"],
+                              "params": {"genome": "GRCh38"}})]:
+        result = call(writable_tenant, session_dir, "plan", op=op,
+                      args={**args, "name": too_long})
+        assert result["error"]["code"] == "INVALID_QUERY", (op, result)
+        assert result["error"]["field"] == "name", op
+        suggested = result["error"]["remediation"]["retry_with"][0]["name"]
+        assert len(suggested) == 100 and too_long.startswith(suggested), op
+
+    at_the_limit = call(writable_tenant, session_dir, "plan", op="update_dataset",
+                        args={"project_id": "proj_a", "dataset_id": "ds_0000",
+                              "name": "x" * 100})
+    assert at_the_limit["ok"], at_the_limit
+
+
+def test_the_name_limit_counts_what_java_counts():
+    """`@Size` counts UTF-16 code units, so a character outside the Basic Multilingual
+    Plane is two of them -- a name Python measures at 100 can be 101 to Cirro."""
+    from cirro_agent import errors
+    from cirro_agent.worker import mutations
+    mutations._check_dataset_name("x" * 100)
+    with pytest.raises(errors.InvalidQuery) as raised:
+        mutations._check_dataset_name("x" * 99 + "\N{DNA DOUBLE HELIX}")
+    assert raised.value.retry_with == [{"name": "x" * 99}]
+    with pytest.raises(errors.InvalidQuery):
+        mutations._check_dataset_name("   ")
+
+
+def test_the_import_download_method_is_checked_shown_and_sent(
+        writable_tenant, session_dir):
+    """2026-10-14: the string went onto ImportDataRequest as given, and serializing the
+    request died at apply with "'str' object has no attribute 'value'". The enum cannot
+    be the check either: it maps any unknown string to UNKNOWN instead of raising."""
+    import httpx
+    sent = []
+
+    def accept(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "ds_imported", "message": "created"})
+
+    writable_tenant["router"].post(f"{API}/projects/proj_a/datasets/import").mock(
+        side_effect=accept)
+    args = {"project_id": "proj_a", "name": "SRA import", "public_ids": ["SRR9984183"]}
+
+    refused = call(writable_tenant, session_dir, "plan", op="import_public",
+                   args={**args, "download_method": "UNKNOWN"})
+    assert refused["error"]["code"] == "INVALID_QUERY"
+    assert refused["error"]["field"] == "download_method"
+    assert {"download_method": "aspera"} in refused["error"]["remediation"]["retry_with"]
+
+    planned = call(writable_tenant, session_dir, "plan", op="import_public",
+                   args={**args, "download_method": "Aspera"})
+    assert planned["ok"], planned
+    assert "Download via  aspera" in approved_summary(session_dir, planned["plan_id"])
+    applied = apply_from(writable_tenant, session_dir, planned)
+    assert applied["ok"], applied
+    assert applied["result"]["created_dataset_id"] == "ds_imported"
+    assert sent[-1]["downloadMethod"] == "aspera"
+
+    default = call(writable_tenant, session_dir, "plan", op="import_public", args=args)
+    assert "Download via  sratools (the default)" in approved_summary(
+        session_dir, default["plan_id"])
+
+
+# --- a transfer that fails partway says what it left behind ------------------
+
+def _uploading(tmp_path, monkeypatch, transfer):
+    """A recording Reader whose `upload_files` runs the SDK's own transfer loop, with
+    each file's S3 call answered by `transfer(key, attempt)` instead of by S3."""
+    from unittest.mock import MagicMock
+    from cirro import file_utils
+    from cirro.clients.s3 import S3Client
+    attempts = {}
+
+    class FakeTransfer:
+        def upload_file(self, filename, bucket, key, callback, extra_args):
+            attempts[key] = attempts.get(key, 0) + 1
+            transfer(key, attempts[key])
+
+    s3 = S3Client.__new__(S3Client)
+    s3._upload_args = {}
+    s3._get_transfer = FakeTransfer
+
+    def upload_files(project_id, dataset_id, directory, files):
+        file_utils.upload_directory(directory, files, {}, s3, "bucket",
+                                    f"datasets/{dataset_id}/data", threads=4)
+
+    monkeypatch.setattr(file_utils.time, "sleep", lambda seconds: None)
+    files = [f"run/sample_{i:02d}.wiff" for i in range(10)]
+    for name in files:
+        (tmp_path / name).parent.mkdir(exist_ok=True)
+        (tmp_path / name).write_bytes(b"x")
+    reader = MagicMock()
+    reader.client.datasets.create.return_value.id = "ds_partial"
+    reader.client.datasets.upload_files.side_effect = upload_files
+    args = {"project_id": "proj_a", "process_id": "proc_ingest", "name": "Run 12",
+            "description": "", "source_dir": str(tmp_path), "files": files,
+            "folders": [], "tags": [], "n_files": len(files), "total_bytes": len(files)}
+    return reader, args
+
+
+def test_a_failed_upload_names_the_dataset_it_left_and_why(tmp_path, monkeypatch):
+    """2026-10-26: "Failed to upload 118 of 133 files:" and then 118 lines of a path and
+    a colon. The SDK prints only str(exc), which a cancelled transfer leaves empty. The
+    person needs the dataset the attempt left behind, how much of it arrived and what
+    kind of failure stopped the rest, in a message that does not grow with the files.
+
+    Driven through the SDK's own transfer loop, so this also fails if the SDK stops
+    sending each file through `S3Client.upload_file`, which is where failures are seen.
+    """
+    from boto3.exceptions import S3UploadFailedError
+    from cirro.clients.s3 import S3Client
+    from s3transfer.exceptions import CancelledError
+    from cirro_agent import errors
+    from cirro_agent.worker import dataset_ops
+
+    def transfer(key, attempt):
+        if key.endswith(("_00.wiff", "_01.wiff")):
+            return
+        if key.endswith("_02.wiff"):
+            if attempt == 1:
+                raise S3UploadFailedError("throttled")  # retried by the SDK, then sent
+            return
+        raise CancelledError()
+
+    reader, args = _uploading(tmp_path, monkeypatch, transfer)
+    original = S3Client.upload_file
+    with pytest.raises(errors.UpstreamError) as raised:
+        dataset_ops.apply_upload_dataset(reader, args)
+    failure = raised.value
+    assert S3Client.upload_file is original, "the wrapper must not outlive the upload"
+    assert "Uploaded 3 of 10 files into 'Run 12' (ds_partial); 7 failed" in \
+        failure.message
+    assert "7 x CancelledError, e.g. run/sample_03.wiff" in failure.message
+    assert failure.message.count(".wiff") == dataset_ops.UPLOAD_FAILURE_EXAMPLES
+    assert failure.detail["n_failed"] == 7
+    assert failure.retry_with[0] == {
+        "op": "delete_dataset",
+        "args": {"project_id": "proj_a", "dataset_id": "ds_partial"}}
+    assert "ds_partial" in failure.user_action and "Delete it" in failure.user_action
+
+
+def test_a_failed_upload_with_no_file_to_blame_does_not_guess_a_count(
+        tmp_path, monkeypatch):
+    from cirro_agent import errors
+    from cirro_agent.worker import dataset_ops
+    reader, args = _uploading(tmp_path, monkeypatch, lambda key, attempt: None)
+    reader.client.datasets.upload_files.side_effect = TimeoutError()
+    with pytest.raises(errors.UpstreamError) as raised:
+        dataset_ops.apply_upload_dataset(reader, args)
+    assert "TimeoutError" in raised.value.message
+    assert "is not known" in raised.value.message
+    assert raised.value.retry_with[0]["args"]["dataset_id"] == "ds_partial"

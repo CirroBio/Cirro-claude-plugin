@@ -942,27 +942,47 @@ def test_create_process_validates_the_authored_assets_it_will_upload(tmp_path):
     assert str(directory.resolve()) in draft.summary.split("Registering does not")[1]
 
 
-def test_a_create_returning_no_process_id_is_an_error():
-    """A 400 or 401 arrives as a parsed body, not an exception.
+CREATE_ARGS = {
+    "process_id": "org-demo", "name": "Demo", "description": "d",
+    "executor": "NEXTFLOW", "child_process_ids": [], "parent_process_ids": [],
+    "category": "Community", "repository_path": "epi2me-labs/wf-demo",
+    "version": "v1", "repository_type": "GITHUB_PUBLIC",
+    "entry_point": "main.nf", "executor_version": None,
+    "uses_sample_sheet": False, "allow_multiple_sources": True,
+    "config_source": "STORAGE", "custom_settings": None,
+    "file_mapping_rules": [], "design_spec": "spec.md"}
 
-    The generated client returns the response for those statuses instead of raising.
-    Reporting the requested id back as though it were created leaves the caller
-    believing a process exists, and every later read 404s instead.
+
+def test_a_refused_create_reports_cirro_s_reason_and_that_nothing_was_registered():
+    """A 400 arrives as a parsed PortalErrorResponse, not an exception.
+
+    Reading only its missing id reported "the API accepted the request but returned no
+    process id" -- twice on dev inside a chain, for a create Cirro had refused, with
+    its reason dropped and a retry suggested. A chain with the same process name then
+    succeeded the same day: nothing had been registered, so nothing collided.
     """
+    from cirro_api_client.v1.models import ErrorMessage, PortalErrorResponse
     reader = MagicMock()
-    reader.client.processes.create_custom_process.return_value = MagicMock(id=None)
+    reader.client.processes.create_custom_process.return_value = PortalErrorResponse(
+        status_code=400, error_code="BAD_REQUEST",
+        error_detail="Resource .cirro/process-form.json is required and was not found.",
+        errors=[])
     with pytest.raises(errors.AgentError) as caught:
-        pipeline_ops.apply_create_process(reader, {
-            "process_id": "org-demo", "name": "Demo", "description": "d",
-            "executor": "NEXTFLOW", "child_process_ids": [], "parent_process_ids": [],
-            "category": "Community", "repository_path": "epi2me-labs/wf-demo",
-            "version": "v1", "repository_type": "GITHUB_PUBLIC",
-            "entry_point": "main.nf", "executor_version": None,
-            "uses_sample_sheet": False, "allow_multiple_sources": True,
-            "config_source": "STORAGE", "custom_settings": None,
-            "file_mapping_rules": [], "design_spec": "spec.md"})
-    assert caught.value.code == "UPSTREAM_ERROR"
-    assert "org-demo" in str(caught.value)
+        pipeline_ops.apply_create_process(reader, dict(CREATE_ARGS))
+    refused = caught.value
+    assert refused.code == "INVALID_QUERY", "a refusal to fix, not an outage to retry"
+    assert "process-form.json is required" in refused.message
+    assert "HTTP 400" in refused.message and "org-demo" in refused.message
+    assert "accepted" not in refused.message
+    assert refused.what.startswith("Nothing was registered")
+    assert refused.retry_with == [{"tool": "plan", "op": "create_process"}]
+
+    reader.client.processes.create_custom_process.return_value = ErrorMessage(
+        message="Unauthorized")
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops.apply_create_process(reader, dict(CREATE_ARGS))
+    assert caught.value.code == "AUTH_EXPIRED"
+    assert "login_start" in caught.value.user_action
 
 
 def _owned(**overrides):
@@ -1002,6 +1022,53 @@ def _reader_for(record):
         pipeline_code=namespace(record.get("pipeline_code")),
         file_mapping_rules=[])
     return reader
+
+
+def _repo_backed(code_type: str, is_authorized: bool) -> dict:
+    return _owned(
+        config_source="EXTERNAL",
+        pipeline_code={"repository_path": "org/demo", "version": "v1",
+                       "entry_point": "main.nf", "executor_version": None,
+                       "repository_type": code_type},
+        custom_settings={"repository": "org/demo-config", "branch": "main",
+                         "folder": ".cirro", "repository_type": code_type,
+                         "is_authorized": is_authorized})
+
+
+def test_a_sync_cirro_will_refuse_for_github_authorization_is_refused_at_plan():
+    """Observed on dev five times: the plan only warned, the person approved, and Cirro
+    answered 403 "Process not authorized, please authorize GitHub connection" -- which
+    came back as a retryable UPSTREAM_ERROR saying "retry once", so it was.
+
+    Cirro refuses exactly when the code repository is private and the connection is
+    unauthorized, and the plan has already read both."""
+    reader = _reader_for(_repo_backed("GITHUB_PRIVATE", is_authorized=False))
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops.plan_sync_process_config(reader, {"process_id": "org-demo"})
+    assert caught.value.code == "FORBIDDEN"
+    assert "connect to GitHub" in caught.value.user_action
+    assert "org/demo" in caught.value.message
+
+    authorized = _reader_for(_repo_backed("GITHUB_PRIVATE", is_authorized=True))
+    pipeline_ops.plan_sync_process_config(authorized, {"process_id": "org-demo"})
+    # A public code repository passes Cirro's check whatever the flag says.
+    public = _reader_for(_repo_backed("GITHUB_PUBLIC", is_authorized=False))
+    pipeline_ops.plan_sync_process_config(public, {"process_id": "org-demo"})
+
+
+def test_a_sync_refused_at_apply_says_to_authorize_github():
+    """The case the plan cannot see, such as an authorization withdrawn after it."""
+    from cirro_api_client.v1.errors import ForbiddenException
+    reader = MagicMock()
+    reader.client.processes.sync_custom_process.side_effect = ForbiddenException({
+        "statusCode": 403, "errorCode": "FORBIDDEN", "errors": [],
+        "errorDetail": "Process not authorized, please authorize GitHub connection"})
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops.apply_sync_process_config(reader, {"process_id": "org-demo"})
+    assert caught.value.code == "FORBIDDEN"
+    assert "please authorize GitHub connection" in caught.value.message
+    assert "connect to GitHub" in caught.value.user_action
+    assert "service status" not in caught.value.user_action
 
 
 def test_uses_sample_sheet_can_be_turned_off():

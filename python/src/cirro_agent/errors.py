@@ -116,3 +116,9 @@ NotGranted = _err("NOT_GRANTED", AGENT_ACTION)
 
 # Upstream.
 UpstreamError = _err("UPSTREAM_ERROR", RETRYABLE)
+# Cirro's API turned a request away for arriving too fast (HTTP 429). Distinct from
+# UPSTREAM_ERROR because the service is up and the remedy is to wait, not to check it.
+RateLimited = _err("RATE_LIMITED", RETRYABLE)
+# A write was sent and its reply does not say whether it took effect. Not retryable:
+# the remedy is a read that settles it, because a retry could make the change twice.
+OutcomeUnknown = _err("OUTCOME_UNKNOWN", AGENT_ACTION)

@@ -7,8 +7,8 @@ why the registration lives on this side.
 
 from .. import errors
 from . import mutations, reads, rows as R
-from .mutations import (Draft, Op, RISK_DESTRUCTIVE, RISK_WRITE, _inv, _need, _project,
-                        _tag_models, PROJECT_ARGS)
+from .mutations import (Draft, Op, RISK_DESTRUCTIVE, RISK_WRITE, _check_tags, _enum_choice,
+                        _inv, _need, _project, _tag_models, PROJECT_ARGS)
 
 
 def plan_create_project(reader: reads.Reader, args: dict) -> Draft:
@@ -16,6 +16,10 @@ def plan_create_project(reader: reads.Reader, args: dict) -> Draft:
     # without stating one -- and it belongs in the approval text regardless.
     _need(args, "create_project", "name", "billing_account_id", "budget_amount",
           "budget_period")
+    _check_tags(args)
+    from cirro_api_client.v1.models import BudgetPeriod
+    period = _enum_choice(BudgetPeriod, args["budget_period"], field="budget_period",
+                          what="A project's budget is set per period.")
     accounts = reader.client.billing.list() or []
     reader.cost.call("billing.list")
     account = next((a for a in accounts
@@ -51,7 +55,7 @@ def plan_create_project(reader: reads.Reader, args: dict) -> Draft:
         f"  Description      {args.get('description', '')!r}",
         f"  Billing account  {R.plain(getattr(account, 'name', None))} "
         f"({args['billing_account_id']})",
-        f"  Budget           {args['budget_amount']} per {args['budget_period']}",
+        f"  Budget           {args['budget_amount']} per {period}",
         f"  Contacts         {len(contacts)}",
         "",
         "A project provisions cloud infrastructure and begins accruing storage charges "
@@ -60,7 +64,7 @@ def plan_create_project(reader: reads.Reader, args: dict) -> Draft:
     return Draft(args={"name": args["name"], "description": args.get("description", ""),
                        "billing_account_id": args["billing_account_id"],
                        "budget_amount": args["budget_amount"],
-                       "budget_period": args["budget_period"],
+                       "budget_period": period,
                        "contacts": contacts,
                        "classification_ids": args.get("classification_ids") or [],
                        "tags": args.get("tags") or []},
@@ -68,12 +72,13 @@ def plan_create_project(reader: reads.Reader, args: dict) -> Draft:
 
 
 def apply_create_project(reader: reads.Reader, args: dict) -> dict:
-    from cirro_api_client.v1.models import ProjectInput, ProjectSettings, Contact
+    from cirro_api_client.v1.models import (BudgetPeriod, Contact, ProjectInput,
+                                            ProjectSettings)
     request = ProjectInput(
         name=args["name"], description=args.get("description") or "",
         billing_account_id=args["billing_account_id"],
         settings=ProjectSettings(budget_amount=args["budget_amount"],
-                                 budget_period=args["budget_period"]),
+                                 budget_period=BudgetPeriod(args["budget_period"])),
         contacts=[Contact(name=c["name"], organization=c["organization"],
                           email=c["email"], phone=c["phone"])
                   for c in (args.get("contacts") or [])],
@@ -97,6 +102,7 @@ def plan_update_project_tags(reader: reads.Reader, args: dict) -> Draft:
             field="tags", given=args,
             retry_with=[{"op": "update_project_tags", "args": {"tags": []}}],
         )
+    _check_tags(args)
     project = _project(reader, args)
     lines = [f"Replace the tags on project {project['name']} ({project['id']}).", "",
              f"  from  {project.get('tags')}", f"  to    {args['tags']}"]

@@ -50,4 +50,4 @@ echo "Runtime ready."
 echo "  interpreter   $VENV/bin/python"
 echo "  cirro         $VERSION at $SDK_PATH"
 echo
-echo "Next: create a session folder for this directory and log in."
+echo "Next: reconnect the cirro server with /mcp, then ask Claude to connect to Cirro."

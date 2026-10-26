@@ -810,9 +810,11 @@ def send(reader: Reader, route, *, what: str, cost: str, refusals: Optional[dict
     if refusals and response.status_code in refusals:
         raise refusals[response.status_code](_server_message(response.content))
     if response.status_code >= 400:
+        # The exception the generated routes raise, so a throttle here is classified
+        # as one rather than as an outage.
+        from cirro_api_client.v1.errors import UnexpectedStatus
         raise portal.wrap_upstream(
-            RuntimeError(f"HTTP {response.status_code}: {response.content[:300]!r}"),
-            what=what)
+            UnexpectedStatus(response.status_code, response.content[:300]), what=what)
     return _json.loads(response.content) if response.content else None
 
 

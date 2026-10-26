@@ -157,6 +157,95 @@ def _target_folders(args: dict, current: list) -> list:
     return list(current)
 
 
+def _check_tags(args: dict) -> None:
+    """Refuse a `tags` argument that Cirro would reject, or would store as something else.
+
+    A tag here is a plain string, wrapped as `Tag(value=...)` on the wire. Cirro's Tag
+    also has a `key`, but Cirro-backend marks it deprecated and nothing here reads it
+    back, so a {"key", "value"} object has no faithful form: passed through, it reached
+    the wire as {"value": {...}} and the upload was refused at apply, after approval
+    ("expected VALUE_STRING"). A bare string is refused too, since `list("qc")` is two
+    tags. A `folder://` entry is folder membership, which `folder`/`folders` set and the
+    approval states (see `_target_folders`); in `tags` it would file the dataset without
+    saying so.
+    """
+    tags = args.get("tags")
+    if tags is None:
+        return
+    entries = tags if isinstance(tags, list) else [tags]
+    if not isinstance(tags, list) or not all(isinstance(t, str) for t in entries):
+        raise errors.InvalidQuery(
+            "tags must be a list of strings.",
+            what="Each tag is plain text, e.g. [\"qc-pass\", \"batch-3\"]. Cirro's tag "
+                 "key is deprecated and is not written; if a key carries meaning, put "
+                 "it in the text.",
+            field="tags", given=tags,
+            retry_with=[{"tags": [str(t["value"]) if isinstance(t, dict) and "value" in t
+                                  else str(t) for t in entries if t is not None]}],
+        )
+    folder_entries = [t for t in entries if t.startswith(R.FOLDER_TAG_PREFIX)]
+    if folder_entries:
+        raise errors.InvalidQuery(
+            f"tags holds folder entries: {folder_entries}.",
+            what="Folder membership is not a tag here. Name a dataset's Cirro folder "
+                 "with `folder` or `folders`, which the approval shows as a folder.",
+            field="tags", given=tags,
+            retry_with=[{"tags": [t for t in entries if t not in folder_entries]}],
+        )
+
+
+# Cirro-backend declares the name on every request that creates or renames a dataset --
+# UploadDatasetRequest, UpdateDatasetRequest, ImportDataRequest, RunAnalysisRequest --
+# `@NotBlank @Size(max = 100)`, and refuses anything else only once the change is applied.
+DATASET_NAME_MAX = 100
+
+
+def _check_dataset_name(name) -> None:
+    """Refuse a dataset name Cirro would reject after the approval had been spent."""
+    if not isinstance(name, str) or not name.strip():
+        raise errors.InvalidQuery(
+            "A dataset name must be non-blank text.",
+            what="Name the dataset.", field="name", given=name,
+            retry_with=[{"name": "..."}],
+        )
+
+    # `@Size` counts what Java's String.length() counts: UTF-16 code units, so a
+    # character outside the Basic Multilingual Plane, such as an emoji, is two.
+    def units(text: str) -> int:
+        return len(text.encode("utf-16-le")) // 2
+
+    if units(name) <= DATASET_NAME_MAX:
+        return
+    shorter = name
+    while units(shorter) > DATASET_NAME_MAX:
+        shorter = shorter[:-1]
+    raise errors.InvalidQuery(
+        f"The dataset name is {units(name)} characters long; Cirro accepts at most "
+        f"{DATASET_NAME_MAX}.",
+        what="Choose a shorter name.", field="name", given=name,
+        retry_with=[{"name": shorter.rstrip()}],
+    )
+
+
+def _enum_choice(enum_cls, given, *, field: str, what: str) -> str:
+    """The value of the member of a generated enum that `given` names, case aside.
+
+    Checked at plan time because the enum cannot check it: `_missing_` turns an unknown
+    string into UNKNOWN, which the models say never to send, and a plain string where
+    a member belongs fails only as the request is serialized, after the approval.
+    """
+    choices = [member.value for member in enum_cls if member.name != "UNKNOWN"]
+    wanted = str(given).strip().lower()
+    match = next((choice for choice in choices if choice.lower() == wanted), None)
+    if match is None:
+        raise errors.InvalidQuery(
+            f"{given!r} is not a valid {field}.",
+            what=f"{what} Choose one of {choices}.", field=field, given=given,
+            retry_with=[{field: choice} for choice in choices],
+        )
+    return match
+
+
 def _tag_models(values: list) -> list:
     """Wire-format Tag objects; the import stays lazy because this module is an entry
     point that must not load the SDK."""

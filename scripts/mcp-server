@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# stdio MCP server. Launched with cwd = plugin root, so it locates the session
-# folder from CLAUDE_PROJECT_DIR rather than from cwd.
+# stdio MCP server. Claude Code launches it with cwd = the project directory, which is
+# where a tool called without `directory` starts looking for a session folder.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${CIRRO_AGENT_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$(cd "$HERE/.." && pwd)}}"

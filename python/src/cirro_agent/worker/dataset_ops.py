@@ -6,14 +6,17 @@ why the registration lives on this side.
 
 import math
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
 from .. import errors, runner, summarize as S
 from . import mutations, reads, rows as R
-from .mutations import (Draft, Op, RISK_DESTRUCTIVE, RISK_LOCAL, RISK_WRITE, _dataset, _inv,
+from .mutations import (Draft, Op, RISK_DESTRUCTIVE, RISK_LOCAL, RISK_WRITE,
+                        _check_dataset_name, _check_tags, _dataset, _enum_choice, _inv,
                         _need, _project, _tag_models, _target_folders, _wire_tags,
-                        FOLDER_ARGS, PROJECT_ARGS)
+                        FOLDER_ARGS,
+                        PROJECT_ARGS)
 
 
 # How many lines of a samplesheet diff the approval quotes before saying how many
@@ -154,6 +157,9 @@ def plan_update_dataset(reader: reads.Reader, args: dict) -> Draft:
             what="Name the dataset(s) to edit.", field="dataset_ids",
             retry_with=[{"verb": "query", "entity": "dataset"}],
         )
+    if args.get("name") is not None:
+        _check_dataset_name(args["name"])
+    _check_tags(args)
     project = _project(reader, args)
 
     if len(given) > 1 and (args.get("name") is not None
@@ -481,11 +487,22 @@ def apply_update_samplesheet(reader: reads.Reader, args: dict) -> dict:
                                               samplesheet=args["contents"])
     result = {"updated_samplesheet_for": args["dataset_id"],
               "bytes": len(args["contents"]), "samples_ingested": False}
-    if args.get("ingest_samples"):
+    if not args.get("ingest_samples"):
+        return result
+    # The samplesheet is already replaced, so a failed ingest is reported rather than
+    # raised, as update_dataset reports its follow-ups: a 429 here once made the audit
+    # say the whole change failed while the new samplesheet stood.
+    try:
         _queue_sample_ingest(reader, args["project_id"], args["dataset_id"])
-        result["samples_ingested"] = True
-        result["note"] = ("Sample ingest was accepted and runs asynchronously; project "
-                          "sample metadata updates shortly.")
+    except Exception as exc:
+        result["ingest_failed"] = f"{type(exc).__name__}: {exc}"
+        result["note"] = ("The samplesheet was replaced, but the sample ingest did not "
+                          "start. Planning this again re-runs the ingest, or start it "
+                          "from the Cirro web UI.")
+        return result
+    result["samples_ingested"] = True
+    result["note"] = ("Sample ingest was accepted and runs asynchronously; project "
+                      "sample metadata updates shortly.")
     return result
 
 
@@ -550,6 +567,8 @@ def plan_upload_dataset(reader: reads.Reader, args: dict) -> Draft:
     # `source_dir` is the local directory; `folder` is the Cirro folder the dataset
     # lands in. Both were once called `folder`, which made one of the two a footgun.
     _need(args, "upload_dataset", "name", "process", "source_dir")
+    _check_dataset_name(args["name"])
+    _check_tags(args)
     project = _project(reader, args)
     process = reader.resolve_process(args["process"], ingest=True)
     source_dir = Path(args["source_dir"]).expanduser().resolve()
@@ -610,30 +629,133 @@ def plan_upload_dataset(reader: reads.Reader, args: dict) -> Draft:
     )
 
 
+# A failed upload's message names at most this many kinds of failure, this many files
+# of each, and this many characters of each failure's text. The SDK's own report is a
+# line per file: 118 of them on a real tenant, each with nothing after the colon.
+UPLOAD_FAILURE_KINDS = 3
+UPLOAD_FAILURE_EXAMPLES = 3
+UPLOAD_FAILURE_TEXT = 200
+
+
 def apply_upload_dataset(reader: reads.Reader, args: dict) -> dict:
-    from cirro.sdk.project import DataPortalProject
-    detail = reader.client.projects.get(project_id=args["project_id"])
-    wrapped = DataPortalProject(detail, reader.client)
+    """Validate, register and transfer -- the SDK's `upload_dataset`, done step by step.
+
+    The SDK raises from the transfer without the id of the dataset it has just
+    registered, and a transfer that fails partway leaves that dataset behind: the one
+    thing the person has to act on. Doing the steps here keeps the id in hand. It is
+    also what lets a later chain step reference this upload by value instead of
+    looking it up again by name, which is racy when two uploads share a name.
+    """
+    from cirro_api_client.v1.models import UploadDatasetRequest
+    files = args["files"]
+    reader.client.processes.check_dataset_files(
+        files=files, process_id=args["process_id"], directory=args["source_dir"])
     # Folder membership rides in the tag list, so the dataset is filed on creation
     # rather than by a second gated operation afterwards.
     combined = _wire_tags(args.get("folders"), args.get("tags"))
-    # The SDK returns the created dataset, after its own short retry for propagation.
-    # Capturing the id is what lets a later step reference this upload by value
-    # instead of looking it up again by name, which is racy when two uploads in a
-    # project share a name.
-    created = wrapped.upload_dataset(
-        name=args["name"], description=args.get("description") or "",
-        process=args["process_id"], upload_folder=args["source_dir"],
-        files=args.get("files") or None, tags=combined or None)
+    created = reader.client.datasets.create(
+        project_id=args["project_id"],
+        upload_request=UploadDatasetRequest(
+            name=args["name"], process_id=args["process_id"],
+            description=args.get("description") or "", expected_files=files,
+            tags=_tag_models(combined) or None))
+    failures = {}
+    try:
+        with _recording_upload_failures(failures):
+            reader.client.datasets.upload_files(
+                project_id=args["project_id"], dataset_id=created.id,
+                directory=args["source_dir"], files=files)
+    except Exception as exc:
+        raise _failed_upload(args, created.id, exc, failures) from exc
     return {"uploaded_to_project": args["project_id"], "name": args["name"],
-            "dataset_id": R.plain(getattr(created, "id", None)),
+            "dataset_id": created.id,
             "n_files": args.get("n_files"),
             "bytes": args.get("total_bytes"),
             "folders": args.get("folders") or [], "tags": args.get("tags") or [],
-            "follow_with": {"verb": "get", "entity": "dataset",
-                            "id": R.plain(getattr(created, "id", None)),
+            "follow_with": {"verb": "get", "entity": "dataset", "id": created.id,
                             "scope": {"project_ids": [args["project_id"]]},
                             "freshness": "fresh"}}
+
+
+@contextmanager
+def _recording_upload_failures(failures: dict):
+    """Keep each file's own exception, which the SDK's report reduces to its text.
+
+    `cirro.file_utils` collects every failed transfer and raises one RuntimeError of
+    "<key>: <str(exc)>" lines, so an exception that stringifies to nothing -- a
+    cancelled s3transfer future, a bare timeout -- arrives as a path and a colon with
+    its type gone. Every file goes through `S3Client.upload_file`, so wrapping it for
+    the length of one upload sees each failure as it is raised; a retry that then
+    succeeds takes its file back out. The worker runs one operation and exits, and the
+    method is restored before this returns.
+    """
+    from cirro.clients.s3 import S3Client
+    original = S3Client.upload_file
+
+    def recording(self, file_path, bucket, key, callback=None):
+        try:
+            original(self, file_path, bucket, key, callback)
+        except Exception as exc:
+            failures[str(file_path)] = exc
+            raise
+        failures.pop(str(file_path), None)
+
+    S3Client.upload_file = recording
+    try:
+        yield
+    finally:
+        S3Client.upload_file = original
+
+
+def _failure_text(exc: BaseException) -> str:
+    """One bounded line naming the exception's type, and its cause's when it says
+    nothing itself."""
+    said = str(exc)
+    text = f"{type(exc).__name__}: {said}" if said else type(exc).__name__
+    cause = exc.__cause__ or exc.__context__
+    if not said and cause is not None:
+        text += f" (from {type(cause).__name__}: {cause})"
+    return text[:UPLOAD_FAILURE_TEXT]
+
+
+def _failed_upload(args: dict, dataset_id: str, exc: Exception,
+                   failures: dict) -> errors.AgentError:
+    """A transfer that did not finish: the dataset it left, how much of it arrived,
+    and why the rest did not -- summarised by kind of failure, not listed by file."""
+    n_files = len(args["files"])
+    label = f"{args['name']!r} ({dataset_id})"
+    if failures:
+        by_kind = {}
+        for path, failure in sorted(failures.items()):
+            relative = Path(path).relative_to(args["source_dir"]).as_posix()
+            by_kind.setdefault(type(failure).__name__, []).append((relative, failure))
+        ranked = sorted(by_kind.values(), key=len, reverse=True)
+        kinds = [f"{len(hits)} x {_failure_text(hits[0][1])}, e.g. "
+                 + ", ".join(path for path, _ in hits[:UPLOAD_FAILURE_EXAMPLES])
+                 for hits in ranked[:UPLOAD_FAILURE_KINDS]]
+        if len(ranked) > UPLOAD_FAILURE_KINDS:
+            kinds.append(f"{len(ranked) - UPLOAD_FAILURE_KINDS} other kind(s) of failure")
+        message = (f"Uploaded {n_files - len(failures)} of {n_files} files into "
+                   f"{label}; {len(failures)} failed: " + "; ".join(kinds) + ".")
+    else:
+        message = (f"The upload into {label} failed, and no single file's transfer "
+                   f"reported why, so how many of the {n_files} files arrived is not "
+                   f"known: {_failure_text(exc)}.")
+    return errors.UpstreamError(
+        message,
+        what="The dataset is registered before its files are sent, and sending them "
+             "did not finish.",
+        retry_with=[{"op": "delete_dataset",
+                     "args": {"project_id": args["project_id"], "dataset_id": dataset_id}},
+                    {"op": "upload_dataset",
+                     "note": "plan the upload again once the partial dataset is deleted"}],
+        user_action=(f"Dataset {label} exists but is missing files. Delete it before "
+                     "uploading again, or the retry leaves a second one behind. If the "
+                     "failures persist, upload fewer files at a time, or use the Cirro "
+                     "web UI."),
+        dataset_id=dataset_id, n_files=n_files,
+        n_failed=len(failures) if failures else None,
+    )
 
 
 def plan_upload_reference(reader: reads.Reader, args: dict) -> Draft:
@@ -693,8 +815,22 @@ def apply_upload_reference(reader: reads.Reader, args: dict) -> dict:
     return {"uploaded_reference": args["name"], "project_id": args["project_id"]}
 
 
+def _download_method(args: dict) -> str:
+    """How Cirro fetches the accessions, as a value of the request model's enum.
+    Unnamed, it is the request model's own default, which is what goes on the wire
+    when nothing is set."""
+    from cirro_api_client.v1.models import ImportDataRequestDownloadMethod as Method
+    given = args.get("download_method")
+    if given is None:
+        return Method.SRATOOLS.value
+    return _enum_choice(Method, given, field="download_method",
+                        what="Cirro downloads public data in one of a few ways.")
+
+
 def plan_import_public(reader: reads.Reader, args: dict) -> Draft:
     _need(args, "import_public", "name", "public_ids")
+    _check_dataset_name(args["name"])
+    method = _download_method(args)
     project = _project(reader, args)
     ids = args["public_ids"]
     lines = [
@@ -703,23 +839,28 @@ def plan_import_public(reader: reads.Reader, args: dict) -> Draft:
         f"  Dataset name  {args['name']}",
         f"  Accessions    {len(ids)}: {', '.join(map(str, ids[:10]))}"
         + (" ..." if len(ids) > 10 else ""),
+        f"  Download via  {method}"
+        + (" (the default)" if args.get("download_method") is None else ""),
         "",
         "Cirro will download these from the public repository. Volume is not known "
         "until the transfer starts.",
     ]
     return Draft(args={"project_id": project["id"], "name": args["name"],
                        "public_ids": ids, "description": args.get("description", ""),
-                       "download_method": args.get("download_method")},
+                       "download_method": method},
                  summary="\n".join(lines),
                  invalidates=[_inv("datasets", project["id"])])
 
 
 def apply_import_public(reader: reads.Reader, args: dict) -> dict:
-    from cirro_api_client.v1.models import ImportDataRequest
-    request = ImportDataRequest(name=args["name"], public_ids=args["public_ids"],
-                                description=args.get("description") or "")
-    if args.get("download_method"):
-        request.download_method = args["download_method"]
+    from cirro_api_client.v1.models import (ImportDataRequest,
+                                            ImportDataRequestDownloadMethod)
+    # The field is an enum and `to_dict` calls `.value` on it, so the planner's string
+    # has to be turned back into a member or the request fails to serialize.
+    request = ImportDataRequest(
+        name=args["name"], public_ids=args["public_ids"],
+        description=args.get("description") or "",
+        download_method=ImportDataRequestDownloadMethod(args["download_method"]))
     response = reader.client.datasets.import_public(
         project_id=args["project_id"], import_request=request)
     return {"created_dataset_id": R.plain(getattr(response, "id", None))}

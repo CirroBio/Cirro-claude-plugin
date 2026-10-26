@@ -396,6 +396,34 @@ def test_insert_sends_batches_the_endpoint_accepts(sheets_tenant, session_dir):
         [1000, 1000, 500]
 
 
+def test_an_insert_refused_partway_says_the_earlier_batches_stand(
+        sheets_tenant, session_dir):
+    """The "not ready" refusal says nothing was written, which is true of one request;
+    told that after batch 2, re-planning the whole insert wrote batch 1 twice."""
+    import httpx
+    rows = [{"sample_id": f"n{i}", "reads": i} for i in range(2500)]
+    planned = plan(sheets_tenant, session_dir, "insert_rows", sheet_id="sheet-1", rows=rows)
+    router = sheets_tenant["router"]
+    serve = next(route.side_effect for route in router.routes
+                 if getattr(route.side_effect, "__name__", "") == "data")
+    posts = []
+
+    def second_refused(request):
+        if request.method == "POST":
+            posts.append(request)
+            if len(posts) == 2:
+                return httpx.Response(400, json={"message": "Sheet is not ready"})
+        return serve(request)
+    router.route(url__regex=rf"{API}/projects/proj_a/sheets/[^/]+/data$").mock(
+        side_effect=second_refused)
+
+    error = apply(sheets_tenant, session_dir, planned)["error"]
+    assert "1,000 of 2,500 rows were already written" in error["message"]
+    assert "Nothing was written" not in error["remediation"]["what"]
+    assert "stay written" in error["remediation"]["what"]
+    assert "after the first 1,000" in error["remediation"]["retry_with"][0]["note"]
+
+
 def test_update_rows_shows_each_change_and_writes_it(sheets_tenant, session_dir):
     planned = plan(sheets_tenant, session_dir, "update_rows", sheet_id="sheet-1",
                    where={"status": "failed"}, set={"status": "pending", "reads": "0"})
@@ -514,6 +542,46 @@ def test_delete_sheet_refuses_when_rows_were_added_since(sheets_tenant, session_
 def test_refresh_is_for_materialized_views(sheets_tenant, session_dir):
     planned = plan(sheets_tenant, session_dir, "refresh_sheet", sheet_id="sheet-1")
     assert planned["error"]["code"] == "NOT_SUPPORTED"
+
+
+def _materialized_view(state, status):
+    state["sheets"]["view-1"] = {**state["sheets"]["sheet-1"], "id": "view-1",
+                                 "name": "Failed samples", "tableName": "failed_samples",
+                                 "sheetType": "VIEW", "virtual": False, "status": status}
+    state["rows"]["view-1"] = []
+
+
+def test_a_view_that_is_not_ready_is_refused_before_approval_saying_why(
+        sheets_tenant, session_dir):
+    """Cirro refuses a refresh unless the view is COMPLETED, and its "Sheet is not
+    ready" says nothing about why or what to do. The plan has the status already."""
+    _materialized_view(sheets_tenant["sheets"], "RUNNING")
+    planned = plan(sheets_tenant, session_dir, "refresh_sheet", sheet_id="view-1")
+    assert planned["error"]["code"] == "WRONG_STATUS"
+    assert "a job is running on it" in planned["error"]["message"]
+    assert planned["error"]["remediation"]["retry_with"] == [
+        {"verb": "sheet", "id": "view-1"}]
+
+    sheets_tenant["sheets"]["sheets"]["view-1"]["status"] = "FAILED"
+    failed = plan(sheets_tenant, session_dir, "refresh_sheet", sheet_id="view-1")
+    assert "its last job failed" in failed["error"]["message"]
+    assert "delete_sheet" in failed["error"]["remediation"]["user_action"]
+
+
+def test_a_refresh_refused_as_not_ready_is_the_sheet_s_status_not_a_bad_request(
+        sheets_tenant, session_dir):
+    """Observed on dev as INVALID_QUERY "The view was not refreshed: Sheet is not
+    ready" with "Fix the request and plan again" -- but nothing in the request was
+    wrong; a job had started on the view after the plan checked it."""
+    _materialized_view(sheets_tenant["sheets"], "COMPLETED")
+    planned = plan(sheets_tenant, session_dir, "refresh_sheet", sheet_id="view-1")
+    sheets_tenant["router"].put(
+        url__regex=rf"{API}/projects/proj_a/sheets/[^/]+:refresh$").respond(
+        status_code=400, json={"message": "Sheet is not ready"})
+    applied = apply(sheets_tenant, session_dir, planned)
+    assert applied["error"]["code"] == "WRONG_STATUS"
+    assert "Nothing was written" in applied["error"]["remediation"]["what"]
+    assert applied["error"]["remediation"]["retry_with"][0]["op"] == "refresh_sheet"
 
 
 def test_a_failed_sheet_reads_with_its_last_jobs_error_and_can_be_deleted(sheets_tenant,

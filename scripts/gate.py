@@ -278,8 +278,15 @@ FOLDER_HANDLERS = {"ls", "rm", "rmdir", "cd", "pushd", "du", "stat", "mkdir", "t
 
 # The upstream CLI performs uploads and logins with no plan and no approval.
 UPSTREAM_CLI = re.compile(r"^(?:cirro|cirro-cli)$")
-UPSTREAM_CLI_READ_ONLY = {"list-projects", "list-datasets", "list-files", "--help",
-                          "--version"}
+UPSTREAM_CLI_READ_ONLY = {"list-projects", "list-datasets", "list-files"}
+# Help and version print and exit before anything acts, but only where click reads them
+# as options: first on the line, or straight after the subcommand. Anywhere later a
+# preceding option takes them as its value -- `cirro upload --description --help ...`
+# uploads, with "--help" as the description.
+UPSTREAM_CLI_HELP = {"--help", "--version"}
+# A redirect is not an argument: `cirro --help 2>&1` read `2>&1` as the subcommand.
+# A bare operator takes the next word as its target, which is not an argument either.
+REDIRECT = re.compile(r"^(?:\d*|&)(?:>>?|<)")
 
 AWS_DATA_MOVERS = {"cp", "sync", "mv", "rm", "rb"}
 S5CMD_DATA_MOVERS = {"cp", "sync", "mv", "rm", "pipe"}
@@ -565,6 +572,20 @@ def module_file(arguments: list, cwd: str) -> str | None:
         if (root / candidate).is_file():
             return candidate
     return None
+
+
+def without_redirects(arguments: list) -> list:
+    kept, skip_target = [], False
+    for token in arguments:
+        if skip_target:
+            skip_target = False
+            continue
+        match = REDIRECT.match(token)
+        if match:
+            skip_target = match.group(0) == token
+            continue
+        kept.append(token)
+    return kept
 
 
 def redirected_file(arguments: list) -> str | None:
@@ -895,8 +916,11 @@ def judge_program(words: list, index: int, segment: str, command: str, places: l
             f"{USE_INSTEAD}")
 
     if UPSTREAM_CLI.match(program):
-        first = next((w for w in words[index + 1:] if not w.startswith("-")), "")
-        if first not in UPSTREAM_CLI_READ_ONLY:
+        arguments = without_redirects(words[index + 1:])
+        first = next((w for w in arguments if not w.startswith("-")), "")
+        asks_for_help = (arguments[:1] and arguments[0] in UPSTREAM_CLI_HELP) or (
+            arguments[1:2] == ["--help"] and arguments[0] == first)
+        if first not in UPSTREAM_CLI_READ_ONLY and not asks_for_help:
             block(
                 "Blocked by the Cirro plugin: the upstream `cirro` CLI performs "
                 f"uploads, logins and downloads ({first or 'interactive mode'}) with "

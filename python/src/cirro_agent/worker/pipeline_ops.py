@@ -33,6 +33,13 @@ CONFIG_SOURCES = (STORAGE, WITH_PROCESS, EXTERNAL)
 # Assumed when neither the caller nor the existing record names one. Every other
 # RepositoryType describes a repository Cirro needs extra credentials to reach.
 DEFAULT_REPOSITORY_TYPE = "GITHUB_PUBLIC"
+GITHUB_PRIVATE = "GITHUB_PRIVATE"
+
+# The portal's process detail offers "connect to GitHub" while a pipeline is
+# unauthorized; the API cannot do it, because GitHub's consent is a browser step.
+_AUTHORIZE_GITHUB = ("In the Cirro web UI, open this pipeline's details and follow "
+                     "\"connect to GitHub\" to authorize Cirro's GitHub connection for "
+                     "its repository, then plan the sync again.")
 
 # Verified live: the API rejects other characters in a process name with HTTP 400.
 NAME_CHARSET = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .&\-@!#'()/]*$")
@@ -643,13 +650,7 @@ def apply_create_process(reader: reads.Reader, args: dict) -> dict:
     # believes it registered something, and only finds out when every later read 404s.
     created = R.plain(getattr(response, "id", None))
     if not created:
-        raise errors.UpstreamError(
-            f"Cirro did not create process {args['process_id']!r}: the API accepted the "
-            f"request but returned no process id.",
-            what="A create that returns no id did not register anything.",
-            user_action=("Check the process in the Cirro UI before retrying. If this "
-                         "persists, the request was rejected without an error body."),
-        )
+        raise _create_refused(args["process_id"], response)
     follow = ({"tool": "plan", "op": "upload_process_config",
                "args": {"process_id": created, "design_spec": args["design_spec"]}}
               if args["config_source"] == STORAGE else
@@ -657,6 +658,38 @@ def apply_create_process(reader: reads.Reader, args: dict) -> dict:
                "args": {"process_id": created}})
     return {"created_process_id": created, "config_source": args["config_source"],
             "next": follow}
+
+
+def _create_refused(process_id: str, response) -> errors.AgentError:
+    """Why Cirro did not create the process, read from the body it refused with.
+
+    A 400 arrives as a PortalErrorResponse carrying Cirro's reason, a 401 as an
+    ErrorMessage. Reading only the missing id reported "the API accepted the request"
+    for a request it had refused, and dropped the reason -- such as a required
+    configuration file not yet on the branch, which is fixed by pushing it, not by
+    retrying. Cirro checks a registration before it stores one, so a refused create
+    registered nothing and planning it again cannot collide with it.
+    """
+    from cirro_api_client.v1.models import ErrorMessage
+    if isinstance(response, ErrorMessage):
+        return errors.AuthExpired(
+            f"Cirro did not create process {process_id!r}: it refused this session's "
+            f"credential (HTTP 401: {response.message}).",
+            what="Nothing was registered.",
+            user_action="Sign in again with the cirro-session skill or the login_start "
+                        "MCP tool, then plan the registration again.")
+    reasons = [R.plain(getattr(response, "error_detail", None))] + [
+        R.plain(getattr(item, "message", None))
+        for item in getattr(response, "errors", None) or []]
+    said = "; ".join(dict.fromkeys(r for r in reasons if r)) or "it gave no reason"
+    status = R.plain(getattr(response, "status_code", None))
+    return errors.InvalidQuery(
+        f"Cirro refused to create process {process_id!r} (HTTP {status}): {said}",
+        what=("Nothing was registered, so planning again cannot collide with this "
+              "attempt. Fix what Cirro named first: a configuration file it reports "
+              "missing has to be on the branch before the process can be registered."),
+        field="process_id", given=process_id, http_status=status,
+        retry_with=[{"tool": "plan", "op": "create_process"}])
 
 
 # ------------------------------------------------------- upload / sync config
@@ -936,6 +969,20 @@ def plan_sync_process_config(reader: reads.Reader, args: dict) -> Draft:
                                   "config_repository": "Org/repo"}}],
         )
 
+    code = detail.get("pipeline_code") or {}
+    if code.get("repository_type") == GITHUB_PRIVATE and not settings.get("is_authorized"):
+        # Cirro-backend's own rule (ProcessRecord.hasCodeAuthorization): a sync of a
+        # custom process whose code is in a private repository is refused with a 403
+        # until the GitHub connection is authorized. Both fields are on the record
+        # already read, so the refusal comes before the approval rather than after it.
+        raise errors.Forbidden(
+            f"Cirro will not sync {args['process_id']}: its code is in the private "
+            f"repository {code.get('repository_path')}, and the GitHub connection for "
+            "this pipeline has not been authorized.",
+            what="Cirro reads a private repository only after someone authorizes its "
+                 "GitHub connection, and only in the web UI.",
+            user_action=_AUTHORIZE_GITHUB)
+
     lines = [
         f"Sync configuration for {detail['name']} ({args['process_id']}) from git.",
         "",
@@ -959,8 +1006,20 @@ def plan_sync_process_config(reader: reads.Reader, args: dict) -> Draft:
 
 
 def apply_sync_process_config(reader: reads.Reader, args: dict) -> dict:
-    settings = reader.client.processes.sync_custom_process(
-        process_id=args["process_id"])
+    from cirro_api_client.v1.errors import ForbiddenException
+    try:
+        settings = reader.client.processes.sync_custom_process(
+            process_id=args["process_id"])
+    except ForbiddenException as exc:
+        # A refusal, not an outage: reported as UPSTREAM_ERROR with "retry once", this
+        # one was retried five times. The plan refuses the case it can see; this is
+        # the one it cannot, such as an authorization withdrawn after planning.
+        raise errors.Forbidden(
+            f"Cirro refused to sync {args['process_id']}: {exc}",
+            what="The sync was refused, so nothing was read from the repository.",
+            user_action=(f"{_AUTHORIZE_GITHUB} If Cirro's message is about your "
+                         "permissions rather than GitHub, a tenant admin has to make "
+                         "the change.")) from exc
     status = R.plain(getattr(settings, "sync_status", None))
     result = {
         "process_id": args["process_id"],

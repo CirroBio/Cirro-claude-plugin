@@ -7,8 +7,8 @@ why the registration lives on this side.
 
 from .. import errors
 from . import mutations, reads, rows as R
-from .mutations import (Draft, Op, RISK_WRITE, RISK_DESTRUCTIVE, _inv, _need, _project,
-                        PROJECT_ARGS)
+from .mutations import (Draft, Op, RISK_WRITE, RISK_DESTRUCTIVE, _enum_choice, _inv, _need,
+                        _project, PROJECT_ARGS)
 
 
 def _share(reader: reads.Reader, project_id: str, share_id: str) -> dict:
@@ -19,19 +19,34 @@ def _share(reader: reads.Reader, project_id: str, share_id: str) -> dict:
 
 def plan_create_share(reader: reads.Reader, args: dict) -> Draft:
     _need(args, "create_share", "name")
+    from cirro_api_client.v1.models import DatasetConditionField
+    conditions = []
+    for condition in args.get("conditions") or []:
+        if not isinstance(condition, dict) or not str(condition.get("value") or "").strip():
+            raise errors.InvalidQuery(
+                "Each share condition is a field and the value it must match.",
+                what="Write each condition as {field, value}.", field="conditions",
+                given=args.get("conditions"),
+                retry_with=[{"conditions": [{"field": "TAG", "value": "..."}]}],
+            )
+        conditions.append({
+            "field": _enum_choice(DatasetConditionField, condition.get("field"),
+                                  field="field", what="A share selects datasets by field."),
+            "value": str(condition["value"])})
     project = _project(reader, args)
     targets = args.get("shared_project_ids") or []
+    selects = "; ".join(f"{c['field']} = {c['value']}" for c in conditions)
     lines = [
         f"Create a data share published from {project['name']} ({project['id']}).",
         "", f"  Share name       {args['name']}",
         f"  Description      {args.get('description', '')!r}",
         f"  Shared with      {len(targets)} project(s): {targets}",
         f"  View restricted  {bool(args.get('is_view_restricted'))}",
+        f"  Datasets where   {selects or '(no conditions)'}",
         "",
         "A share exposes matching datasets to other projects. Anyone with access to "
         "those projects can read what it selects.",
     ]
-    conditions = args.get("conditions") or []
     warnings = ["This makes data readable outside its originating project."]
     if not conditions:
         warnings.append(
@@ -50,11 +65,13 @@ def plan_create_share(reader: reads.Reader, args: dict) -> Draft:
 
 
 def apply_create_share(reader: reads.Reader, args: dict) -> dict:
-    from cirro_api_client.v1.models import ShareInput, DatasetCondition
+    from cirro_api_client.v1.models import (DatasetCondition, DatasetConditionField,
+                                            ShareInput)
     request = ShareInput(
         name=args["name"], description=args.get("description") or "",
         classification_ids=args.get("classification_ids") or [],
-        conditions=[DatasetCondition(field=c["field"], value=c["value"])
+        conditions=[DatasetCondition(field=DatasetConditionField(c["field"]),
+                                     value=c["value"])
                     for c in (args.get("conditions") or [])],
     )
     for attribute in ("shared_project_ids", "keywords", "is_view_restricted"):

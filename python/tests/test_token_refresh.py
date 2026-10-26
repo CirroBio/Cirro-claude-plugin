@@ -167,6 +167,24 @@ def test_an_unnamed_keychain_status_still_reports_its_number():
     assert wrapped.detail["exit_status"] == -26276
 
 
+def test_an_unnamed_keychain_status_is_not_diagnosed_as_a_locked_keychain():
+    """-67701 reached a person as "unlock your login keychain" from a keychain that
+    was not locked; an unknown status says what is worth checking, not what broke."""
+    wrapped = portal.wrap_upstream(FakeKeychainError(exit_status=-67701), what="w")
+    assert wrapped.user_action.startswith("Run this again")
+    assert "locked" not in wrapped.message
+
+
+def test_two_workers_saving_one_sign_in_is_a_race_to_rerun_not_a_locked_keychain():
+    """-25299, a duplicate item, came back from a plan while another worker on the
+    same session folder was saving the token; the plan succeeded when run again."""
+    wrapped = portal.wrap_upstream(FakeKeychainError(exit_status=-25299), what="w")
+    assert wrapped.code == "CREDENTIAL_STORE_UNAVAILABLE"
+    assert "same moment" in wrapped.message
+    assert wrapped.user_action.startswith("Run this again")
+    assert "Unlock" not in wrapped.user_action
+
+
 def test_an_exception_with_no_message_does_not_render_a_dangling_colon():
     """The general form of the bug, for whatever raises it next: an exception built
     with no arguments has an empty `str()`, and name-colon-nothing reads as a message

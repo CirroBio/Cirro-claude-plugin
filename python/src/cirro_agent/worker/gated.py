@@ -322,10 +322,18 @@ def _execute(reader: reads.Reader, op, record) -> dict:
         result = op.apply(reader, resolved)
     except errors.AgentError as exc:
         plans.finish(session, record, error=f"{exc.code}: {exc.message}")
+        # A failed apply can still have changed something -- an upload registers its
+        # dataset before the transfer that fails -- and the way forward is a fresh
+        # plan, which must not answer from a snapshot taken before it.
+        reader.cache.invalidate_entries(record.invalidates)
         raise
     except Exception as exc:
-        wrapped = portal.wrap_upstream(exc, what=f"{record.op} failed during execution.")
+        # The plan is spent, so applying it again is refused.
+        wrapped = portal.failed_write(
+            exc, what=f"{record.op} failed during execution.",
+            replan=[{"tool": "plan", "op": record.op, "renew_from": record.plan_id}])
         plans.finish(session, record, error=f"{wrapped.code}: {wrapped.message}")
+        reader.cache.invalidate_entries(record.invalidates)
         raise wrapped
 
     plans.finish(session, record, result=result)

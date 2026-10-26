@@ -627,7 +627,7 @@ def _plan_restart(reader: reads.Reader, args: dict) -> Draft:
 
 
 def _failure(index: int, step: dict, exc: Exception) -> dict:
-    typed = exc if isinstance(exc, errors.AgentError) else portal.wrap_upstream(
+    typed = exc if isinstance(exc, errors.AgentError) else portal.failed_write(
         exc, what=f"{step['op']} failed inside a chain.")
     return {"step": index + 1, "label": step.get("label") or step["op"],
             "op": step["op"], "code": typed.code, "error": typed.message,
@@ -687,16 +687,27 @@ def apply_chain(reader: reads.Reader, args: dict) -> dict:
     response["note"] = (
         f"Step {failure['step']} ({failure['label']}) failed, so {remaining} did not "
         f"run. The {len(done)} step(s) before it did, and are listed in `completed`.")
+    if done and isinstance(exc, errors.OutcomeUnknown):
+        # Restarting from this step would make it again, so the check that settles
+        # whether it took effect travels with the failure rather than being dropped.
+        failure.update(retry_with=exc.retry_with, user_action=exc.user_action)
+        response["note"] += (f" Step {failure['step']} may have taken effect: "
+                             f"{exc.user_action}")
     if done:
         return response
-    # Nothing changed, so the caller gets the step's own typed refusal -- a NotFound
+    # No step completed, so the caller gets the step's own typed refusal -- a NotFound
     # or InvalidQuery is something to fix, not something to retry. That nothing ran is
     # stated alongside the step's own advice rather than instead of it: a wrapped
     # upstream fault always carries a user_action, so as an `or` fallback this said
     # nothing in exactly the case where the steps are launches and the reader has to
     # decide whether planning again would run them twice.
-    nothing_ran = "No step ran, so nothing was changed."
-    action = f"{nothing_ran} {exc.user_action}" if exc.user_action else nothing_ran
+    if isinstance(exc, errors.OutcomeUnknown):
+        # The step was sent and may have taken effect, so "nothing was changed" is the
+        # one thing that cannot be said.
+        ran = "No step before it ran, but this step may have taken effect."
+    else:
+        ran = "No step ran, so nothing was changed."
+    action = f"{ran} {exc.user_action}" if exc.user_action else ran
     raise type(exc)(exc.message, what=exc.what, field=exc.field, given=exc.given,
                     candidates=exc.candidates, retry_with=exc.retry_with,
                     user_action=action,

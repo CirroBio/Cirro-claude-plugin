@@ -16,10 +16,12 @@ downloads an interpreter and compiled dependencies; afterwards it is a no-op.
 It requires `uv` on PATH. If `uv` is missing, the script says how to install it and
 stops — do not install it on the user's behalf.
 
-When it finishes, report the `cirro` version it installed. Then tell the user that the
-next step is a session folder for whichever directory they want to work in, which the
-**cirro-session** skill handles and which needs their Cirro hostname (something like
-`app.cirro.bio`).
+When it finishes, report the `cirro` version it installed. Then tell the user the two
+next steps: reconnect the plugin's server (run `/mcp`, choose **cirro**, reconnect, or
+restart Claude Code), because a server that started before the runtime existed keeps
+reporting it missing; then ask Claude to connect to Cirro. Connecting signs in once for
+the tenant, which the **cirro-session** skill handles and which needs their Cirro
+hostname (something like `app.cirro.bio`).
 
 If it fails, relay the error and its stated remedy verbatim rather than trying
 alternative install routes.

@@ -532,6 +532,55 @@ def test_a_chain_that_ran_nothing_says_so_even_when_the_step_had_its_own_advice(
     assert caught.value.detail["n_completed"] == 0
 
 
+def test_a_first_step_that_may_have_taken_effect_is_not_called_nothing(monkeypatch):
+    """A launch sent and answered with a body nobody could read may have started a run,
+    and "nothing was changed" is what makes planning it again look safe."""
+    _fake_ops(monkeypatch, [], fail_at="consumer",
+              fail_with=errors.OutcomeUnknown(
+                  "sent; no readable reply", what="w",
+                  retry_with=[{"verb": "query", "entity": "dataset"}],
+                  user_action="check before launching again"))
+    with pytest.raises(errors.AgentError) as caught:
+        chain_ops.apply_chain(MagicMock(), {"steps": [
+            {"op": "consumer", "args": {"uses": "made-a"}},
+            {"op": "consumer", "args": {"uses": "made-b"}},
+        ]})
+    assert caught.value.code == "OUTCOME_UNKNOWN"
+    assert "nothing was changed" not in caught.value.user_action
+    assert "may have taken effect" in caught.value.user_action
+    assert "check before launching again" in caught.value.user_action
+
+
+def test_a_later_step_that_may_have_taken_effect_keeps_the_check_to_make(monkeypatch):
+    """With a step completed before it, the chain returns rather than raises, and the
+    unknown step's own advice -- check before making it again -- used to be dropped
+    while the restart path invited making it again."""
+    _fake_ops(monkeypatch, [], fail_at="consumer",
+              fail_with=errors.OutcomeUnknown(
+                  "sent; no readable reply", what="w",
+                  retry_with=[{"verb": "query", "entity": "dataset"}],
+                  user_action="check before launching again"))
+    result = chain_ops.apply_chain(MagicMock(), {"steps": [
+        {"op": "producer", "args": {"tag": "d"}},
+        {"op": "consumer", "args": {"uses": {"from_step": 0, "field": "made_id"}}},
+    ]})
+    failed = result["failed_at"]
+    assert failed["code"] == "OUTCOME_UNKNOWN"
+    assert failed["user_action"] == "check before launching again"
+    assert failed["retry_with"] == [{"verb": "query", "entity": "dataset"}]
+    assert "may have taken effect" in result["note"]
+
+
+def test_an_untyped_failure_mid_chain_is_not_called_safe_to_repeat(monkeypatch):
+    """No refusal from Cirro came back, so the step may have done its work."""
+    _fake_ops(monkeypatch, [], fail_at="consumer")
+    result = chain_ops.apply_chain(MagicMock(), {"steps": [
+        {"op": "producer", "args": {"tag": "d"}},
+        {"op": "consumer", "args": {"uses": {"from_step": 0, "field": "made_id"}}},
+    ]})
+    assert result["failed_at"]["code"] == "OUTCOME_UNKNOWN"
+
+
 def test_a_typed_refusal_mid_chain_keeps_its_code(monkeypatch):
     log = []
     _fake_ops(monkeypatch, log,

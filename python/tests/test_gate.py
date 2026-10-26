@@ -97,6 +97,14 @@ BYPASS_ATTEMPTS = [
     "sh -ec 'python3 -m cirro_agent.worker < request.json'",
     "for i in 1; do python3 -m cirro_agent.worker < request.json; done",
     "(python3 -m cirro_agent.worker < request.json)",
+    # A redirect beside the upstream CLI hides neither the subcommand nor its absence.
+    "cirro upload -p X 2>&1",
+    "cirro 2>&1",
+    "cirro > out.txt",
+    # Help that a preceding option swallows as its value is not help: click uploads.
+    "cirro upload --name n --description --help --project P --data-directory d",
+    "cirro download --project P --dataset D --data-directory --version",
+    "cirro upload --name -h --project P --data-directory d",
 ]
 
 ORDINARY_WORK = [
@@ -110,6 +118,12 @@ ORDINARY_WORK = [
     "cirro-agent read --help",
     "cirro list-projects",
     "cirro list-datasets -p X",
+    # Help prints and exits, and a redirect is not the subcommand.
+    "cirro --help",
+    "cirro --version",
+    "cirro --help 2>&1 | head -20",
+    "cirro upload --help",
+    "cirro list-projects 2> /dev/null",
     "echo hello | wc -l",
     "make build && ./bin/run",
     # The SDK named in a message, beside an interpreter whose code the gate can see:

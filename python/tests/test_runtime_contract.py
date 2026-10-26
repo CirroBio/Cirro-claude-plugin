@@ -223,3 +223,22 @@ def test_the_token_store_still_raises_what_the_credential_mapping_reads():
     assert not parent.args and not parent.keywords, (
         "KeychainError now passes a message up to OSError, so it stringifies to "
         "something -- carry the SDK's own text instead of the exit_status table")
+
+
+def test_the_launch_route_a_failed_launch_is_judged_by_still_exists():
+    """`analysis_ops._launch_failure` decides whether a failed launch may have started a
+    run by asking whether the exception passed through the generated launch route, and
+    reads the reply back from frames holding it as `response`. If either name moved,
+    every failure would read as "nothing was sent, planning again is safe" -- the one
+    answer that can start a second run."""
+    import importlib
+    import inspect
+    from cirro.services import execution
+    from cirro_agent.worker.analysis_ops import LAUNCH_ROUTE
+
+    route = importlib.import_module(LAUNCH_ROUTE)
+    assert "response" in inspect.signature(route._parse_response).parameters
+    assert getattr(execution, "run_analysis", None) is route, (
+        f"cirro's ExecutionService no longer launches through {LAUNCH_ROUTE}; "
+        "analysis_ops._launch_failure would misjudge every failure")
+    assert "run_analysis.sync(" in inspect.getsource(execution.ExecutionService.run_analysis)

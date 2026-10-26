@@ -205,9 +205,14 @@ def identity(auth) -> Optional[str]:
 # What the OS credential store said, for the codes that need different actions from
 # the human. msal_extensions names the first four; -25308 is the one a long operation
 # actually provokes, because a login keychain that re-locks mid-run refuses with it.
+# -25299 is a duplicate item: msal_extensions writes by find-then-add, and the SDK
+# writes the token on every construction, so two workers on one session folder can
+# both miss the item and both add it. Seen live; the second simply loses the race.
 KEYCHAIN_CODES = {
     -128: ("the keychain prompt was dismissed", "allow"),
     -25294: ("no such keychain", "repair"),
+    -25299: ("another Cirro operation saved the same sign-in at the same moment",
+             "retry"),
     -25300: ("the stored credential is gone", "login"),
     -25307: ("no default keychain", "repair"),
     -25308: ("the login keychain is locked", "unlock"),
@@ -215,6 +220,9 @@ KEYCHAIN_CODES = {
 KEYCHAIN_ACTIONS = {
     "unlock": ("Unlock your login keychain (Keychain Access, or log out and back in), "
                "then run this again."),
+    "retry": "Run this again; the sign-in is intact.",
+    "unknown": ("Run this again. If it repeats, check in Keychain Access that the login "
+                "keychain is unlocked and is the default keychain."),
     "repair": ("Your login keychain is missing or is not the default. Repair it in "
                "Keychain Access, then run this again."),
     "allow": ("Run this again and choose Allow when macOS asks for keychain "
@@ -238,7 +246,7 @@ def _credential_store_failure(exc: Exception):
     if not type(exc).__module__.startswith("msal_extensions"):
         return None
     status = getattr(exc, "exit_status", None)
-    said, action = KEYCHAIN_CODES.get(status, (None, "unlock"))
+    said, action = KEYCHAIN_CODES.get(status, (None, "unknown"))
     detail = f"{said} ({status})" if said else f"status {status}"
     return errors.CredentialStoreUnavailable(
         f"The OS credential store refused: {detail}.",
@@ -249,9 +257,97 @@ def _credential_store_failure(exc: Exception):
     )
 
 
+THROTTLED = 429
+# How long a throttled caller is told to wait. A minute outlasts a burst and costs little.
+THROTTLE_WAIT_S = 60
+
+
+def _frames(exc: BaseException):
+    tb = exc.__traceback__
+    while tb is not None:
+        yield tb.tb_frame
+        tb = tb.tb_next
+
+
+def raised_in(exc: BaseException, module: str) -> bool:
+    """Whether `exc` passed through code in `module`, or a module inside it, on its way
+    out."""
+    names = (frame.f_globals.get("__name__", "") for frame in _frames(exc))
+    return any(name == module or name.startswith(module + ".") for name in names)
+
+
+def http_response(exc: BaseException):
+    """The HTTP reply the generated client was reading when `exc` was raised, or None.
+
+    The generated routes read every reply in functions that take it as `response`
+    (`sync_detailed`, `_parse_response`, `errors.handle_error_response`), and what they
+    raise keeps none of it: a reply whose body is empty or is not JSON surfaces as a
+    bare `JSONDecodeError`, with no status and no route. The traceback still holds
+    those frames, so the reply is read back from the innermost one. None means the
+    call failed before a reply arrived, or outside the generated client.
+    """
+    import httpx
+    found = None
+    for frame in _frames(exc):
+        candidate = frame.f_locals.get("response")
+        if isinstance(candidate, httpx.Response):
+            found = candidate
+    return found
+
+
+def describe_body(reply) -> str:
+    """What a reply's body was, for a message about a body that could not be read."""
+    import json
+    import httpx
+    try:
+        reply.content
+    except httpx.StreamError:
+        # The headers arrived and the connection dropped before the body did; the
+        # reply was never read, and asking for its content raises ResponseNotRead.
+        return "a body that did not arrive in full"
+    if not reply.content.strip():
+        return "an empty body"
+    snippet = reply.content[:120].decode(errors="replace")
+    try:
+        json.loads(reply.content)
+    except ValueError:
+        return f"a body that is not JSON ({snippet!r})"
+    return f"a JSON body of an unexpected shape ({snippet!r})"
+
+
+def _route(reply) -> str:
+    return f"{reply.request.method} {reply.request.url.path}"
+
+
+def failed_write(exc: Exception, *, what: str, replan=None):
+    """What an exception raised while applying a change means for doing it again.
+
+    Only a refusal (a 4xx) says the request did nothing, so only then is `replan`
+    offered. A re-plan cannot see a write that went through -- inserted rows, a
+    launched run -- and comes back "unchanged" with the same text, inviting the same
+    change twice; anything else that would read as a generic upstream fault therefore
+    says the outcome is not known.
+    """
+    reply = http_response(exc)
+    refused = reply is not None and reply.is_client_error
+    wrapped = wrap_upstream(exc, what=what, retry_with=replan if refused else None)
+    if refused or wrapped.code != "UPSTREAM_ERROR":
+        return wrapped
+    return errors.OutcomeUnknown(
+        wrapped.message,
+        what=(f"{what} Some or all of it may have taken effect, so planning it again "
+              "could make the same change twice."),
+        user_action=("Check what the change was meant to do before planning it again, "
+                     "and plan only what is still missing."),
+        **({"http_status": reply.status_code} if reply is not None else {}),
+    )
+
+
 def wrap_upstream(exc: Exception, *, what: str, retry_with=None):
     """Map an SDK exception onto the taxonomy, including auth frames."""
+    import json
     from cirro.sdk.exceptions import DataPortalAssetNotFound, DataPortalInputError
+    from cirro_api_client.v1.errors import UnexpectedStatus
 
     local = _credential_store_failure(exc)
     if local is not None:
@@ -263,15 +359,33 @@ def wrap_upstream(exc: Exception, *, what: str, retry_with=None):
     if isinstance(exc, DataPortalInputError):
         return errors.AmbiguousName(str(exc), what=what,
                                     retry_with=retry_with or [{"note": "use an ID"}])
+    reply = http_response(exc)
+    if isinstance(exc, UnexpectedStatus) and exc.status_code == THROTTLED:
+        # A throttle, not an outage: the request was turned away before Cirro acted on
+        # it, so the advice is to wait, never to go and check the service's status.
+        target = _route(reply) if reply is not None else "the request"
+        return errors.RateLimited(
+            f"Cirro's API refused {target} with HTTP 429 Too Many Requests: requests "
+            "are arriving faster than it accepts.",
+            what=what,
+            retry_with=[{**step, "wait_s": THROTTLE_WAIT_S}
+                        for step in retry_with or [{"note": "the same call again"}]],
+            user_action=("If this keeps happening, run fewer Cirro operations at once "
+                         "or space them out."),
+        )
+    if isinstance(exc, json.JSONDecodeError) and reply is not None:
+        succeeded = (" The request itself succeeded." if reply.is_success else "")
+        return errors.UpstreamError(
+            f"Cirro answered {_route(reply)} with HTTP {reply.status_code} and "
+            f"{describe_body(reply)}, where JSON was expected.{succeeded}",
+            what=what, retry_with=retry_with or [{"note": "retry once"}],
+            user_action="If this persists, check the Cirro web UI for service status.",
+            http_status=reply.status_code,
+        )
     if isinstance(exc, RuntimeError):
-        frames = []
-        tb = exc.__traceback__
-        while tb:
-            frames.append(tb.tb_frame.f_globals.get("__name__", ""))
-            tb = tb.tb_next
         # Matching the SDK's error strings is brittle, so any RuntimeError raised
         # from inside cirro.auth counts as needing a fresh login.
-        if any(name.startswith("cirro.auth") for name in frames):
+        if raised_in(exc, "cirro.auth"):
             return errors.AuthExpired(
                 str(exc), what="Re-authentication is required.", user_action=_LOGIN_HINT)
     # `str(exc)` is empty for an exception built with no arguments, and the name plus

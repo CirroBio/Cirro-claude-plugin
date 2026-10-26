@@ -7,9 +7,10 @@
     PYTHONPATH=python/src "$DEV_VENV/bin/python" -m pytest python/tests/test_live_writes.py
 
 On 2026-09-06 `upload_dataset` and `update_dataset` were run against a development
-tenant for the first time, on a dataset created for the purpose; every other operation
-has still only ever met a double. Four bugs of the kind that only a real call finds
-were fixed on 2026-08-27 from doubles alone. This is the smallest real check: add a tag
+tenant for the first time, on a dataset created for the purpose; most operations have
+since run against real tenants through the plugin itself. Four bugs of the kind that
+only a real call finds were fixed on 2026-08-27 from doubles alone. This is the
+smallest real check that can be run on demand: add a tag
 to a project you name and take it off again; add a tag to a dataset you name and take
 it off again, proving folder membership survives; retype that dataset and put it back,
 proving the fields the request does not mention survive a whole-record write. Each

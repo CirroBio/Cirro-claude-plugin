@@ -21,6 +21,14 @@ APPLY_CASES = {
                    "folders": ["Immuno"], "tags": ["qc-pass"]}]},
     "delete_dataset": {"project_id": "proj_a", "dataset_id": "ds_1",
                        "dataset_name": "n"},
+    # The transfer itself is the recording double's `upload_files`, so nothing here
+    # touches the disk; the request that registers the dataset is real.
+    "upload_dataset": {
+        "project_id": "proj_a", "process_id": "proc_ingest", "name": "Run 12",
+        "description": "", "source_dir": "/data/run12",
+        "files": ["s1_R1.fastq.gz", "s1_R2.fastq.gz"],
+        "folders": ["Sequencing/2026"], "tags": ["qc-pass"],
+        "n_files": 2, "total_bytes": 12},
     "update_samplesheet": {"project_id": "proj_a", "dataset_id": "ds_1",
                            "contents": "sample,fastq_1\n"},
     "run_analysis": {
@@ -44,7 +52,7 @@ APPLY_CASES = {
     "stop_analysis": {"project_id": "proj_a", "dataset_id": "ds_1"},
     "import_public": {"project_id": "proj_a", "name": "n",
                       "public_ids": ["SRR1"], "description": "",
-                      "download_method": None},
+                      "download_method": "sratools"},
     "create_project": {
         "name": "P", "description": "d", "billing_account_id": "bill_1",
         "budget_amount": 1000, "budget_period": "MONTHLY",
@@ -61,7 +69,7 @@ APPLY_CASES = {
     "create_share": {
         "project_id": "proj_a", "name": "S", "description": "d",
         "shared_project_ids": ["proj_b"], "keywords": [], "classification_ids": [],
-        "conditions": [{"field": "process_id", "value": "proc_1"}],
+        "conditions": [{"field": "PROCESS_ID", "value": "proc_1"}],
         "is_view_restricted": False},
     "delete_share": {"project_id": "proj_a", "share_id": "shr_1", "share_name": "S"},
     "subscribe_share": {"project_id": "proj_a", "share_id": "shr_1", "subscribe": True},
@@ -120,14 +128,21 @@ def _reader() -> MagicMock:
 
 @pytest.mark.parametrize("op", sorted(APPLY_CASES))
 def test_apply_builds_a_valid_request(op):
-    """A required-field omission raises TypeError inside the model constructor."""
-    handler = mutations.OPS[op].apply
-    handler(_reader(), dict(APPLY_CASES[op]))
+    """A required-field omission raises TypeError inside the model constructor; a field
+    of the wrong type -- a plain string where an enum belongs -- raises only when the
+    model is serialized for the wire, which is how import_public's download_method
+    reached a live tenant as `'str' object has no attribute 'value'`."""
+    reader = _reader()
+    mutations.OPS[op].apply(reader, dict(APPLY_CASES[op]))
+    for _, args, kwargs in reader.mock_calls:
+        for value in (*args, *kwargs.values()):
+            if hasattr(value, "to_dict"):
+                value.to_dict()
 
 
 def test_every_registered_op_is_covered_here():
     """So a new op cannot be added without exercising its request construction."""
-    covered = set(APPLY_CASES) | {"upload_dataset", "upload_reference", "download_files",
+    covered = set(APPLY_CASES) | {"upload_reference", "download_files",
                                   "unarchive_project", "update_project_schema",
                                   # Local writes: they touch the filesystem and git, not
                                   # the SDK, so there is no request object to build.
@@ -165,6 +180,31 @@ def test_update_dataset_sends_every_required_field():
     values = [t.value for t in request.tags]
     assert "folder://Immuno" in values, "folder membership must survive a tag write"
     assert "qc-pass" in values
+
+
+def test_upload_dataset_sends_every_tag_as_a_string_value():
+    """Cirro decodes each tag's `value` as a string. A {"key", "value"} object handed
+    through became {"value": {...}} on the wire and the upload was refused at apply,
+    after approval -- so the body is asserted, not the attribute."""
+    reader = _reader()
+    dataset_ops.apply_upload_dataset(reader, dict(APPLY_CASES["upload_dataset"]))
+    request = reader.client.datasets.create.call_args.kwargs["upload_request"]
+    body = request.to_dict()
+    assert [tag["value"] for tag in body["tags"]] == ["folder://Sequencing/2026",
+                                                      "qc-pass"]
+    assert body["name"] == "Run 12"
+    assert body["expectedFiles"] == ["s1_R1.fastq.gz", "s1_R2.fastq.gz"]
+
+
+@pytest.mark.parametrize("method", ["sratools", "aspera", "ftp"])
+def test_import_public_sends_the_download_method_as_its_enum(method):
+    """`ImportDataRequest.to_dict` calls `.value` on the method, so the string the
+    planner stores failed at apply with "'str' object has no attribute 'value'"."""
+    reader = _reader()
+    dataset_ops.apply_import_public(
+        reader, dict(APPLY_CASES["import_public"], download_method=method))
+    request = reader.client.datasets.import_public.call_args.kwargs["import_request"]
+    assert request.to_dict()["downloadMethod"] == method
 
 
 def test_run_analysis_sends_the_notification_address():
@@ -216,7 +256,7 @@ def test_create_share_sends_conditions():
     reader = _reader()
     share_ops.apply_create_share(reader, dict(APPLY_CASES["create_share"]))
     request = reader.client.shares.create.call_args.kwargs["share"]
-    assert request.conditions[0].field == "process_id"
+    assert request.to_dict()["conditions"] == [{"field": "PROCESS_ID", "value": "proc_1"}]
     assert request.classification_ids == []
 
 
@@ -322,3 +362,27 @@ def test_an_update_can_change_the_declared_execution_modes():
         changes={"execution_modes": ["STANDARD"]}))
     request = reader.client.processes.update_custom_process.call_args.kwargs["process"]
     assert request.to_dict()["executionModes"] == ["STANDARD"]
+
+
+def test_an_enum_field_is_named_case_aside_and_refused_before_the_approval():
+    """create_project's budget period and create_share's condition fields went to the
+    request model as plain strings, which serialize only as enum members: both would
+    have failed after the approval, the way import_public's download method did live.
+    An unknown name cannot be left to the enum either, which maps it to UNKNOWN."""
+    from cirro_agent import errors
+    from cirro_api_client.v1.models import BudgetPeriod
+    assert mutations._enum_choice(BudgetPeriod, "monthly", field="budget_period",
+                                  what="") == "MONTHLY"
+    for wrong in ("UNKNOWN", "fortnightly"):
+        with pytest.raises(errors.InvalidQuery) as refused:
+            mutations._enum_choice(BudgetPeriod, wrong, field="budget_period", what="")
+        assert {"budget_period": "MONTHLY"} in refused.value.retry_with
+
+
+def test_a_share_condition_on_an_unknown_field_is_refused_before_the_approval():
+    from cirro_agent import errors
+    with pytest.raises(errors.InvalidQuery) as refused:
+        share_ops.plan_create_share(_reader(), {
+            "name": "s", "project_id": "proj_a",
+            "conditions": [{"field": "owner", "value": "me"}]})
+    assert refused.value.field == "field"
