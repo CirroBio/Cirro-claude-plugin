@@ -30,13 +30,11 @@ from cirro import CirroApi, DataPortal
 from cirro.auth.client_creds import ClientCredentialsAuth
 from cirro.config import AppConfig
 
-config = AppConfig(base_url="app.cirro.bio")
-auth = ClientCredentialsAuth(
-    os.environ["CIRRO_CLIENT_ID"],
-    os.environ["CIRRO_CLIENT_SECRET"],
-    auth_endpoint=config.auth_endpoint,
+portal = DataPortal.from_client_credentials(
+  client_id=os.environ['CIRRO_CLIENT_ID'],
+  client_secret=os.environ['CIRRO_CLIENT_SECRET'],
+  base_url="app.cirro.bio"
 )
-portal = DataPortal(client=CirroApi(auth_info=auth))
 ```
 
 **Interactive, with control over when it blocks.** Renders the link yourself:
