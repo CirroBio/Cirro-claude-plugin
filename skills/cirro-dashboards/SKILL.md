@@ -61,8 +61,10 @@ plan(op="create_dashboard", args={
   refer to the node; otherwise one is derived.
 - **add_source** takes `dataset` (an ID -- names are refused) + `path`, or `sheet` (an
   ID). A source is a table, not a tile.
-- **add_query** reads its `inputs` as `query` (the first), `in1`..`inN`, or a source by
-  its table name. `{name}` is a token a control fills. Omit `sql` for `SELECT *`.
+- **add_query** reads each of its `inputs` by its table name -- with more than one
+  input, use those names. By position, in `inputs` order, `query` and `in1` are both the
+  first input and `in2` the second; there is no `in0`. `{name}` is a token a control
+  fills. Omit `sql` for `SELECT *`.
 - **add_view** `type` is `table` (default) or a chart from `dashboard-schema`; bind
   columns with `x`, `y`, `color`, `size`, `detail`. `w` (1-12) and `h` size its tile;
   tiles pack left-to-right, top-to-bottom in the order given. `options` sets chart

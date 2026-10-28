@@ -91,9 +91,10 @@ def do_dashboard_schema(request: dict) -> dict:
                         "description": t["description"], "tile": t["renderable"]}
                        for t in schema.raw["nodeTypes"] if t["addableViaMenu"]],
         "grid": schema.grid,
-        "sql": ("A query reads its inputs as `query` (the first), `in1`..`inN`, and a file "
-                "or sheet input by its table name. `{name}` in SQL is a token a control "
-                "fills; DuckDB dialect.")}
+        "sql": ("A query reads a file or sheet input by its table name, which is how to "
+                "tell two inputs apart. By position, in the order they are wired, `query` "
+                "and `in1` are both the first input and `in2` the second; there is no "
+                "`in0`. `{name}` in SQL is a token a control fills; DuckDB dialect.")}
     if note:
         result["notes"] = [note]
     return _envelope(reader, request, {"verb": "dashboard_schema"}, result)

@@ -314,8 +314,9 @@ class Runner:
         return out
 
     def _aliases(self, document, node, upstream) -> None:
-        """The portal's `aliasDDLs`: `query` and `in1..N` by position, one view per input
-        port, and one per source table name."""
+        """The portal's `aliasDDLs`: by position, `query` and `in1` both the first input
+        and `in2..N` the rest (there is no `in0`), one view per input port, and one per
+        source table name."""
         nodes = {n["id"]: n for n in document["ir"]["nodes"]}
         relation_ports = {p["id"] for p in self.schema.ports(node)[0]
                           if p["type"] == "Relation"}

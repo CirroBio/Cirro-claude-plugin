@@ -361,6 +361,35 @@ def test_sql_reads_its_inputs_by_every_portal_alias(schema, local_files):
     assert results["aliases"]["profile"]["sample"] == [{"n": 160}]
 
 
+def test_in1_is_the_first_input_not_the_second(schema, tmp_path):
+    """The portal's `aliasDDLs` names the first input both `query` and `in1`, the second
+    `in2`, and has no `in0`. Reading `in1` as the second joined a file with itself and
+    the plan still showed a plausible count."""
+    run = runner(schema, tmp_path)
+    files = {"de/ifng_vs_untreated.csv": "gene,padj\nG1,0.01\nG2,0.02\n",
+             "de/ax0085_vs_untreated.csv": "gene,padj\nG1,0.01\nG3,0.03\nG4,0.04\n"}
+    for path, text in files.items():
+        local = run.cache / "ds_0001" / path
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_text(text)
+    document, _ = build(schema, [
+        {"op": "add_source", "id": "ifng", "dataset": "ds_0001",
+         "path": "de/ifng_vs_untreated.csv"},
+        {"op": "add_source", "id": "ax0085", "dataset": "ds_0001",
+         "path": "de/ax0085_vs_untreated.csv"},
+        {"op": "add_query", "id": "aliases", "inputs": ["ifng", "ax0085"],
+         "sql": "SELECT (SELECT count(*) FROM query) AS query, "
+                "(SELECT count(*) FROM in1) AS in1, (SELECT count(*) FROM in2) AS in2, "
+                "(SELECT count(*) FROM ifng_vs_untreated) AS ifng, "
+                "(SELECT count(*) FROM ax0085_vs_untreated) AS ax0085"},
+        {"op": "add_query", "id": "zero", "inputs": ["ifng", "ax0085"],
+         "sql": "SELECT * FROM in0"}])
+    results = run.run(document, sample_rows=1)
+    assert results["aliases"]["profile"]["sample"] == [
+        {"query": 2, "in1": 2, "in2": 3, "ifng": 2, "ax0085": 3}]
+    assert "in0" in results["zero"]["error"]
+
+
 def test_the_data_catches_a_column_that_is_not_there(schema, local_files):
     changes = STARTER[:2] + [{"op": "add_view", "id": "badview", "data": "bygene",
                               "type": "scatter", "x": "log2fc", "y": "padj"},
