@@ -4,10 +4,9 @@ A Claude Code plugin for the [Cirro](https://cirro.bio) data platform: Claude re
 person's projects, datasets, runs and logs freely, and every change it would make waits
 for that person's approval.
 
-**Using the plugin?** Read the [documentation site](https://solid-carnival-1g9egwp.pages.github.io/).
+**Using the plugin?** Read the [documentation site](https://cirrobio.github.io/Cirro-claude-plugin/).
 It is built from [`docs/`](docs/) and published to GitHub Pages by
-`.github/workflows/docs.yml`; for now it is visible only to people with access to this
-repository. To install:
+`.github/workflows/docs.yml`. To install:
 
 ```bash
 claude plugin marketplace add CirroBio/Cirro-claude-plugin
@@ -51,7 +50,7 @@ writes  (gated)   ──▶ MCP server (11) ─┘         the only code importi
 the way it is, and the traps that have already bitten. Read it before changing the
 approval path, the gate, session resolution or the request models. The user-facing
 account of the same design is the docs site's
-[How it works](https://solid-carnival-1g9egwp.pages.github.io/how-it-works/).
+[How it works](https://cirrobio.github.io/Cirro-claude-plugin/how-it-works/).
 
 ## Where things are
 
