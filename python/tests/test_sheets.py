@@ -56,7 +56,7 @@ def test_columns_are_unique_ignoring_case():
     ({"dataType": "STRING"}, 12.0, "12"),
     ({"dataType": "STRING", "semanticType": "CIRRO_FILE"},
      {"dataset": "ds_1", "path": "data/reads/a.fastq.gz"},
-     "cirro::proj_a:data:ds_1/reads/a.fastq.gz"),
+     "cirro::proj_a:dataset:ds_1/reads/a.fastq.gz"),
 ])
 def test_values_are_stored_as_their_column_holds_them(column, value, stored):
     assert S.coerce(column, value, "proj_a") == stored
@@ -70,8 +70,11 @@ def test_values_are_stored_as_their_column_holds_them(column, value, stored):
     ({"dataType": "BOOLEAN"}, "maybe", "true or false"),
     ({"dataType": "STRING", "semanticType": "ENUM_SINGLE", "allowedValues": ["a"]}, "b",
      "allowed"),
-    ({"dataType": "STRING", "semanticType": "CIRRO_DATASET"}, "cirro::p:data:ds/x",
+    ({"dataType": "STRING", "semanticType": "CIRRO_DATASET"}, "cirro::p:dataset:ds/x",
      "dataset alone"),
+    # The resource type the backend refuses since it settled on `dataset`.
+    ({"dataType": "STRING", "semanticType": "CIRRO_FILE"}, "cirro::p:data:ds/x",
+     "not a Cirro reference"),
     ({"dataType": "STRING", "required": True}, None, "required"),
 ])
 def test_values_that_would_not_cast_are_refused(column, value, reason):
@@ -151,7 +154,7 @@ def sheets_tenant(writable_tenant):
         state["sheets"][sheet_id] = {
             "id": sheet_id, "name": name, "description": "", "projectId": "proj_a",
             "namespaceName": "default", "tableName": table, "sheetType": "TABLE",
-            "status": "COMPLETED", "auditReadAccess": False, "createdBy": "sminot",
+            "status": "COMPLETED", "createdBy": "sminot",
             "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-01T00:00:00Z",
             "tags": [], "sheetCreationMode": "SCRATCH", "columns": columns,
             "schemaVersionId": 0, **extra}

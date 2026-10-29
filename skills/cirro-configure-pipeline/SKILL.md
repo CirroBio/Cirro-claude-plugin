@@ -71,6 +71,18 @@ Read the generated form for sense, not just validity. Groups in a sane order, ti
 biologist would recognize, pickers pointing at the right library, conditional fields
 where a large parameter set would otherwise be a wall.
 
+The spec's `cirro.input_mode` decides how the form runs, and one form cannot mix the
+two. In `browse` mode — every new spec — the person picks paths from the whole project,
+a samplesheet is a table they fill in, and the run's input datasets are whichever
+datasets those picks point into. In `select` mode they choose input datasets first. A
+spec without the key is `select`, so regenerating an older pipeline's configuration does
+not change how anyone runs it.
+
+A picker that allows several picks hands Cirro a list. The generator maps it with
+`[*]` (`$.dataset.params.input.fastq[*]`), which gives the workflow one comma-joined
+string, as it always got. A mapping without `[*]` hands the workflow the list itself —
+right only when a preprocess script reads it.
+
 ## When generation is not enough
 
 Some forms cannot be described by a spec: a field revealed by two independent
@@ -85,7 +97,9 @@ plan(op="upload_process_config",
 `assets_dir` is a folder holding `process-form.json` and any of `process-input.json`,
 `process-output.json`, `process-compute.config`, `preprocess.py`, `README.md`. They go
 up **exactly as written** — validated by the same checker, never reformatted, never
-regenerated. Anything else in the folder is ignored. Nothing is staged, because the
+regenerated. A hand-written form may carry `structuredInputs` beside `form` and `ui`;
+the checker holds each entry to what Cirro can write as a file, and a field's `schema`
+to naming one of them. Anything else in the folder is ignored. Nothing is staged, because the
 files are already where the user put them.
 
 Exactly one of `design_spec` and `assets_dir` on an upload. `create_process` still
@@ -187,8 +201,9 @@ plan(op="chain", args={"steps": [
   {"label": "run",       "op": "run_analysis",
    "args": {"project_id": "proj_...",
             "process": {"from_step": 0, "field": "created_process_id"},
-            "name": "wf test run", "params": {...},
-            "source_dataset_ids": [{"from_step": 2, "field": "dataset_id"}]}},
+            "name": "wf test run",
+            "params": {"input": {"bam": {
+                "dataset": {"from_step": 2, "field": "dataset_id"}, "path": ""}}}}},
  ],
  "retry": {"redo": ["configure", "run"], "max_attempts": 3,
            "may_change": ["design_spec"]}})
@@ -198,6 +213,13 @@ A value a later step cannot know yet — the process id step 1 creates, the data
 step 3 creates — is written as `{"from_step": N, "field": "..."}`. The server fills it
 in from what that step actually returned. It is not a wildcard, and the approval shows
 it as exactly what it is: `<dataset_id of step 3: upload>`.
+
+That run is a `browse`-mode pipeline, so its input is a picked path: `{"dataset": ...,
+"path": ""}` is the uploaded dataset's whole data folder, and the dataset it names is
+the run's input. A samplesheet goes in `structured_inputs` the same way, one row per
+sample, each file cell a `{"dataset": ..., "path": "..."}`. A `select`-mode pipeline
+names its inputs instead, as `"source_dataset_ids": [{"from_step": 2, "field":
+"dataset_id"}]`.
 
 Waiting for the run is free: `analysis-status`, `tasks` and `logs` are ungated reads.
 Downloading results afterwards is an ordinary plan, because by then the dataset exists.
@@ -229,8 +251,11 @@ something down is its own approval, always.
 
 ## Preprocess scripts
 
-Only if the workflow needs its inputs transformed before launch — and always for
-WDL/Cromwell, which needs an `inputs.json` built.
+Not for a samplesheet. A workflow that reads one gets a structured input, which the
+person fills in on the run form and Cirro writes for it; Cirro has deprecated building
+samplesheets in preprocess from `ds.files` and `ds.samplesheet`. Write a preprocess
+script only if the workflow needs its inputs transformed some other way before launch —
+and always for WDL/Cromwell, which needs an `inputs.json` built.
 
 If you write one, it **must** ship with an offline unit test beside it. Extract a pure
 function that takes files and parameters and returns the manifest, keep the `cirro`
@@ -246,9 +271,12 @@ cirro-agent read process-config <process_id>
 ```
 
 The parameter spec is what Cirro will actually accept — compare it against the design
-spec. Then ask the user to open the pipeline in the Cirro UI and check that the form
-renders, conditionals toggle and pickers list real files. Nothing here proves the form
-looks right to a human.
+spec. Then ask the user to open the pipeline from **Custom Pipelines** and click **Form
+Preview**, which shows the form as people will see it, pickers and samplesheet table
+included, and check that it renders, conditionals toggle and pickers list real files.
+Pasting a different `process-form.json` into the preview shows that one without saving
+it, so a form can be looked at before it is uploaded. Nothing here proves the form looks
+right to a human.
 
 Then hand to **cirro-define-test-dataset** if there is no test plan yet, or straight to
 **cirro-run-analysis** to launch it on one.

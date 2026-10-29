@@ -554,7 +554,8 @@ def _process_input(*, process_id: str, name: str, description: str, executor: st
                    category: Optional[str], parent_process_ids: list,
                    child_process_ids: list,
                    uses_sample_sheet: bool, allow_multiple_sources: bool,
-                   documentation_url=_UNSPECIFIED, execution_modes=_UNSPECIFIED):
+                   documentation_url=_UNSPECIFIED, execution_modes=_UNSPECIFIED,
+                   requires_internet=_UNSPECIFIED):
     """The whole-record field set every process write has to fill.
 
     CustomProcessInput replaces the record rather than patching it, so a field left
@@ -570,6 +571,9 @@ def _process_input(*, process_id: str, name: str, description: str, executor: st
     null and silently clear it, the same defect executor_version had -- and for
     execution_modes that defect costs a pipeline its HealthOmics capability as a side
     effect of editing its category.
+
+    `requires_internet` is optional in the request model but a plain boolean on the
+    server, so leaving it out of an update turns it off. Absent is only for a create.
     """
     from cirro_api_client.v1.models import CustomProcessInput, ExecutionMode, Executor
     from cirro_api_client.v1.types import UNSET
@@ -586,6 +590,8 @@ def _process_input(*, process_id: str, name: str, description: str, executor: st
     if execution_modes is not _UNSPECIFIED:
         request.execution_modes = (None if execution_modes is None
                                    else [ExecutionMode(m) for m in execution_modes])
+    if requires_internet is not _UNSPECIFIED:
+        request.requires_internet = requires_internet
     return request
 
 
@@ -1145,6 +1151,7 @@ def plan_update_process(reader: reads.Reader, args: dict) -> Draft:
                             "uses_sample_sheet": bool(detail.get("uses_sample_sheet")),
                             "allow_multiple_sources":
                                 bool(detail.get("allow_multiple_sources")),
+                            "requires_internet": bool(detail.get("requires_internet")),
                             "execution_modes": declared}}
     return Draft(args=resolved, summary="\n".join(lines), warnings=warnings,
                  invalidates=[_inv("processes")])
@@ -1183,7 +1190,8 @@ def apply_update_process(reader: reads.Reader, args: dict) -> dict:
         # A process that declared nothing reads back as [STANDARD], and re-sending
         # that says what it already meant.
         execution_modes=changes.get("execution_modes",
-                                    current["execution_modes"]))
+                                    current["execution_modes"]),
+        requires_internet=current["requires_internet"])
     if current.get("config_source"):
         request.config_source = ConfigSource(current["config_source"])
     if code.get("repository_path"):

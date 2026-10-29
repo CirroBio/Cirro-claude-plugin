@@ -4,11 +4,11 @@ assets, workflow sources, and the validator.
 import json
 from typing import Optional
 
-from .. import errors, formgen
+from .. import errors, formcheck, formgen
 from ..envelope import DEFAULT_MAX_TOKENS, estimate_tokens, shrink_to_fit, wrap
 from . import rows as R
-from .reads import (Reader, near_misses, process_assets, process_detail,
-                    process_revision, spec_shape)
+from .reads import (Reader, form_fields, launch_form, near_misses, process_assets,
+                    process_detail, process_revision, run_form, structured_inputs)
 
 
 _PARAMS_NOTE = (
@@ -21,7 +21,12 @@ _PARAMS_NOTE = (
     "`required_shape` is what a group obliges you to include once you send it at all "
     "-- the groups themselves are usually optional, so `required` being short does "
     "not mean a group can be half-filled. Keys not listed here are accepted by the "
-    "API and ignored; plan(run_analysis) reports any you pass that are not declared."
+    "API and ignored; plan(run_analysis) reports any you pass that are not declared. "
+    "A parameter with a `format` picks a path: send {'dataset': <id>, 'path': <path in "
+    "its data folder>}, or a Cirro URI. In `browse` mode the run's input datasets are "
+    "the ones those paths and any samplesheet's file cells point into. Each entry of "
+    "`structured_inputs` is a samplesheet, sent as rows in run_analysis' "
+    "`structured_inputs` under its name, never in params."
 )
 
 _SPEC_UNREADABLE = (
@@ -72,14 +77,23 @@ def do_process_params(request: dict) -> dict:
         )
     match = reader.resolve_process(given)
 
-    fields = spec_shape(reader, match["id"])
+    document = run_form(reader, match["id"])
+    fields = form_fields(launch_form(document)) if document is not None else None
     parameters = [
         {"path": f["path"], "type": f["type"], "title": f["title"],
          "description": f["description"], "required": f["required"],
          "conditional": f["conditional"], "is_group": f["is_group"],
-         "default": f["default"], "has_default": f["has_default"]}
+         "default": f["default"], "has_default": f["has_default"],
+         **({"format": f["format"]} if f["format"] else {})}
         for f in (fields or [])
     ]
+    tables = structured_inputs(document)
+    browse = formcheck.browse_mode(document)
+    launch = {"process": match["id"], "name": "OUTPUT_NAME", "params": {}}
+    if not browse:
+        launch["dataset_id"] = "INPUT_DATASET_ID"
+    if tables:
+        launch["structured_inputs"] = {name: [] for name in tables}
     required = [f["path"] for f in parameters if f["required"]]
     process = {key: match[key] for key in (
         "id", "name", "executor", "uses_sample_sheet", "documentation_url",
@@ -92,16 +106,21 @@ def do_process_params(request: dict) -> dict:
         query={"verb": "process_params", "id": match["id"]},
         result={
                     "process": process,
+                    "input_mode": "browse" if browse else "select",
                     "n_parameters": len(parameters),
                     "required": required,
                     "parameters": parameters,
                     "required_shape": _required_shape(fields or []),
+                    "structured_inputs": [
+                        {"name": name,
+                         **{key: table[key] for key in (
+                             "field", "required", "file_format", "default_source_file",
+                             "columns")}}
+                        for name, table in tables.items()],
                     "note": _PARAMS_NOTE if fields is not None else _SPEC_UNREADABLE,
                     "next_calls": [{
                         "id": "nc_plan", "why": "plan a run once the params are chosen",
-                        "call": {"tool": "plan", "op": "run_analysis",
-                                 "args": {"process": match["id"], "name": "OUTPUT_NAME",
-                                          "dataset_id": "INPUT_DATASET_ID", "params": {}}}}],
+                        "call": {"tool": "plan", "op": "run_analysis", "args": launch}}],
                 },
         cost=reader.cost.to_dict(),
         max_tokens=max_tokens)

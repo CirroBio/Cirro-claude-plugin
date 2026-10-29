@@ -1611,3 +1611,164 @@ def test_a_failed_upload_with_no_file_to_blame_does_not_guess_a_count(
     assert "TimeoutError" in raised.value.message
     assert "is not known" in raised.value.message
     assert raised.value.retry_with[0]["args"]["dataset_id"] == "ds_partial"
+
+
+# --- launches whose inputs are picked paths ---------------------------------------
+
+# A form in browse mode: a folder and a file picked from anywhere in the project, a
+# multi-select, and a samplesheet the person fills in.
+BROWSE_FORM = {"ui": {}, "form": {"type": "object", "properties": {
+    "input": {"type": "object", "properties": {
+        "reads": {"type": "string", "format": "directory-path", "title": "Reads"},
+        "bed": {"type": "string", "format": "file-path", "pattern": r"\.bed$"},
+        "fastq": {"type": "string", "format": "file-path", "multiple": True},
+        "samplesheet": {"type": "string", "schema": "samplesheet"}},
+        "required": ["reads", "samplesheet"]},
+    "genome": {"type": "string"}}},
+    "structuredInputs": {"samplesheet": {"fileFormat": "CSV", "schema": {
+        "type": "array", "items": {"type": "object", "properties": {
+            "sample": {"type": "string", "pattern": r"^\S+$",
+                       "errorMessage": "Sample names cannot contain spaces"},
+            "fastq_1": {"type": "string", "format": "file-path"},
+            "strandedness": {"type": "string", "enum": ["auto", "forward"]}},
+            "required": ["sample", "fastq_1"]}}}}}
+
+READ = {"dataset": "ds_0005", "path": "SAMP005_R1_001.fastq.gz"}
+
+
+def plan_browse(tenant, session_dir, rows=None, **overrides):
+    tenant["router"].get(f"{API}/processes/proc_rnaseq/parameters").respond(
+        json=BROWSE_FORM)
+    args = {"source_dataset_ids": [],
+            "params": {"input": {"reads": {"dataset": "ds_0003", "path": ""}}},
+            "structured_inputs": {"samplesheet": rows if rows is not None else [
+                {"sample": "S1", "fastq_1": READ, "strandedness": "auto"}]}}
+    args.update(overrides)
+    return plan_run(tenant, session_dir, **args)
+
+
+def test_a_browse_launch_reads_its_inputs_off_what_was_picked(writable_tenant,
+                                                              session_dir):
+    """No dataset is named, as in the portal: the run's inputs are the datasets the
+    picked folder and the samplesheet's file cells point into, and the approval says
+    which pick brought each one in."""
+    result = plan_browse(writable_tenant, session_dir)
+    assert result["ok"], result
+    args = plans.load(session_dir, result["plan_id"]).args
+    assert args["source_dataset_ids"] == ["ds_0003", "ds_0005"]
+    assert args["params"]["input"]["reads"] == "cirro::proj_a:dataset:ds_0003/"
+    assert args["structured_inputs"] == {"samplesheet": {"file_format": "CSV", "rows": [
+        {"sample": "S1",
+         "fastq_1": "cirro::proj_a:dataset:ds_0005/SAMP005_R1_001.fastq.gz",
+         "strandedness": "auto"}]}}
+    assert "picked in parameter input.reads" in result["rendered"]
+    assert "picked in samplesheet samplesheet" in result["rendered"]
+    assert "Samplesheet samplesheet (CSV, 1 row)" in result["rendered"]
+    assert "Required parameters absent" not in result["rendered"], \
+        "the samplesheet field is sent as a file, not as a parameter"
+
+
+def test_a_csv_row_carries_every_column_in_order(writable_tenant, session_dir):
+    """Cirro writes a CSV's header in the order keys first appear across the rows, so a
+    first row without an optional column would move that column to the end."""
+    result = plan_browse(writable_tenant, session_dir,
+                         rows=[{"fastq_1": READ, "sample": "S1"}])
+    rows = plans.load(session_dir, result["plan_id"]).args[
+        "structured_inputs"]["samplesheet"]["rows"]
+    assert list(rows[0]) == ["sample", "fastq_1", "strandedness"]
+    assert rows[0]["strandedness"] is None
+
+
+@pytest.mark.parametrize("rows, said", [
+    ([{"sample": "S 1", "fastq_1": READ}], "Sample names cannot contain spaces"),
+    ([{"sample": "S1"}], "fastq_1"),
+    ([{"sample": "S1", "fastq_1": READ, "lane": 1}], "not a column"),
+    ([{"sample": "S1", "fastq_1": READ, "strandedness": "sideways"}], "strandedness"),
+    ([{"sample": "S1", "fastq_1": {"dataset": "ds_0005", "path": ""}}], "names a folder"),
+])
+def test_a_row_that_does_not_fit_the_samplesheet_is_refused(writable_tenant, session_dir,
+                                                            rows, said):
+    """Cirro-backend writes rows as they arrive, so the plan is the only check one gets
+    before a pipeline reads it."""
+    error = plan_browse(writable_tenant, session_dir, rows=rows)["error"]
+    assert error["code"] == "INVALID_QUERY"
+    assert said in error["message"]
+
+
+def test_a_required_samplesheet_has_to_be_sent(writable_tenant, session_dir):
+    error = plan_browse(writable_tenant, session_dir, structured_inputs={})["error"]
+    assert "requires the samplesheet 'samplesheet'" in error["message"]
+
+
+def test_a_samplesheet_given_as_a_parameter_is_refused(writable_tenant, session_dir):
+    """The portal never sends one there, and the launch would not either."""
+    error = plan_browse(writable_tenant, session_dir, params={"input": {
+        "reads": {"dataset": "ds_0003", "path": ""}, "samplesheet": "x.csv"}})["error"]
+    assert "rows go in structured_inputs.samplesheet" in error["message"]
+
+
+@pytest.mark.parametrize("bed, said", [
+    ({"dataset": "ds_0003", "path": "regions.txt"}, "does not match the form's pattern"),
+    ("cirro::proj_a:dataset:ds_0003", "names the dataset"),
+    ("cirro::proj_b:dataset:ds_0003/regions.bed", "belongs to proj_a"),
+    ({"dataset": "ds_9999", "path": "regions.bed"}, "No dataset"),
+])
+def test_a_pick_is_held_to_what_its_picker_accepts(writable_tenant, session_dir, bed, said):
+    error = plan_browse(writable_tenant, session_dir, params={"input": {
+        "reads": {"dataset": "ds_0003", "path": ""}, "bed": bed}})["error"]
+    assert said in error["message"]
+
+
+def test_a_multi_select_is_sent_as_a_list_of_references(writable_tenant, session_dir):
+    """The form declares a string with `multiple`, and the portal submits a list; the
+    form as served would refuse the list the portal sends."""
+    result = plan_browse(writable_tenant, session_dir, params={"input": {
+        "reads": {"dataset": "ds_0003", "path": ""},
+        "fastq": [READ, {"dataset": "ds_0007", "path": "SAMP007_R1_001.fastq.gz"}]}})
+    assert result["ok"], result
+    args = plans.load(session_dir, result["plan_id"]).args
+    assert args["params"]["input"]["fastq"] == [
+        "cirro::proj_a:dataset:ds_0005/SAMP005_R1_001.fastq.gz",
+        "cirro::proj_a:dataset:ds_0007/SAMP007_R1_001.fastq.gz"]
+    assert args["source_dataset_ids"] == ["ds_0003", "ds_0005", "ds_0007"]
+
+
+def test_a_long_samplesheet_is_not_grantable(writable_tenant, session_dir):
+    row = {"sample": "S1", "fastq_1": READ}
+    fifty = plan_browse(writable_tenant, session_dir, rows=[row] * 50)
+    assert fifty["grant_scope"]["op"] == "run_analysis"
+    many = plan_browse(writable_tenant, session_dir, rows=[row] * 51)
+    assert many["grant_scope"] is None
+    assert "more than 50 rows" in many["not_grantable"]
+    assert "... and 1 more row\n" in many["rendered"]
+
+
+def test_a_browse_launch_survives_its_re_plan_and_sends_its_rows(writable_tenant,
+                                                                 session_dir):
+    from cirro_agent.worker import gated
+    first = plan_browse(writable_tenant, session_dir)
+    second = plan_browse(writable_tenant, session_dir)
+    assert gated._same_disclosure(plans.load(session_dir, first["plan_id"]),
+                                  plans.load(session_dir, second["plan_id"]))
+    assert apply_from(writable_tenant, session_dir, first)["ok"]
+    posted = [c for c in writable_tenant["router"].calls
+              if c.request.method == "POST" and c.request.url.path.endswith("/execution")]
+    body = json.loads(posted[-1].request.content)
+    assert body["sourceDatasetIds"] == ["ds_0003", "ds_0005"]
+    assert body["params"]["input"]["reads"] == "cirro::proj_a:dataset:ds_0003/"
+    assert body["structuredInputs"]["samplesheet"]["fileFormat"] == "CSV"
+    assert body["structuredInputs"]["samplesheet"]["data"][0]["sample"] == "S1"
+
+
+def test_a_chain_feeds_a_dataset_it_made_into_a_pick(writable_tenant, session_dir):
+    """A chain's reference resolves to a bare id, and a picker wants a reference to a
+    path in a dataset; `{"dataset": <reference>, "path": ...}` is how one becomes the
+    other, so register -> upload -> run works for a browse-mode pipeline."""
+    from cirro_agent.worker import chain_ops
+    params = {"input": {"reads": {"dataset": {"from_step": 2, "field": "dataset_id"},
+                                  "path": ""}}}
+    resolved = chain_ops._map_references(params, lambda _reference: "ds_0003")
+    result = plan_browse(writable_tenant, session_dir, params=resolved)
+    assert result["ok"], result
+    assert plans.load(session_dir, result["plan_id"]).args["params"]["input"][
+        "reads"] == "cirro::proj_a:dataset:ds_0003/"

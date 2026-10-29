@@ -99,6 +99,11 @@ and as whom. Ask Claude who you are signed in as and it names the folder.
   portal. The plan names the address before you approve. Ask Claude to notify someone
   else, or nobody. If your Cirro profile has analysis notifications turned off, or your
   address cannot be looked up, nobody is emailed and the plan says so.
+- **A launch names every dataset it reads.** On a pipeline whose form has you pick files
+  from anywhere in the project, the run's input datasets are the ones those picks come
+  from, and the plan lists each with the pick that brought it in. A samplesheet the form
+  builds is shown row by row, and a row that does not fit its columns is refused while
+  the plan is still read-only, since Cirro writes the rows as given.
 - **A run can target AWS HealthOmics** instead of Cirro's default AWS Batch, if the
   pipeline supports it. Ask for it and the plan's `Compute` line names the target before
   you approve. A pipeline that does not declare HealthOmics is refused while the plan is

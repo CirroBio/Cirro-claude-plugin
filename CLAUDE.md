@@ -250,19 +250,29 @@ file at that path is also read as a project-scoped config by anyone running Clau
 inside this repo, where `${CLAUDE_PLUGIN_ROOT}` is undefined and the spawn fails with
 `ENOENT`. `test_readme_current.py` guards this.
 
-**The runtime needs `cirro-api-client` >=1.6.0.** The process config-revision routes
-and the `ConfigSource` enum exist only from 1.6.0, and pipeline configuration is
-impossible without them. cirro 1.13.1 pinned the client below that, so the runtime
-used to override cirro's pin; cirro >=1.15.0 requires >=1.7.1 itself, so the override
-is gone. `test_runtime_contract.py` fails if the client the runtime resolves loses
-those routes.
+**The runtime needs `cirro-api-client` >=1.8.0, which means cirro >=1.16.1.** The
+process config-revision routes and the `ConfigSource` enum arrived in 1.6.0, and
+pipeline configuration is impossible without them; 1.8.0 is the first client whose
+launch request can carry a samplesheet (`RunAnalysisRequest.structured_inputs`,
+`StructuredInput`). cirro pins the client itself -- 1.16.1 requires ~1.8.0 -- so the
+floor on cirro is what moves the client, and the runtime overrides nothing. Routes are
+imported inside the functions that use them, so a route the client renames breaks only
+when that function runs: 1.8.0 renamed `query_namespace_data` to `query_data` and the
+view preview failed with nothing else noticing. `test_runtime_contract.py` imports
+every route the source names, and fails if the client loses the config routes or the
+structured-input models.
+
+1.8.0 also made `requiresInternet` a required field of `Process` and `ProcessDetail`
+and an optional one of `CustomProcessInput`. The server's field is a plain boolean, so
+an update that leaves it out turns it off; `_process_input` carries it from the current
+record, as it does `executionModes`.
 
 **Reads are split by verb, with one shared fetch layer.** `worker/reads.py` holds
 `Reader` -- the client, cache, cost accounting and name resolution -- plus the single
 implementation of each expensive fetch (`dataset_detail`, `dataset_manifest`,
 `dataset_tasks`, `dataset_cost`, `process_detail`, `process_revision`,
-`process_assets`, `spec_shape`, `file_count`, `project_metrics`, `all_project_metrics`,
-`portal_dataset`). The op
+`process_assets`, `process_parameters`, `spec_shape`, `file_count`, `project_metrics`,
+`all_project_metrics`, `portal_dataset`). The op
 families plan against this layer too, so "a fetch two verbs need" includes a verb and a
 planner: `process_revision` and `process_assets` are here because the read path and
 `plan_upload_process_config` had each grown their own copy, and the two had drifted to
@@ -416,6 +426,14 @@ it rather than restating it, so a registration cannot declare a mode no run coul
 for. The capability is a property of the process, set at registration, which is why the
 run path can only refuse a mode the pipeline never declared and never grant one.
 
+**A dataset reference says `dataset`.** Cirro URIs are
+`cirro:<tenant>:<project>:dataset:<id>[/<path>]` in sheet cells and run parameters alike
+(`EntityType.DATASET.toResourceType()`, since Cirro-backend#876); the sheet writer used
+to say `data`, which the backend refuses. The path is relative to the dataset's data
+folder, an empty path is that whole folder, and the project segment, when present, must
+be the dataset's own -- a shared dataset's is the project it was shared from.
+`sheets.dataset_uri` and `parse_dataset_uri` are the one implementation of both halves.
+
 **Dataset folders are `folder://` tags.** Report them as `folders`, never surface the
 prefix, and never write a tag list without re-including folder membership.
 `mutations._target_folders` and `_tag_values` are the one implementation of both halves
@@ -454,7 +472,36 @@ person put them, so `stage_dir` is None and apply does not write over their sour
 the 213 forms and 72 input maps in Cirro-pipelines: 2 errors and 5 errors respectively,
 each a genuine defect. If a change to `formcheck.py` starts flagging production
 configuration, the validator is wrong, not the configuration. `folder` is documented by
-Cirro but used by none of the 213, so it warns rather than errors.
+Cirro but used by none of the 213, so it warns rather than errors. The structured-input
+rules and `schema` arrived after that measurement; on 2026-10-29 the 77 forms then on
+Cirro-pipelines' main drew nothing new from them, and the two pilot samplesheet forms
+(nf-core/rnaseq 3.1, Cell Ranger GEX 1.1) drew nothing at all.
+
+**A form runs in one of two modes, and the form decides which.** Any field with a path
+`format` or any `structuredInputs` entry puts the portal in browse mode
+(`formcheck.browse_mode`, after `inputDatasetsEnabled` in Cirro-portal): no input-dataset
+selector, paths picked from the whole project as `cirro::<project>:dataset:<id>/<path>`
+URIs, a multi-select submitted as a list, a samplesheet field's rows sent as a file
+rather than in params, and the run's input datasets read off the URIs -- the portal
+sends them as `sourceDatasetIds`, and the backend unions in every dataset URI in the
+params and rows besides. Generation chooses through `cirro.input_mode`, and a spec
+without it is `select` so that regenerating an older pipeline cannot move it: the one
+deliberate change to select output is `[*]` on multi-select mappings, which gives the
+workflow back the comma-joined string the portal used to send. `[*]` is not a checker
+rule, because ten production multi-select fields read the list in a preprocess script.
+
+The launch follows from that. The form as served is not the shape the portal submits,
+so `reads.launch_form` is the one statement of the difference and params are validated
+against it -- through the SDK's own `jsonschema.validate`, so a conditional form is held
+to the draft it always was. That is also why the launch posts through the generated
+route instead of `ExecutionService.run_analysis`: the service validates against the
+form as served and refuses the list a multi-select sends. Cirro-backend checks no
+samplesheet row against its columns -- `StructuredInputSerializer` writes what it is
+given -- so the planner is the only check a row gets. A CSV or TSV takes its header from
+where keys first appear across rows, which is why every row carries every column. The
+plan infers inputs from Cirro URIs only; the backend still also reads legacy
+`s3://project-*/datasets/<uuid>` paths in params (marked for removal as CI-1986), and a
+run whose params lean on one shows that dataset in the approval only if it is named.
 
 **Every op family registers itself into `mutations.OPS`.** `mutations.py` holds the
 shared core -- `Draft`, `Op`, the risk classes, the resolvers, `OPS` and `get_op` -- and

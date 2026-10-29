@@ -82,9 +82,10 @@ def test_a_reference_must_name_a_field_the_earlier_step_produces():
     assert {"field": "dataset_id"} in caught.value.candidates
 
 
-def test_every_declared_output_is_a_field_the_operation_really_returns():
+def test_every_declared_output_is_a_field_the_operation_really_returns(monkeypatch):
     """A declaration nothing checks is a promise a chain would break at step 3."""
-    from test_request_models import APPLY_CASES
+    from test_request_models import APPLY_CASES, stub_launch
+    stub_launch(monkeypatch)
     for name, op in sorted(mutations.OPS.items()):
         if not op.outputs or name not in APPLY_CASES:
             continue

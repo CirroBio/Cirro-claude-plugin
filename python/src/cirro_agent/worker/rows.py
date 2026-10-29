@@ -210,6 +210,7 @@ def process(obj) -> dict:
         "pipeline_type": plain(getattr(obj, "pipeline_type", None)),
         "is_archived": bool(plain(getattr(obj, "is_archived", None))),
         "uses_sample_sheet": bool(plain(getattr(obj, "uses_sample_sheet", None))),
+        "requires_internet": bool(plain(getattr(obj, "requires_internet", None))),
         "documentation_url": plain(getattr(obj, "documentation_url", None)),
         "child_process_ids": plain(getattr(obj, "child_process_ids", None)) or [],
         "parent_process_ids": plain(getattr(obj, "parent_process_ids", None)) or [],

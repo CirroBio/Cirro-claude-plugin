@@ -6,6 +6,7 @@ configuration looks like, not what seemed reasonable.
 """
 import json
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -46,6 +47,16 @@ SPEC = {
               "managed_parameters": [{"name": "outdir", "role": "output_directory",
                                       "note": "set by Cirro"}]},
 }
+
+# SPEC with a multi-select picker, the one input whose generated mapping changed when
+# the portal began sending every multi-select as a list.
+SPEC_MULTIPLE = {**SPEC, "inputs": SPEC["inputs"] + [
+    {"name": "fastq", "description": "FASTQ files to include", "type": "file",
+     "required": False, "group": "input", "multiple": True}]}
+
+# What the generator produced for both before it learned browse mode, so a spec that
+# does not ask for browse mode can be shown to regenerate unchanged.
+SELECT_GOLDEN = Path(__file__).parent / "data" / "formgen-select-golden.json"
 
 
 @pytest.fixture
@@ -107,11 +118,112 @@ def test_secondary_file_inputs_become_pickers(form):
     assert all(f["type"] == "string" for f in (inputs["ref"], inputs["bed"]))
 
 
+def _mapped_fields(input_map):
+    # `[*]` addresses the same field, joined.
+    return {v.replace("[*]", "") for v in input_map.values()
+            if isinstance(v, str) and v.startswith("$.")}
+
+
 def test_every_form_field_is_mapped(form, input_map):
     groups = {f"$.dataset.params.{g}" for g in form["form"]["properties"]}
     leaves = formcheck.form_paths(form) - groups
-    mapped = {v for v in input_map.values() if isinstance(v, str) and v.startswith("$.")}
+    mapped = _mapped_fields(input_map)
     assert leaves <= mapped, f"unmapped: {sorted(leaves - mapped)}"
+
+
+def test_a_spec_that_names_no_input_mode_regenerates_as_before():
+    """Updating a pipeline regenerates its configuration from its spec, so a spec written
+    before browse mode existed must not move its pipeline into it."""
+    golden = json.loads(SELECT_GOLDEN.read_text())
+    assert formgen.generate(SPEC) == golden["spec"]
+    multiple = formgen.generate(SPEC_MULTIPLE)
+    before = golden["spec_multiple"]
+    assert {k: v for k, v in multiple.items() if k != formgen.INPUT} == \
+        {k: v for k, v in before.items() if k != formgen.INPUT}
+    now, then = json.loads(multiple[formgen.INPUT]), json.loads(before[formgen.INPUT])
+    assert now == {**then, "fastq": then["fastq"] + "[*]"}, \
+        "the one change: a multi-select is now sent as a list, and [*] joins it again"
+
+
+def test_an_unknown_input_mode_is_refused():
+    spec = {**SPEC, "cirro": {**SPEC["cirro"], "input_mode": "both"}}
+    with pytest.raises(errors.AgentError) as caught:
+        formgen.generate(spec)
+    assert caught.value.field == "cirro.input_mode"
+    assert caught.value.candidates == ["select", "browse"]
+
+
+BROWSE_SPEC = {**SPEC_MULTIPLE, "cirro": {**SPEC["cirro"], "input_mode": "browse"}}
+
+
+def test_browse_mode_picks_every_input_as_a_path():
+    assets = formgen.generate(BROWSE_SPEC)
+    form, input_map = json.loads(assets[formgen.FORM]), json.loads(assets[formgen.INPUT])
+    inputs = form["form"]["properties"]["input"]
+    assert inputs["properties"]["bam"] == {
+        "type": "string", "title": "Bam", "format": "directory-path",
+        "description": "BAM files for the sample"}, "the primary is a folder picked"
+    assert "bam" in inputs["required"]
+    assert input_map["bam"] == "$.dataset.params.input.bam"
+    assert not any("$.inputs" in v for v in input_map.values() if isinstance(v, str)), \
+        "nothing selects input datasets up front, so $.inputs has no order to rely on"
+    assert inputs["properties"]["bed"]["format"] == "file-path"
+    assert inputs["properties"]["bed"]["pattern"] == r"\.bed$"
+    assert "file" not in inputs["properties"]["bed"]
+    assert inputs["properties"]["ref"]["pathType"] == "reference", \
+        "reference files are in no dataset, so they keep the reference picker"
+    assert input_map["fastq"] == "$.dataset.params.input.fastq[*]"
+    assert formcheck.browse_mode(form)
+    assert not formcheck.browse_mode(json.loads(formgen.generate(SPEC)[formgen.FORM]))
+    report = formcheck.check_assets(assets)
+    assert report["ok"], report["problems"]
+
+
+STRUCTURED_SPEC = {**BROWSE_SPEC, "inputs": [
+    {"name": "input", "description": "One row per sequencing run", "type": "file",
+     "required": True, "structured": {
+         "name": "samplesheet", "file_format": "csv",
+         "default_source_file": "samplesheet.csv",
+         "columns": [
+             {"name": "sample", "type": "string", "required": True, "pattern": r"^\S+$",
+              "error_message": "Sample names cannot contain spaces"},
+             {"name": "fastq_1", "format": "file-path", "required": True,
+              "title": "FASTQ (R1)"},
+             {"name": "fastq_2", "format": "file-path"},
+             {"name": "strandedness", "enum": ["auto", "forward", "reverse"]},
+         ]}},
+] + SPEC["inputs"][1:]}
+
+
+def test_a_structured_input_becomes_a_samplesheet_the_form_builds():
+    assets = formgen.generate(STRUCTURED_SPEC)
+    form, input_map = json.loads(assets[formgen.FORM]), json.loads(assets[formgen.INPUT])
+    field = form["form"]["properties"]["input"]["properties"]["input"]
+    assert field["schema"] == "samplesheet" and "format" not in field
+    definition = form["structuredInputs"]["samplesheet"]
+    assert definition["fileFormat"] == "CSV"
+    assert definition["defaultSourceFile"] == "samplesheet.csv"
+    items = definition["schema"]["items"]
+    assert definition["schema"]["type"] == "array" and items["type"] == "object"
+    assert list(items["properties"]) == ["sample", "fastq_1", "fastq_2", "strandedness"]
+    assert items["required"] == ["sample", "fastq_1"]
+    assert items["properties"]["sample"]["errorMessage"] == \
+        "Sample names cannot contain spaces"
+    assert items["properties"]["fastq_1"]["format"] == "file-path"
+    assert input_map["input"] == "$.structuredInputs.samplesheet.path", \
+        "a samplesheet's rows are written to a file, never into $.dataset.params"
+    report = formcheck.check_assets(assets)
+    assert report["ok"] and not report["n_warnings"], report["problems"]
+
+
+def test_a_structured_input_needs_browse_mode():
+    """Its table alone puts the portal in browse mode, so a select-mode spec with one
+    describes a form that would not behave as written."""
+    spec = {**STRUCTURED_SPEC, "cirro": SPEC["cirro"]}
+    with pytest.raises(errors.AgentError) as caught:
+        formgen.generate(spec)
+    assert caught.value.field == "cirro.input_mode"
+    assert caught.value.candidates == ["browse"]
 
 
 def test_only_must_set_parameters_are_required(form):
@@ -299,6 +411,95 @@ def test_python_named_groups_are_flagged_in_uploaded_python():
     report = formcheck.check_assets(
         {"preprocess.py": "PATTERN = r'(?P<sampleName>.*)\\.fastq'\n"})
     assert any("(?<name>" in p["message"] for p in report["problems"])
+
+
+def _one_field(**field):
+    return {"ui": {}, "form": {"type": "object", "properties": {
+        "g": {"type": "object", "properties": {"x": {"type": "string", **field}}}}}}
+
+
+def test_the_documented_reference_spelling_is_accepted():
+    """The docs now spell it `reference`; 30 production fields still say `references`,
+    and the portal reads both."""
+    for spelling in ("reference", "references"):
+        assert not [p for p in formcheck.check_form(_one_field(
+            pathType=spelling, file="**/star_index/**/SA")) if p.level == "error"]
+        assert any(p.level == "error" and "offers nothing" in p.message
+                   for p in formcheck.check_form(_one_field(pathType=spelling)))
+
+
+def test_a_schema_that_names_no_structured_input_is_an_error():
+    """The portal makes any field carrying `schema` a samplesheet table, so the
+    nextflow_schema.json path nf-core puts there renders a table with no columns."""
+    for value in ("assets/schema_input.json", "samplesheet"):
+        problems = formcheck.check_form(_one_field(schema=value))
+        assert any(p.level == "error" and "no such entry" in p.message
+                   for p in problems), value
+
+
+def _with_table(definition, *, bound=True):
+    doc = _one_field(schema="sheet") if bound else _one_field()
+    return {**doc, "structuredInputs": {"sheet": definition}}
+
+
+GOOD_TABLE = {"fileFormat": "TSV", "schema": {"type": "array", "items": {
+    "type": "object", "properties": {"sample": {"type": "string"}},
+    "required": ["sample"]}}}
+
+
+def test_a_well_formed_structured_input_is_clean():
+    document = _with_table(GOOD_TABLE)
+    assert not formcheck.check_form(document)
+    assert not formcheck.check_structured_inputs(document)
+
+
+@pytest.mark.parametrize("change, said", [
+    ({"fileFormat": "XLSX"}, "fileFormat must be one of"),
+    ({"schema": {"type": "object", "properties": {}}}, "one property per column"),
+    ({"schema": {"type": "array", "items": {"type": "object", "properties": {
+        "files": {"type": "array", "items": {"type": "string"}}}}}}, "holds one value"),
+    ({"schema": {"type": "array", "items": {"type": "object", "properties": {
+        "sample": {"type": "string"}}, "required": ["sample", "fastq"]}}},
+     "which are not columns"),
+])
+def test_a_structured_input_cirro_cannot_write_is_an_error(change, said):
+    problems = formcheck.check_structured_inputs(_with_table({**GOOD_TABLE, **change}))
+    assert any(p.level == "error" and said in p.message for p in problems), problems
+
+
+def test_a_structured_input_name_must_be_usable_as_a_file_name():
+    document = {**_one_field(schema="my sheet"),
+                "structuredInputs": {"my sheet": GOOD_TABLE}}
+    assert any(p.level == "error" and "file's name" in p.message
+               for p in formcheck.check_structured_inputs(document))
+
+
+def test_an_unbound_or_overgrown_structured_input_is_a_warning():
+    unbound = formcheck.check_structured_inputs(_with_table(GOOD_TABLE, bound=False))
+    assert [p.level for p in unbound] == ["warning"]
+    assert "never shows it" in unbound[0].message
+    extra = formcheck.check_structured_inputs(_with_table({**GOOD_TABLE, "rows": []}))
+    assert [p.level for p in extra] == ["warning"] and "ignored" in extra[0].message
+
+
+def test_more_structured_inputs_than_a_launch_carries_is_an_error():
+    document = {**_one_field(), "structuredInputs": {
+        f"s{i}": GOOD_TABLE for i in range(formcheck.MAX_STRUCTURED_INPUTS + 1)}}
+    assert any(p.level == "error" and "at most" in p.message
+               for p in formcheck.check_structured_inputs(document))
+
+
+def test_a_samplesheet_is_mapped_by_its_file_not_its_field():
+    document = _with_table(GOOD_TABLE)
+    assert not formcheck.check_input_map({"input": "$.structuredInputs.sheet.path"},
+                                         document)
+    wrong = formcheck.check_input_map({"input": "$.dataset.params.g.x"}, document)
+    assert [p.level for p in wrong] == ["error"]
+    assert "$.structuredInputs.sheet.path" in wrong[0].fix
+    missing = formcheck.check_input_map({"input": "$.structuredInputs.other.path"},
+                                        document)
+    assert [p.level for p in missing] == ["error"]
+    assert "no 'other'" in missing[0].message
 
 
 # --- registration planning ---------------------------------------------------

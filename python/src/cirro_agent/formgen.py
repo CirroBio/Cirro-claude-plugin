@@ -4,12 +4,21 @@ Deterministic: the judgment lives upstream, in classifying inputs and parameters
 the spec is written. Given a spec, the asset set follows from it.
 
 Three conventions the spec encodes and this module obeys:
-  * An input with no `group` is the primary data input. It is not a form field; it maps
-    to `$.inputs[0].dataPath`, the selected dataset's data folder.
+  * An input with no `group` is the primary data input.
   * `cirro.managed_parameters` are supplied by Cirro at launch and never rendered. The
     output directory maps to `$.dataset.dataPath`.
   * Everything else is a form field under its `group`, and reads back as
     `$.dataset.params.<group>.<field>`.
+
+`cirro.input_mode` picks between the portal's two ways of running a form, which one form
+cannot mix (see `formcheck.PATH_FORMATS`):
+  * `select`, the default. The user chooses the input datasets first; the primary input
+    is not a form field and maps to `$.inputs[0].dataPath`, and pickers offer files
+    from the chosen datasets through `pathType` and a `file` glob.
+  * `browse`. The user picks paths from the whole project and the run's inputs are the
+    datasets those paths point into, so the primary input is a form field too. Pickers
+    use nf-schema's `format` and `pattern`, and an input carrying `structured` becomes
+    a samplesheet the user fills in (`structuredInputs`).
 
 No `process-definition.json`: under every configuration source the process record is
 created through the API, and only these assets vary by destination.
@@ -18,7 +27,7 @@ import json
 import re
 from typing import Optional
 
-from . import errors
+from . import errors, formcheck
 
 FORM = "process-form.json"
 INPUT = "process-input.json"
@@ -52,18 +61,38 @@ JSON_SLOTS = ("form", "input", "output")
 REFERENCE_HINTS = ("genome", "reference", "ref", "annotation", "index", "gtf", "gff",
                    "fasta", "dbsnp", "known_sites", "intervals", "tr_bed")
 
-# Globs by file kind, matched against the input's name and description.
+# File kinds, matched against the input's name and description: the `file` glob a
+# select-mode picker narrows with, and the `pattern` a browse-mode one does. A pattern
+# is matched against a file's path within its dataset, anywhere in it.
 GLOBS = (
-    (("fasta", "genome", "\\bref\\b"), "**/*.{fa,fasta,fna}{,.gz}"),
-    (("gtf", "gff", "annotation"), "**/*.{gtf,gff,gff3}{,.gz}"),
-    (("bed",), "**/*.bed"),
-    (("vcf",), "**/*.vcf{,.gz}"),
-    (("bam", "cram"), "**/*.{bam,cram}"),
-    (("fastq", "reads"), "**/*.{fastq,fq}{,.gz}"),
-    (("samplesheet", "sample sheet", "csv"), "**/*.csv"),
-    (("tsv",), "**/*.tsv"),
-    (("json",), "**/*.json"),
+    (("fasta", "genome", "\\bref\\b"), "**/*.{fa,fasta,fna}{,.gz}",
+     r"\.(fa|fasta|fna)(\.gz)?$"),
+    (("gtf", "gff", "annotation"), "**/*.{gtf,gff,gff3}{,.gz}",
+     r"\.(gtf|gff|gff3)(\.gz)?$"),
+    (("bed",), "**/*.bed", r"\.bed$"),
+    (("vcf",), "**/*.vcf{,.gz}", r"\.vcf(\.gz)?$"),
+    (("bam", "cram"), "**/*.{bam,cram}", r"\.(bam|cram)$"),
+    (("fastq", "reads"), "**/*.{fastq,fq}{,.gz}", r"\.(fastq|fq)(\.gz)?$"),
+    (("samplesheet", "sample sheet", "csv"), "**/*.csv", r"\.csv$"),
+    (("tsv",), "**/*.tsv", r"\.tsv$"),
+    (("json",), "**/*.json", r"\.json$"),
 )
+
+SELECT, BROWSE = "select", "browse"
+INPUT_MODES = (SELECT, BROWSE)
+
+# A browse-mode picker's `format`, from the input's `type`.
+PATH_FORMAT_BY_TYPE = {"file": "file-path", "folder": "directory-path", "path": "path"}
+
+# The group a browse-mode primary input is shown in. It has none of its own: having none
+# is what marks it as the primary.
+PRIMARY_GROUP = "input"
+
+# Design-spec column keys and the JSON Schema keywords they become.
+COLUMN_KEYWORDS = (("title", "title"), ("description", "description"),
+                   ("format", "format"), ("pattern", "pattern"), ("enum", "enum"),
+                   ("choices", "enum"), ("minimum", "minimum"), ("maximum", "maximum"),
+                   ("error_message", "errorMessage"))
 
 DEFAULT_COMPUTE = """\
 // Compute configuration for {name} {version}.
@@ -86,13 +115,55 @@ def infer_path_type(entry: dict) -> str:
     return "references" if any(h in haystack for h in REFERENCE_HINTS) else "dataset"
 
 
-def infer_glob(entry: dict) -> str:
+def _file_kind(entry: dict) -> Optional[tuple]:
     haystack = f"{entry.get('name', '')} {entry.get('description', '')}".lower()
-    for needles, glob in GLOBS:
-        for needle in needles:
-            if re.search(needle, haystack):
-                return glob
-    return "**/*"
+    for kind in GLOBS:
+        if any(re.search(needle, haystack) for needle in kind[0]):
+            return kind
+    return None
+
+
+def infer_glob(entry: dict) -> str:
+    kind = _file_kind(entry)
+    return kind[1] if kind else "**/*"
+
+
+def infer_pattern(entry: dict) -> Optional[str]:
+    kind = _file_kind(entry)
+    return kind[2] if kind else None
+
+
+def input_mode(spec: dict) -> str:
+    """The spec's input mode, refused if it is unknown or cannot hold the spec's inputs.
+
+    A structured input puts the portal in browse mode whatever else the form says, so a
+    select-mode spec with one describes a form that would not behave as written.
+    """
+    mode = (spec.get("cirro") or {}).get("input_mode") or SELECT
+    if mode not in INPUT_MODES:
+        raise errors.InvalidQuery(
+            f"cirro.input_mode is {mode!r}; it must be one of {', '.join(INPUT_MODES)}.",
+            what="select keeps the portal's input-dataset selector; browse picks paths "
+                 "from the whole project and is the only mode with samplesheets.",
+            field="cirro.input_mode", given=mode, candidates=list(INPUT_MODES),
+            user_action="Correct input_mode in the design spec.",
+        )
+    tables = [e["name"] for e in spec.get("inputs") or [] if e.get("structured")]
+    if mode == SELECT and tables:
+        raise errors.InvalidQuery(
+            f"{', '.join(tables)} is a structured input, which needs "
+            "cirro.input_mode: browse.",
+            what="A samplesheet built in the run form puts the portal in browse mode, "
+                 "so the rest of the form has to be written for it.",
+            field="cirro.input_mode", given=mode, candidates=[BROWSE],
+            user_action="Set cirro.input_mode to browse, or drop `structured` from "
+                        "the input.",
+        )
+    return mode
+
+
+def structured_name(entry: dict) -> str:
+    return entry["structured"].get("name") or entry["name"]
 
 
 def split_inputs(spec: dict) -> tuple:
@@ -167,6 +238,71 @@ def _field_for_picker(entry: dict) -> dict:
     return field
 
 
+def _field_for_browse_picker(entry: dict) -> dict:
+    """A picker over the whole project: nf-schema's `format`, narrowed by `pattern`.
+
+    Reference files are not in any dataset, so a reference picker keeps `pathType` and a
+    `file` glob, under the singular spelling the docs now use.
+    """
+    field = {"type": "string", "title": entry.get("title") or humanize(entry["name"])}
+    if (entry.get("path_type") or infer_path_type(entry)) in formcheck.REFERENCE_PATH_TYPES:
+        field["pathType"] = "reference"
+        field["file"] = entry.get("glob") or infer_glob(entry)
+    else:
+        field["format"] = PATH_FORMAT_BY_TYPE.get(entry.get("type"), "file-path")
+        # The pattern is checked against the folder picked as much as a file, so an
+        # extension guessed from a folder's name would refuse every folder.
+        pattern = entry.get("pattern") or (
+            None if field["format"] == "directory-path" else infer_pattern(entry))
+        if pattern:
+            field["pattern"] = pattern
+    if entry.get("description"):
+        field["description"] = entry["description"]
+    if entry.get("multiple"):
+        field["multiple"] = True
+    return field
+
+
+def _field_for_table(entry: dict) -> dict:
+    field = {"type": "string", "title": entry.get("title") or humanize(entry["name"]),
+             "schema": structured_name(entry)}
+    if entry.get("description"):
+        field["description"] = entry["description"]
+    return field
+
+
+def build_structured_input(entry: dict) -> dict:
+    """A samplesheet's definition: its file format and one schema property per column.
+
+    Columns keep the order the spec lists them in, which is the order the portal shows
+    them; the schema's title and description are what the portal shows over the table.
+    """
+    structured = entry["structured"]
+    columns, required = {}, []
+    for column in structured.get("columns") or []:
+        spec = {"type": column.get("type") or "string"}
+        for key, keyword in COLUMN_KEYWORDS:
+            if column.get(key) is not None:
+                spec[keyword] = column[key]
+        columns[column["name"]] = spec
+        if column.get("required"):
+            required.append(column["name"])
+    items = {"type": "object", "properties": columns}
+    if required:
+        items["required"] = required
+    schema = {"title": structured.get("title") or entry.get("title")
+              or humanize(entry["name"])}
+    description = structured.get("description") or entry.get("description")
+    if description:
+        schema["description"] = description
+    schema.update({"type": "array", "items": items})
+    definition = {"fileFormat": str(structured.get("file_format") or "CSV").upper(),
+                  "schema": schema}
+    if structured.get("default_source_file"):
+        definition["defaultSourceFile"] = structured["default_source_file"]
+    return definition
+
+
 WHEN_EQUALS = re.compile(r"^\s*(\w+)\s*(?:==|=|is)\s*(.+?)\s*$")
 WHEN_PROVIDED = re.compile(r"^\s*(\w+)\s+is\s+provided\s*$", re.I)
 
@@ -224,11 +360,13 @@ def _conditional(selector_field: dict, selector: str, by_value: dict) -> dict:
 
 def build_form(spec: dict) -> dict:
     """One object per group, in the order the groups first appear."""
-    _primary, pickers = split_inputs(spec)
+    mode = input_mode(spec)
+    primary, pickers = split_inputs(spec)
     managed = managed_names(spec)
 
     groups: dict = {}
     required: dict = {}
+    tables: dict = {}
 
     def ensure(group: str) -> dict:
         if group not in groups:
@@ -236,11 +374,22 @@ def build_form(spec: dict) -> dict:
             required[group] = []
         return groups[group]
 
-    for entry in pickers:
-        group = ensure(entry["group"])
-        group["properties"][entry["name"]] = _field_for_picker(entry)
+    placed = [(entry["group"], entry) for entry in pickers]
+    if mode == BROWSE and primary:
+        # Nothing selects the dataset up front in browse mode, so the primary input is
+        # picked like any other, and the run cannot start without it.
+        placed.insert(0, (PRIMARY_GROUP, {**primary, "required": True}))
+    for group_name, entry in placed:
+        if entry.get("structured"):
+            field = _field_for_table(entry)
+            tables[structured_name(entry)] = build_structured_input(entry)
+        elif mode == BROWSE:
+            field = _field_for_browse_picker(entry)
+        else:
+            field = _field_for_picker(entry)
+        ensure(group_name)["properties"][entry["name"]] = field
         if entry.get("required"):
-            required[entry["group"]].append(entry["name"])
+            required[group_name].append(entry["name"])
 
     conditional: dict = {}
     for entry in spec.get("parameters") or []:
@@ -282,16 +431,30 @@ def build_form(spec: dict) -> dict:
         if required.get(name):
             block["required"] = required[name]
 
-    return {"ui": {}, "form": {"type": "object", "properties": groups}}
+    document = {"ui": {}, "form": {"type": "object", "properties": groups}}
+    if tables:
+        document["structuredInputs"] = tables
+    return document
+
+
+def _picked_path(entry: dict, group: str) -> str:
+    if entry.get("structured"):
+        return f"$.structuredInputs.{structured_name(entry)}.path"
+    path = f"$.dataset.params.{group}.{entry['name']}"
+    # The portal sends a multi-select as a list; `[*]` gives the workflow the
+    # comma-joined string it was sent before (as Cirro-pipelines#132 did by hand).
+    return path + "[*]" if entry.get("multiple") else path
 
 
 def build_input_map(spec: dict) -> dict:
+    mode = input_mode(spec)
     primary, pickers = split_inputs(spec)
     managed = managed_names(spec)
     mapping: dict = {}
 
     if primary:
-        mapping[primary["name"]] = "$.inputs[0].dataPath"
+        mapping[primary["name"]] = ("$.inputs[0].dataPath" if mode == SELECT
+                                    else _picked_path(primary, PRIMARY_GROUP))
     # Every managed parameter Cirro supplies today is the output location, so every
     # role maps to the dataset path. Keyed by role so a second role has a place to
     # land, rather than a conditional whose branches were identical.
@@ -310,7 +473,7 @@ def build_input_map(spec: dict) -> dict:
             )
         mapping[name] = MANAGED_PATHS[role]
     for entry in pickers:
-        mapping[entry["name"]] = f"$.dataset.params.{entry['group']}.{entry['name']}"
+        mapping[entry["name"]] = _picked_path(entry, entry["group"])
     for entry in spec.get("parameters") or []:
         if entry["name"] in managed or entry.get("hidden"):
             continue

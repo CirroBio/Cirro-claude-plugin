@@ -15,6 +15,18 @@ something like *"Turn github.com/nf-core/fetchngs into a Cirro pipeline."*
    the mapping from that form to the workflow's parameters, and the compute settings,
    then registers the pipeline.
 
+## The form your colleagues fill in
+
+A new pipeline's form lets whoever runs it pick files and folders from anywhere in the
+project, and the run's input datasets are the ones those picks come from. A workflow that
+reads a samplesheet gets a table in the form instead, one row per sample with a file
+picker in each file column, and Cirro writes the samplesheet the workflow expects. Nobody
+has to format one by hand, and no preprocess script has to build it at launch.
+
+A pipeline configured before this keeps the form it has, including when Claude updates
+its configuration. Ask if you want one moved to the new form; it changes how everyone
+runs that pipeline.
+
 ## Where the configuration lives
 
 You choose: uploaded into Cirro, kept in the workflow's own repository, or kept in a

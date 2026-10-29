@@ -44,7 +44,8 @@ Even among those seven, some changes still ask for your approval under a grant, 
 Claude tells you why:
 
 - one plan that edits more than 50 datasets, inserts or updates more than 50 sheet
-  rows, or launches an analysis on more than 50 input datasets
+  rows, or launches an analysis on more than 50 input datasets or with a samplesheet of
+  more than 50 rows
 - changing a dataset's data type, removing tags, or taking datasets out of a folder,
   which includes moving them from one folder to another
 - deleting a sample's metadata keys or blanking their values

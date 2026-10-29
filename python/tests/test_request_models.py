@@ -6,11 +6,29 @@ four of name/description/process_id/tags, `ProjectInput` needs a budget and cont
 `ShareInput` needs classification_ids and conditions. A TypeError there only surfaces
 on a live call, so exercise each apply function against a recording double instead.
 """
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from cirro_agent.worker import dataset_ops, mutations, project_ops, share_ops
+
+
+def stub_launch(monkeypatch) -> MagicMock:
+    """The launch route, recording what it is sent. A launch is posted through the
+    generated route rather than through the reader's SDK client, so the recording
+    double that stands in for every other call does not see it."""
+    from cirro_api_client.v1.api.execution import run_analysis
+    launched = MagicMock(return_value=SimpleNamespace(
+        parsed=SimpleNamespace(id="ds_new", message="submitted")))
+    monkeypatch.setattr(run_analysis, "sync_detailed", launched)
+    return launched
+
+
+@pytest.fixture(autouse=True)
+def launched(monkeypatch):
+    return stub_launch(monkeypatch)
+
 
 # op -> args a planner would realistically produce (resolved, IDs only).
 APPLY_CASES = {
@@ -38,7 +56,10 @@ APPLY_CASES = {
         # asked otherwise, so a resolved launch normally carries one.
         "description": "", "notification_emails": ["sminot@cirro.test"],
         "compute_environment_id": None, "resume_dataset_id": None,
-        "environment_type": None, "source_sample_ids": []},
+        "environment_type": None, "source_sample_ids": [],
+        "structured_inputs": {"samplesheet": {"file_format": "CSV", "rows": [
+            {"sample": "S1", "fastq_1": "cirro::proj_a:dataset:ds_1/S1_R1.fastq.gz",
+             "fastq_2": None}]}}},
     # Shares apply_run_analysis, so its request construction was only ever covered
     # transitively -- and the chain guard that checks a declared output is really
     # returned skips any op absent from here, so resume_analysis' `created_dataset_id`
@@ -111,6 +132,7 @@ APPLY_CASES = {
                                  "folder": ".cirro"},
                     "parent_process_ids": [], "child_process_ids": [],
                     "uses_sample_sheet": False, "allow_multiple_sources": True,
+                    "requires_internet": True,
                     # A HealthOmics-capable pipeline, because that is the declaration
                     # an unrelated edit must not strip.
                     "execution_modes": ["STANDARD", "HEALTHOMICS"]}},
@@ -127,14 +149,14 @@ def _reader() -> MagicMock:
 
 
 @pytest.mark.parametrize("op", sorted(APPLY_CASES))
-def test_apply_builds_a_valid_request(op):
+def test_apply_builds_a_valid_request(op, launched):
     """A required-field omission raises TypeError inside the model constructor; a field
     of the wrong type -- a plain string where an enum belongs -- raises only when the
     model is serialized for the wire, which is how import_public's download_method
     reached a live tenant as `'str' object has no attribute 'value'`."""
     reader = _reader()
     mutations.OPS[op].apply(reader, dict(APPLY_CASES[op]))
-    for _, args, kwargs in reader.mock_calls:
+    for _, args, kwargs in reader.mock_calls + launched.mock_calls:
         for value in (*args, *kwargs.values()):
             if hasattr(value, "to_dict"):
                 value.to_dict()
@@ -207,40 +229,52 @@ def test_import_public_sends_the_download_method_as_its_enum(method):
     assert request.to_dict()["downloadMethod"] == method
 
 
-def test_run_analysis_sends_the_notification_address():
+def test_run_analysis_sends_the_notification_address(launched):
     """The address the approval disclosed is the one on the wire.
 
     `notificationEmails` is a required field of RunAnalysisRequest, and the plugin
     always sent [] -- so no launch made through it ever notified anyone, which is the
     divergence from the web UI this default fixes.
     """
-    reader = _reader()
-    mutations.OPS["run_analysis"].apply(reader, dict(APPLY_CASES["run_analysis"]))
-    request = reader.client.execution.run_analysis.call_args.kwargs["request"]
+    mutations.OPS["run_analysis"].apply(_reader(), dict(APPLY_CASES["run_analysis"]))
+    request = launched.call_args.kwargs["body"]
     assert request.notification_emails == ["sminot@cirro.test"]
     assert request.to_dict()["notificationEmails"] == ["sminot@cirro.test"]
 
 
-def test_run_analysis_puts_the_environment_type_on_the_wire():
-    """`environmentType` is in the API spec and the pinned cirro-api-client does not
-    model it on this request, so it travels as an extra property that `to_dict` merges.
-    Asserting the serialized body, not the attribute, is the point: an attribute the
+def test_run_analysis_puts_the_environment_type_on_the_wire(launched):
+    """Asserting the serialized body, not the attribute, is the point: an attribute the
     model drops on the floor is exactly the silent redirect this feature exists to
     prevent."""
-    reader = _reader()
     args = dict(APPLY_CASES["run_analysis"], environment_type="AWS_OMICS")
-    mutations.OPS["run_analysis"].apply(reader, args)
-    request = reader.client.execution.run_analysis.call_args.kwargs["request"]
+    mutations.OPS["run_analysis"].apply(_reader(), args)
+    request = launched.call_args.kwargs["body"]
     assert request.to_dict()["environmentType"] == "AWS_OMICS"
 
 
-def test_run_analysis_omits_the_environment_type_for_batch():
+def test_run_analysis_omits_the_environment_type_for_batch(launched):
     """Batch is an absent field, not AWS_BATCH: that is what the portal sends, and an
     explicit value interacts differently with the compute-environment conflict check."""
-    reader = _reader()
-    mutations.OPS["run_analysis"].apply(reader, dict(APPLY_CASES["run_analysis"]))
-    request = reader.client.execution.run_analysis.call_args.kwargs["request"]
+    mutations.OPS["run_analysis"].apply(_reader(), dict(APPLY_CASES["run_analysis"]))
+    request = launched.call_args.kwargs["body"]
     assert "environmentType" not in request.to_dict()
+
+
+def test_run_analysis_sends_each_samplesheet_by_name_with_its_format(launched):
+    """The rows go up as the approval showed them, key order included: Cirro writes a
+    CSV's header in the order its keys first appear."""
+    mutations.OPS["run_analysis"].apply(_reader(), dict(APPLY_CASES["run_analysis"]))
+    body = launched.call_args.kwargs["body"].to_dict()
+    sheet = body["structuredInputs"]["samplesheet"]
+    assert sheet["fileFormat"] == "CSV" and sheet["importSourceUris"] == []
+    assert sheet["data"] == [{"sample": "S1", "fastq_1":
+                              "cirro::proj_a:dataset:ds_1/S1_R1.fastq.gz", "fastq_2": None}]
+    assert list(sheet["data"][0]) == ["sample", "fastq_1", "fastq_2"]
+
+
+def test_a_launch_without_a_samplesheet_sends_none(launched):
+    mutations.OPS["run_analysis"].apply(_reader(), dict(APPLY_CASES["resume_analysis"]))
+    assert "structuredInputs" not in launched.call_args.kwargs["body"].to_dict()
 
 
 def test_create_project_sends_the_budget():
@@ -336,6 +370,15 @@ def test_update_process_resolves_every_field_from_the_current_record():
     assert str(request.config_source) == "WITH_PROCESS"
     assert request.to_dict()["executionModes"] == ["STANDARD", "HEALTHOMICS"], \
         "editing the version must not strip the HealthOmics declaration"
+    assert request.to_dict()["requiresInternet"] is True, \
+        "the server reads a missing flag as false, so an edit would turn it off"
+
+
+def test_a_create_leaves_requires_internet_to_the_server():
+    reader = _reader()
+    mutations.OPS["create_process"].apply(reader, dict(APPLY_CASES["create_process"]))
+    request = reader.client.processes.create_custom_process.call_args.kwargs["process"]
+    assert "requiresInternet" not in request.to_dict()
 
 
 def test_execution_modes_reach_the_wire_and_are_omitted_when_unnamed():

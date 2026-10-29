@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from . import errors, session
+from . import errors, formcheck, session
 
 NEXTFLOW = "NEXTFLOW"
 CROMWELL = "CROMWELL"
@@ -39,8 +39,12 @@ KNOWN_PARAM_KEYS = {
     "overrides", "errorMessage", "enumNames", "items", "uniqueItems",
 }
 
-# JSON-Schema `format` values that mean "this is a path, not a scalar".
-PATH_FORMATS = {"path", "file-path", "directory-path", "file", "directory"}
+# JSON-Schema `format` values that mean "this is a path, not a scalar": the ones Cirro's
+# form reads, plus two spellings older nf-core schemas use that it does not.
+PATH_FORMATS = set(formcheck.PATH_FORMATS) | {"file", "directory"}
+
+# Samplesheet column keys carried through to the spec, as the schema spells them.
+COLUMN_KEYS = ("title", "format", "pattern", "enum", "errorMessage")
 
 # Names that conventionally denote Cirro's managed output directory.
 OUTPUT_DIR_NAMES = {"outdir", "out_dir", "output_dir", "outputdir", "publish_dir",
@@ -259,6 +263,9 @@ def _param_entry(name: str, spec: dict, group: str, required: bool) -> dict:
         "is_path": (spec.get("format") in PATH_FORMATS),
         "is_infrastructure": name in INFRA_NAMES,
     }
+    # nf-schema's pointer to the samplesheet schema a path parameter reads.
+    if spec.get("schema"):
+        entry["schema"] = spec["schema"]
     if unknown:
         entry["unknown_keys"] = unknown
     return entry
@@ -356,10 +363,18 @@ def _samplesheet_columns(root: Path, flags: list) -> list:
         return []
     items = doc.get("items") or {}
     required = set(items.get("required") or [])
-    return [{"name": name, "required": name in required,
-             "description": (spec or {}).get("description"),
-             "type": (spec or {}).get("type")}
-            for name, spec in (items.get("properties") or {}).items()]
+    columns = []
+    for name, spec in (items.get("properties") or {}).items():
+        spec = spec or {}
+        column = {"name": name, "required": name in required,
+                  "description": spec.get("description"), "type": spec.get("type")}
+        column.update({key: spec[key] for key in COLUMN_KEYS if key in spec})
+        # A structured input's cell holds one value, so such a column cannot be built
+        # in the run form as it stands.
+        if spec.get("type") in ("object", "array") or "items" in spec:
+            column["unsupported"] = "holds more than one value"
+        columns.append(column)
+    return columns
 
 
 def _nextflow_outputs(root: Path, flags: list) -> list:
@@ -447,6 +462,7 @@ def _parse_wdl(root: Path) -> dict:
 def candidates(params: list) -> dict:
     """Suggest classifications, each with its reason. Never decide."""
     primary, managed, pickers, samplesheets, infra = [], [], [], [], []
+    structured = []
     for entry in params:
         name, low = entry["name"], entry["name"].lower()
         if entry["is_infrastructure"]:
@@ -462,7 +478,15 @@ def candidates(params: list) -> dict:
             continue
         if not entry["is_path"]:
             continue
-        if "sheet" in low:
+        if entry.get("schema"):
+            structured.append({
+                "name": name, "schema": entry["schema"],
+                "why": (f"reads a samplesheet whose columns {entry['schema']} declares, so "
+                        "in browse mode the run form can build it as a structured input"
+                        + (" -- and it is required, so it is likely the primary input"
+                           if entry["declared_required"] else "")),
+            })
+        elif "sheet" in low:
             samplesheets.append({"name": name, "why": "the name denotes a sample sheet"})
         elif low in PRIMARY_INPUT_NAMES and entry["declared_required"]:
             primary.append({
@@ -479,4 +503,4 @@ def candidates(params: list) -> dict:
             })
     return {"primary_data_input": primary, "managed_output_dir": managed,
             "file_pickers": pickers, "samplesheet": samplesheets,
-            "infrastructure": infra}
+            "structured_input": structured, "infrastructure": infra}

@@ -64,6 +64,24 @@ string.
 `command` string means nothing without the description saying where the inputs are
 mounted and where output has to be written; the spec is the only place that is stated.
 
+**A parameter with a `format` picks a path** — `file-path` a file, `directory-path` a
+folder, `path` either. Send it as `{"dataset": "<id>", "path": "<path in the dataset's
+data folder>"}`; an empty path is the dataset's whole data folder. The plan turns that
+into the Cirro reference the run is sent (`cirro::<project>:dataset:<id>/<path>`), and
+checks it against what the picker accepts. A picker that allows several takes a list of
+them.
+
+**Each of `process-params`' `structured_inputs` is a samplesheet.** Its rows go in
+`structured_inputs`, keyed by its name — never in `params` — one object per row, with
+the columns it lists; a file column takes the same `{"dataset", "path"}` as a picker.
+Cirro writes the file in its format and passes its path to the pipeline. Nothing on
+Cirro's side checks a row against the columns, so the plan does: a row that does not
+fit is refused before anything runs.
+
+**When `input_mode` is `browse`, the run's input datasets are the ones the picks point
+into.** Name none: the plan reads them off the parameters and the samplesheet and says
+where each came from. In `select` mode, name them in `source_dataset_ids`.
+
 **A parameter that wants a dataset's location, not its ID, needs the S3 root.** It is a
 detail-tier field, so ask for it:
 
@@ -103,8 +121,10 @@ plan(op="run_analysis", args={
   "project_id": "proj_...",
   "process": "proc_...",
   "name": "RNAseq batch 32",
-  "source_dataset_ids": ["ds_..."],
+  "source_dataset_ids": ["ds_..."],                   # select mode only
   "params": {...},
+  "structured_inputs": {"samplesheet": [              # when process-params lists one
+      {"sample": "S1", "fastq_1": {"dataset": "ds_...", "path": "S1_R1.fastq.gz"}}]},
   "folder": "Analyses/RNAseq",                        # optional Cirro folder
   "notification_emails": ["someone@example.org"]      # optional; see below
 })
@@ -195,7 +215,9 @@ plan(op="chain", args={"steps": [
 
 The run's input is `<dataset_id of step 1: upload>` — resolved by the server from the
 upload's actual result, never supplied by you. One prompt instead of two, and the
-approval text still names every concrete value.
+approval text still names every concrete value. For a `browse`-mode pipeline the
+reference goes where the pick does — `{"dataset": {"from_step": 0, "field":
+"dataset_id"}, "path": ""}` in the parameter, or in a samplesheet's file cell.
 
 ## Resuming a failed run
 

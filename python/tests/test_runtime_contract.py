@@ -101,6 +101,45 @@ def test_asset_slots_cover_the_files_we_generate():
     assert {"form", "input", "output", "compute", "preprocess", "documentation"} <= slots
 
 
+def _imported_routes() -> set:
+    import ast
+    found = set()
+    for path in (ROOT / "python" / "src").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+                    "cirro_api_client.v1.api."):
+                found |= {f"{node.module}.{alias.name}" for alias in node.names}
+    return found
+
+
+@pytest.mark.parametrize("route", sorted(_imported_routes()))
+def test_every_generated_route_the_plugin_imports_exists(route):
+    """Routes are imported inside the functions that use them, so a route the client
+    renames fails only when that function runs. 1.8.0 renamed `query_namespace_data` to
+    `query_data`, and the view preview broke with nothing else noticing."""
+    module = importlib.import_module(route)
+    assert hasattr(module, "sync_detailed"), route
+
+
+def test_a_launch_can_carry_a_structured_input():
+    """A samplesheet built in the run form travels as `structuredInputs` on the launch,
+    keyed by its name in the process form, with its rows and file format."""
+    from cirro_api_client.v1.models import (FileFormat, RunAnalysisRequest,
+                                            RunAnalysisRequestParams,
+                                            RunAnalysisRequestStructuredFileInputs,
+                                            StructuredInput)
+    assert {member.value for member in FileFormat} >= {"CSV", "TSV", "JSON"}
+    inputs = RunAnalysisRequestStructuredFileInputs()
+    inputs.additional_properties["samplesheet"] = StructuredInput.from_dict(
+        {"data": [{"sample": "a"}], "fileFormat": "CSV", "importSourceUris": []})
+    request = RunAnalysisRequest(name="n", process_id="p", source_dataset_ids=[],
+                                 params=RunAnalysisRequestParams.from_dict({}),
+                                 structured_inputs=inputs)
+    assert request.to_dict()["structuredInputs"] == {
+        "samplesheet": {"data": [{"sample": "a"}], "fileFormat": "CSV",
+                        "importSourceUris": []}}
+
+
 def test_no_root_mcp_json_shadows_the_plugin_declaration():
     """A .mcp.json at the repo root is read as a PROJECT config by anyone running
     Claude Code inside this repo, and ${CLAUDE_PLUGIN_ROOT} is undefined there -- the

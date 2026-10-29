@@ -95,7 +95,7 @@ def _process_payload(pid, name, executor, category, pipeline_type, description="
         executor=Executor(executor), child_process_ids=list(children),
         parent_process_ids=list(parents),
         linked_project_ids=[], is_tenant_wide=True, allow_multiple_sources=True,
-        uses_sample_sheet=True, is_archived=False, tags=[],
+        uses_sample_sheet=True, requires_internet=False, is_archived=False, tags=[],
         category=category, pipeline_type=pipeline_type,
         execution_modes=[ExecutionMode(m) for m in (modes or ("STANDARD",))],
     ).to_dict()

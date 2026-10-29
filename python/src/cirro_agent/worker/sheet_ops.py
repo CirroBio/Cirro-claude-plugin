@@ -396,9 +396,9 @@ CREATE_ARGS = PROJECT_ARGS + ("name", "description", "table_name", "namespace", 
 
 
 def _preview_view(reader, project_id: str, sql: str, op: str) -> dict:
-    from cirro_api_client.v1.api.sheets import query_namespace_data
+    from cirro_api_client.v1.api.sheets import query_data
     from cirro_api_client.v1.models import SheetQueryRequest
-    return reads.send(reader, query_namespace_data, what="Running the view's SQL failed.",
+    return reads.send(reader, query_data, what="Running the view's SQL failed.",
                       cost="sheets.raw_query", project_id=project_id,
                       body=SheetQueryRequest(query=sql, limit=5, page=1),
                       refusals=_refusals("The view's SQL failed", "view_sql", op)) or {}
@@ -544,8 +544,7 @@ def plan_update_sheet(reader: reads.Reader, args: dict) -> Draft:
                             else detail.get("description") or ""),
             "namespaceName": detail["namespaceName"],
             "tableName": args.get("table_name") or detail["tableName"],
-            "sheetType": detail["sheetType"], "tags": detail.get("tags") or [],
-            "auditReadAccess": bool(detail.get("auditReadAccess"))}
+            "sheetType": detail["sheetType"], "tags": detail.get("tags") or []}
     renamed = [f"  {label:<12} {detail.get(key) or ''!r} -> {body[key]!r}"
                for key, label in (("name", "Name"), ("description", "Description"),
                                   ("tableName", "Table"))
