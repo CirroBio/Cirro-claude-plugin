@@ -120,10 +120,31 @@ In every pattern the generated files end up somewhere the user can read later. S
 where, in the message where you report the result — the point of a configuration is
 that someone can go back and look at it.
 
+Every registration names the **projects** the pipeline is enabled in. A pipeline is
+listed, and can be launched, only in those projects, so one enabled in none is
+invisible to everyone. Ask which projects if the user has not said; the project they
+mean to test in is the usual answer. The `Enabled in` line of the registration plan
+names them. Editing the pipeline later with `update_process` keeps the projects it is
+enabled in and cannot change them. Changing who can see and run a pipeline is its own
+operation:
+
+```
+plan(op="set_process_access", args={"process_id": "...",
+                                    "add_projects": ["..."], "remove_projects": ["..."]})
+plan(op="set_process_access", args={"process_id": "...", "tenant_wide": true})
+```
+
+It always gets its own approval and never runs inside a chain. Disabling a project
+cuts its members off from launching the pipeline, so name those projects when you show
+the plan. `tenant_wide` makes the pipeline available to every member of the tenant;
+only a tenant administrator may turn it on or off, and the plan is refused for anyone
+else.
+
 **Pattern 1 — Cirro storage**
 
 ```
-plan(op="create_process", args={"design_spec": "...", "config_source": "STORAGE"})
+plan(op="create_process", args={"design_spec": "...", "config_source": "STORAGE",
+                                "projects": ["..."]})
 plan(op="upload_process_config", args={"process_id": "...", "design_spec": "..."})
 ```
 
@@ -141,7 +162,8 @@ session directory, so it can be committed alongside the spec if the user wants t
 **Patterns 2 and 3 — a git repository**
 
 ```
-plan(op="create_process", args={"design_spec": "...", "config_source": "WITH_PROCESS"})
+plan(op="create_process", args={"design_spec": "...", "config_source": "WITH_PROCESS",
+                                "projects": ["..."]})
 plan(op="write_process_config", args={"design_spec": "...", "destination": "<repo>/.cirro"})
 plan(op="commit_process_config", args={"destination": "<repo>/.cirro"})
 ```
@@ -174,6 +196,7 @@ registers the pipeline the way Cirro registers everything by default:
 
 ```
 plan(op="create_process", args={"design_spec": "...", "config_source": "STORAGE",
+                                "projects": ["..."],
                                 "execution_modes": ["STANDARD", "HEALTHOMICS"]})
 plan(op="update_process", args={"process_id": "...",
                                 "execution_modes": ["STANDARD", "HEALTHOMICS"]})
@@ -191,7 +214,8 @@ for it once. `plan(op="chain", ...)` approves the sequence as one action:
 ```
 plan(op="chain", args={"steps": [
   {"label": "register",  "op": "create_process",
-   "args": {"design_spec": "design-spec.md", "config_source": "STORAGE"}},
+   "args": {"design_spec": "design-spec.md", "config_source": "STORAGE",
+            "projects": ["proj_..."]}},
   {"label": "configure", "op": "upload_process_config",
    "args": {"process_id": {"from_step": 0, "field": "created_process_id"},
             "design_spec": "design-spec.md"}},

@@ -518,6 +518,7 @@ def test_with_process_requires_the_config_repo_to_be_the_code_repo(tmp_path):
     reader.base_url = "app.cirro.test"
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path), "config_source": "WITH_PROCESS",
             "config_repository": "SomeoneElse/other-repo"})
     assert caught.value.code == "INVALID_QUERY"
@@ -530,6 +531,7 @@ def test_external_requires_a_config_repository(tmp_path):
     reader.processes.return_value = []
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path), "config_source": "EXTERNAL"})
     assert "config_repository" in caught.value.message
 
@@ -539,6 +541,7 @@ def test_with_process_defaults_to_the_workflow_repo_and_dot_cirro(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path), "config_source": "WITH_PROCESS"})
     settings = draft.args["custom_settings"]
     assert settings == {"repository": "epi2me-labs/wf-demo", "branch": "main",
@@ -556,6 +559,7 @@ def test_config_settings_carry_a_repository_type(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path), "config_source": "WITH_PROCESS",
         "config_folder": "cirro"})
     assert draft.args["custom_settings"]["repository_type"] == "GITHUB_PUBLIC"
@@ -568,6 +572,7 @@ def test_with_process_config_shares_the_code_repository_type(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path), "config_source": "WITH_PROCESS",
         "repository_type": "GITHUB_PRIVATE"})
     assert draft.args["repository_type"] == "GITHUB_PRIVATE"
@@ -580,6 +585,7 @@ def test_external_config_repository_type_can_differ_from_the_code(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path), "config_source": "EXTERNAL",
         "config_repository": "OrgName/workflow-configs",
         "repository_type": "GITHUB_PRIVATE",
@@ -593,6 +599,7 @@ def test_an_unacceptable_process_name_is_refused(tmp_path):
     reader.processes.return_value = []
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
             "name": "Pipeline [beta]"})
     assert caught.value.code == "INVALID_QUERY"
@@ -604,6 +611,7 @@ def test_registering_over_an_existing_id_is_refused(tmp_path):
     reader.processes.return_value = [{"id": "process-wf-demo-1", "owner": "someone"}]
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path), "config_source": "STORAGE"})
     assert "already exists" in caught.value.message
 
@@ -621,6 +629,7 @@ def test_a_spec_without_a_workflow_version_is_refused(tmp_path):
     reader.base_url = "app.cirro.test"
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path, spec), "config_source": "STORAGE"})
     assert caught.value.code == "INVALID_QUERY"
     assert "version" in caught.value.message
@@ -666,6 +675,7 @@ def test_python_named_groups_in_file_mapping_rules_are_refused(tmp_path):
     reader.processes.return_value = []
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path, spec), "config_source": "STORAGE"})
     assert "(?P<name>" in caught.value.message
     assert caught.value.retry_with[0]["sample_matching_pattern"] == \
@@ -707,7 +717,7 @@ def test_any_op_module_can_be_imported_first(first):
     import sys
     code = (f"from cirro_agent.worker import {first};"
             "from cirro_agent.worker.mutations import OPS;"
-            "assert len(OPS) == 44, len(OPS);"
+            "assert len(OPS) == 45, len(OPS);"
             "assert 'create_process' in OPS and 'run_analysis' in OPS and 'chain' in OPS")
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr[-800:]
@@ -1135,6 +1145,7 @@ def test_create_process_validates_the_authored_assets_it_will_upload(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
         "assets_dir": str(directory)})
     assert draft.args["assets_dir"] == str(directory.resolve())
@@ -1151,7 +1162,8 @@ CREATE_ARGS = {
     "entry_point": "main.nf", "executor_version": None,
     "uses_sample_sheet": False, "allow_multiple_sources": True,
     "config_source": "STORAGE", "custom_settings": None,
-    "file_mapping_rules": [], "design_spec": "spec.md"}
+    "file_mapping_rules": [], "design_spec": "spec.md",
+    "linked_project_ids": ["proj_a"]}
 
 
 def test_a_refused_create_reports_cirro_s_reason_and_that_nothing_was_registered():
@@ -1221,7 +1233,9 @@ def _reader_for(record):
         config_source=record.get("config_source"),
         custom_settings=namespace(record.get("custom_settings")),
         pipeline_code=namespace(record.get("pipeline_code")),
-        file_mapping_rules=[])
+        file_mapping_rules=[],
+        linked_project_ids=record.get("linked_project_ids", []),
+        is_tenant_wide=record.get("is_tenant_wide", False))
     return reader
 
 
@@ -1363,6 +1377,156 @@ def test_allow_multiple_sources_is_read_from_the_detail_payload():
     assert row["allow_multiple_sources"] is False
 
 
+def test_who_can_see_a_process_is_read_from_the_detail_payload():
+    """An update resends these from the record it read, so they have to be on it --
+    and in a shape a plan record can hold, which the rule models are not."""
+    import json
+    from cirro_api_client.v1.models import FileMappingRule
+    rule = {"description": "Reads", "isSample": True, "min": 1, "max": 10,
+            "fileNamePatterns": [{"exampleName": "s1_R1.fastq.gz", "description": "R1",
+                                  "sampleMatchingPattern": "(?<sampleName>.*)_R1"}]}
+    detail = SimpleNamespace(
+        allow_multiple_sources=True, config_source="STORAGE", custom_settings=None,
+        pipeline_code=None, file_mapping_rules=[FileMappingRule.from_dict(rule)],
+        linked_project_ids=["proj_a"], is_tenant_wide=True,
+        maintainers=["maintainer@example.org"], tags=[SimpleNamespace(value="genomics")])
+    row = rows.process_detail(detail, base=_owned())
+    assert row["linked_project_ids"] == ["proj_a"]
+    assert row["is_tenant_wide"] is True
+    assert row["maintainers"] == ["maintainer@example.org"]
+    assert row["tags"] == ["genomics"]
+    assert json.loads(json.dumps(row["file_mapping_rules"])) == [rule]
+
+
+def _projects_reader():
+    reader = MagicMock()
+    reader.processes.return_value = []
+    reader.base_url = "app.cirro.test"
+    known = {"Proj A": "proj_a", "proj_a": "proj_a", "Proj B": "proj_b"}
+    names = {"proj_a": "Proj A", "proj_b": "Proj B"}
+    reader.resolve_project.side_effect = lambda given: {
+        "id": known[given], "name": names[known[given]]}
+    return reader
+
+
+def test_a_registration_without_projects_is_refused(tmp_path):
+    """Registered with no project, a pipeline appears in no project's pipeline list:
+    Cirro grants read access to it through those links alone."""
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops.plan_create_process(_projects_reader(), {
+            "design_spec": _write_spec(tmp_path), "config_source": "STORAGE"})
+    assert caught.value.code == "INVALID_QUERY"
+    assert caught.value.field == "projects"
+
+
+def test_a_registration_names_the_projects_it_is_enabled_in(tmp_path):
+    draft = pipeline_ops.plan_create_process(_projects_reader(), {
+        "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
+        "projects": ["Proj A", "Proj B", "proj_a"]})
+    assert draft.args["linked_project_ids"] == ["proj_a", "proj_b"], \
+        "one project named twice is linked once"
+    assert "Enabled in      Proj A (proj_a), Proj B (proj_b)" in draft.summary
+
+
+# --- who can see and run a pipeline ------------------------------------------
+
+def _access_reader(linked, tenant_wide=False, roles=()):
+    reader = _reader_for(_owned(linked_project_ids=linked, is_tenant_wide=tenant_wide))
+    visible = {"proj_a": "Proj A", "proj_b": "Proj B"}
+    reader.projects.return_value = [{"id": k, "name": v} for k, v in visible.items()]
+    by_name = {v: k for k, v in visible.items()}
+    reader.resolve_project.side_effect = lambda given: {
+        "id": by_name.get(given, given), "name": visible[by_name.get(given, given)]}
+    reader.client.users.get.return_value = SimpleNamespace(global_roles=list(roles))
+    return reader
+
+
+def _plan_access(reader, **args):
+    from cirro_agent.worker import mutations
+    return mutations.OPS["set_process_access"].planned(
+        reader, {"process_id": "org-demo", **args})
+
+
+def test_access_changes_are_their_own_operation_and_never_granted():
+    """A rename and a change to who can run a pipeline are different decisions; the
+    second must not ride along in a diff of the first, a chain, or a grant."""
+    from cirro_agent.worker import mutations
+    op = mutations.OPS["set_process_access"]
+    assert op.risk == mutations.RISK_DESTRUCTIVE and not op.grantable
+    assert not {"add_projects", "remove_projects", "tenant_wide"} & set(
+        mutations.OPS["update_process"].accepts)
+
+
+def test_enabling_a_pipeline_in_a_project_is_an_ordinary_write():
+    from cirro_agent.worker import mutations
+    draft = _plan_access(_access_reader(["proj_a"]), add_projects="Proj B")
+    assert draft.args["changes"] == {"linked_project_ids": ["proj_a", "proj_b"]}
+    assert draft.risk == mutations.RISK_WRITE
+    assert "Enable in    Proj B (proj_b)" in draft.summary
+
+
+def test_disabling_a_pipeline_in_a_project_is_destructive():
+    draft = _plan_access(_access_reader(["proj_a", "proj_b"]), remove_projects="Proj A")
+    assert draft.args["changes"] == {"linked_project_ids": ["proj_b"]}
+    assert draft.risk is None, "the op's own destructive risk applies"
+    assert any("can no longer launch it" in w for w in draft.warnings)
+
+
+def test_a_project_the_caller_cannot_see_is_removable_by_id():
+    draft = _plan_access(_access_reader(["proj_a", "proj_hidden"]),
+                         remove_projects=["proj_hidden"])
+    assert draft.args["changes"] == {"linked_project_ids": ["proj_a"]}
+    assert "(a project you cannot see) (proj_hidden)" in draft.summary
+
+
+def test_disabling_the_last_project_warns_that_nobody_will_see_it():
+    draft = _plan_access(_access_reader(["proj_a"]), remove_projects="Proj A")
+    assert any("enabled in no project" in w for w in draft.warnings)
+
+
+def test_an_access_change_that_changes_nothing_is_refused():
+    with pytest.raises(errors.AgentError) as caught:
+        _plan_access(_access_reader(["proj_a"]), add_projects="Proj A")
+    assert caught.value.code == "INVALID_QUERY"
+
+
+def test_only_a_tenant_administrator_may_make_a_pipeline_tenant_wide():
+    with pytest.raises(errors.AgentError) as caught:
+        _plan_access(_access_reader(["proj_a"], roles=["pipeline-developers"]),
+                     tenant_wide=True)
+    assert caught.value.code == "FORBIDDEN"
+
+    from cirro_agent.worker import mutations
+    draft = _plan_access(_access_reader(["proj_a"], roles=["sys-admins"]),
+                         tenant_wide=True)
+    assert draft.args["changes"]["is_tenant_wide"] is True
+    assert draft.risk == mutations.RISK_WRITE
+    assert any("tenant-administrator role" in w for w in draft.warnings)
+
+
+def test_taking_tenant_wide_back_is_destructive_and_also_for_administrators():
+    reader = _access_reader(["proj_a"], tenant_wide=True, roles=["administrators"])
+    draft = _plan_access(reader, tenant_wide=False)
+    assert draft.args["changes"] == {"linked_project_ids": ["proj_a"],
+                                     "is_tenant_wide": False}
+    assert draft.risk is None
+    with pytest.raises(errors.AgentError) as caught:
+        _plan_access(_access_reader(["proj_a"], tenant_wide=True), tenant_wide=False)
+    assert caught.value.code == "FORBIDDEN"
+
+
+def test_an_update_cannot_change_who_sees_the_pipeline():
+    """update_process resends the links it read; only set_process_access plans new
+    ones, so a rename can never move them."""
+    from cirro_agent.worker import mutations
+    draft = mutations.OPS["update_process"].planned(
+        _reader_for(_owned(linked_project_ids=["proj_a"], is_tenant_wide=True)),
+        {"process_id": "org-demo", "name": "Demo 2"})
+    assert "linked_project_ids" not in draft.args["changes"]
+    assert draft.args["current"]["linked_project_ids"] == ["proj_a"]
+    assert draft.args["current"]["is_tenant_wide"] is True
+
+
 # --- execution modes ---------------------------------------------------------
 #
 # The vocabulary a process declares, not the one a run request speaks. A pipeline that
@@ -1374,6 +1538,7 @@ def test_a_registration_declares_the_modes_it_was_given(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
         "execution_modes": ["HEALTHOMICS", "standard"]})
     # Canonical order and case, however the caller spelled it: apply re-plans and
@@ -1388,6 +1553,7 @@ def test_a_registration_that_names_no_mode_declares_nothing(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path), "config_source": "STORAGE"})
     assert draft.args["execution_modes"] is None
     assert "Cirro default (STANDARD -- AWS Batch)" in draft.summary
@@ -1401,6 +1567,7 @@ def test_the_design_spec_can_declare_the_modes(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path, spec), "config_source": "STORAGE"})
     assert draft.args["execution_modes"] == ["HEALTHOMICS"]
 
@@ -1414,6 +1581,7 @@ def test_an_environment_type_is_refused_where_a_mode_belongs(tmp_path):
     reader.base_url = "app.cirro.test"
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
             "execution_modes": ["AWS_OMICS"]})
     assert caught.value.code == "INVALID_QUERY"
@@ -1428,6 +1596,7 @@ def test_an_empty_mode_list_is_refused_rather_than_sent(tmp_path):
     reader.base_url = "app.cirro.test"
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
             "execution_modes": []})
     assert caught.value.code == "INVALID_QUERY"

@@ -114,7 +114,8 @@ APPLY_CASES = {
         "custom_settings": None, "repository_path": "org/wf", "version": "v1.0.0",
         "entry_point": "main.nf", "executor_version": None,
         "repository_type": "GITHUB_PUBLIC", "parent_process_ids": [],
-        "child_process_ids": [], "uses_sample_sheet": False,
+        "child_process_ids": [], "linked_project_ids": ["proj_a"],
+        "projects": [{"id": "proj_a", "name": "A"}], "uses_sample_sheet": False,
         "allow_multiple_sources": True, "file_mapping_rules": [],
         # What the planner resolves to when nobody names a mode: say nothing and let
         # Cirro keep its own default.
@@ -135,10 +136,26 @@ APPLY_CASES = {
                     "requires_internet": True,
                     # A HealthOmics-capable pipeline, because that is the declaration
                     # an unrelated edit must not strip.
-                    "execution_modes": ["STANDARD", "HEALTHOMICS"]}},
+                    "execution_modes": ["STANDARD", "HEALTHOMICS"],
+                    # Everything the server stores as sent, so everything an unrelated
+                    # edit must carry over rather than blank.
+                    "linked_project_ids": ["proj_a", "proj_b"],
+                    "is_tenant_wide": True,
+                    "maintainers": ["maintainer@example.org"],
+                    "tags": ["genomics"],
+                    "file_requirements_message": "Paired FASTQ files",
+                    "file_mapping_rules": [{
+                        "description": "Reads", "isSample": True, "min": 1,
+                        "max": 5000, "fileNamePatterns": [{
+                            "exampleName": "s1_R1.fastq.gz", "description": "R1",
+                            "sampleMatchingPattern": "(?<sampleName>.*)_R1"}]}]}},
     "sync_process_config": {"process_id": "process-test-1"},
     "archive_process": {"process_id": "process-test-1", "name": "Test Pipeline"},
 }
+# The same whole-record update as update_process, with the access fields changed.
+APPLY_CASES["set_process_access"] = {
+    **APPLY_CASES["update_process"],
+    "changes": {"linked_project_ids": ["proj_b", "proj_c"], "is_tenant_wide": False}}
 
 
 def _reader() -> MagicMock:
@@ -374,6 +391,46 @@ def test_update_process_resolves_every_field_from_the_current_record():
         "the server reads a missing flag as false, so an edit would turn it off"
 
 
+def test_an_update_keeps_who_can_see_the_pipeline():
+    """The server rebuilds a process's read access from these on every write, so an
+    update that sent [] unlinked every project, and one silent about tenant-wide
+    turned a shared pipeline private."""
+    reader = _reader()
+    mutations.OPS["update_process"].apply(reader, dict(APPLY_CASES["update_process"]))
+    sent = reader.client.processes.update_custom_process.call_args.kwargs[
+        "process"].to_dict()
+    assert sent["linkedProjectIds"] == ["proj_a", "proj_b"]
+    assert sent["isTenantWide"] is True
+    assert sent["maintainers"] == ["maintainer@example.org"]
+    assert [tag["value"] for tag in sent["tags"]] == ["genomics"]
+    assert sent["fileRequirementsMessage"] == "Paired FASTQ files"
+    assert sent["fileMappingRules"] == \
+        APPLY_CASES["update_process"]["current"]["file_mapping_rules"]
+
+
+def test_an_update_leaves_out_nothing_the_server_would_blank():
+    """Every field the request model carries is stored as sent, so a field a future
+    client adds is blanked by every update until this path learns to carry it.
+    `dataType` is the one exception: the server keeps its own when it is null."""
+    from cirro_api_client.v1.models import CustomProcessInput
+    from cirro_api_client.v1.types import Unset
+    reader = _reader()
+    mutations.OPS["update_process"].apply(reader, dict(APPLY_CASES["update_process"]))
+    request = reader.client.processes.update_custom_process.call_args.kwargs["process"]
+    left_out = [field.name for field in CustomProcessInput.__attrs_attrs__
+                if field.name not in ("additional_properties", "data_type")
+                and isinstance(getattr(request, field.name), Unset)]
+    assert left_out == []
+
+
+def test_a_create_is_enabled_in_the_projects_it_was_planned_with():
+    reader = _reader()
+    mutations.OPS["create_process"].apply(reader, dict(APPLY_CASES["create_process"]))
+    request = reader.client.processes.create_custom_process.call_args.kwargs["process"]
+    assert request.to_dict()["linkedProjectIds"] == ["proj_a"]
+    assert request.to_dict()["isTenantWide"] is False
+
+
 def test_a_create_leaves_requires_internet_to_the_server():
     reader = _reader()
     mutations.OPS["create_process"].apply(reader, dict(APPLY_CASES["create_process"]))
@@ -429,3 +486,16 @@ def test_a_share_condition_on_an_unknown_field_is_refused_before_the_approval():
             "name": "s", "project_id": "proj_a",
             "conditions": [{"field": "owner", "value": "me"}]})
     assert refused.value.field == "field"
+
+
+def test_an_access_change_sends_the_new_links_and_keeps_everything_else():
+    reader = _reader()
+    mutations.OPS["set_process_access"].apply(reader,
+                                              dict(APPLY_CASES["set_process_access"]))
+    sent = reader.client.processes.update_custom_process.call_args.kwargs[
+        "process"].to_dict()
+    assert sent["linkedProjectIds"] == ["proj_b", "proj_c"]
+    assert sent["isTenantWide"] is False
+    assert sent["name"] == "Test Pipeline"
+    assert sent["executionModes"] == ["STANDARD", "HEALTHOMICS"]
+    assert sent["maintainers"] == ["maintainer@example.org"]

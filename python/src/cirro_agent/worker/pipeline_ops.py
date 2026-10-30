@@ -421,6 +421,7 @@ def _validated_registration(reader: reads.Reader, args: dict, spec: dict,
           "process_id", "name")
     _check_name(name)
     _refuse_if_registered(reader, process_id)
+    projects = _enabled_projects(reader, args.get("projects"))
     version = _workflow_version(args, workflow)
     code_repo = workflow_spec.repository_slug(workflow.get("repository", ""))
     code_repository_type = args.get("repository_type") or DEFAULT_REPOSITORY_TYPE
@@ -431,7 +432,31 @@ def _validated_registration(reader: reads.Reader, args: dict, spec: dict,
         "code_repo": code_repo,
         "repository_type": code_repository_type,
         "settings": _config_settings(args, source, code_repo, code_repository_type),
+        "projects": projects,
     }
+
+
+def _enabled_projects(reader: reads.Reader, given) -> list:
+    """The projects a new process is enabled in, resolved to id and name.
+
+    Required: Cirro grants read access to a custom process through these links alone,
+    so one registered with none appears in no project's pipeline list and cannot be
+    launched by anyone but an administrator.
+    """
+    names = [given] if isinstance(given, str) else list(given or [])
+    if not names:
+        raise errors.InvalidQuery(
+            "create_process requires `projects`.",
+            what=("A pipeline is visible only in the projects it is enabled in. "
+                  "Registered with none, it appears in no project's pipeline list."),
+            field="projects",
+            retry_with=[{"op": "create_process", "args": {"projects": ["<project>"]}}],
+        )
+    resolved = {}
+    for name in names:
+        row = reader.resolve_project(name)
+        resolved[row["id"]] = {"id": row["id"], "name": row["name"]}
+    return list(resolved.values())
 
 
 def _executor(workflow: dict) -> str:
@@ -467,6 +492,8 @@ def _registration_record(args: dict, spec: dict, source: str, checked: dict,
         "execution_modes": _execution_modes(args, spec),
         "parent_process_ids": cirro.get("parent_process_ids") or [],
         "child_process_ids": cirro.get("child_process_ids") or [],
+        "linked_project_ids": [project["id"] for project in checked["projects"]],
+        "projects": checked["projects"],
         "uses_sample_sheet": bool(args.get("uses_sample_sheet")),
         "allow_multiple_sources": bool(args.get("allow_multiple_sources", True)),
         "file_mapping_rules": _file_mapping_rules(spec),
@@ -503,6 +530,8 @@ def _registration_summary(reader: reads.Reader, args: dict, resolved: dict,
         f":{resolved['entry_point']} [{resolved['executor']}]",
         f"  Engine version  {resolved['executor_version'] or 'Cirro default'}",
         f"  Runs on         {runs_on}",
+        "  Enabled in      " + ", ".join(
+            f"{project['name']} ({project['id']})" for project in resolved["projects"]),
         f"  Configuration   {source} — "
         f"{_where_config_lives(source, resolved['custom_settings'])}",
         "",
@@ -552,8 +581,11 @@ def plan_create_process(reader: reads.Reader, args: dict) -> Draft:
 
 def _process_input(*, process_id: str, name: str, description: str, executor: str,
                    category: Optional[str], parent_process_ids: list,
-                   child_process_ids: list,
+                   child_process_ids: list, linked_project_ids: list,
                    uses_sample_sheet: bool, allow_multiple_sources: bool,
+                   is_tenant_wide: bool = False, maintainers: Optional[list] = None,
+                   tags: Optional[list] = None,
+                   file_requirements_message: Optional[str] = None,
                    documentation_url=_UNSPECIFIED, execution_modes=_UNSPECIFIED,
                    requires_internet=_UNSPECIFIED):
     """The whole-record field set every process write has to fill.
@@ -574,14 +606,24 @@ def _process_input(*, process_id: str, name: str, description: str, executor: st
 
     `requires_internet` is optional in the request model but a plain boolean on the
     server, so leaving it out of an update turns it off. Absent is only for a create.
+
+    The server derives the process's read access from `linked_project_ids` and
+    `is_tenant_wide` on every write, and stores `maintainers`, `tags` and
+    `file_requirements_message` as sent, so all five are always sent; an update
+    passes the current record's values.
     """
-    from cirro_api_client.v1.models import CustomProcessInput, ExecutionMode, Executor
+    from cirro_api_client.v1.models import (CustomProcessInput, ExecutionMode, Executor,
+                                            Tag)
     from cirro_api_client.v1.types import UNSET
     request = CustomProcessInput(
         id=process_id, name=name, description=description,
         executor=Executor(executor), category=category,
         parent_process_ids=parent_process_ids, child_process_ids=child_process_ids,
-        linked_project_ids=[],
+        linked_project_ids=list(linked_project_ids),
+        is_tenant_wide=is_tenant_wide,
+        maintainers=list(maintainers or []),
+        tags=[Tag(value=value) for value in tags or []],
+        file_requirements_message=file_requirements_message,
         uses_sample_sheet=uses_sample_sheet,
         allow_multiple_sources=allow_multiple_sources,
         documentation_url=(UNSET if documentation_url is _UNSPECIFIED
@@ -622,6 +664,7 @@ def apply_create_process(reader: reads.Reader, args: dict) -> dict:
         category=args["category"],
         parent_process_ids=args["parent_process_ids"],
         child_process_ids=args["child_process_ids"],
+        linked_project_ids=args["linked_project_ids"],
         uses_sample_sheet=args["uses_sample_sheet"],
         allow_multiple_sources=args["allow_multiple_sources"],
         execution_modes=args.get("execution_modes") or _UNSPECIFIED)
@@ -1139,27 +1182,45 @@ def plan_update_process(reader: reads.Reader, args: dict) -> Draft:
             "launched on AWS HealthOmics. Runs already under way are unaffected.")
 
     resolved = {"process_id": args["process_id"], "changes": changes,
-                "current": {"name": detail.get("name"),
-                            "description": detail.get("description"),
-                            "category": detail.get("category"),
-                            "executor": detail.get("executor"),
-                            "config_source": detail.get("config_source"),
-                            "code": code, "settings": settings,
-                            "parent_process_ids": detail.get("parent_process_ids") or [],
-                            "child_process_ids": detail.get("child_process_ids") or [],
-                            "documentation_url": detail.get("documentation_url"),
-                            "uses_sample_sheet": bool(detail.get("uses_sample_sheet")),
-                            "allow_multiple_sources":
-                                bool(detail.get("allow_multiple_sources")),
-                            "requires_internet": bool(detail.get("requires_internet")),
-                            "execution_modes": declared}}
+                "current": _current_record(detail)}
     return Draft(args=resolved, summary="\n".join(lines), warnings=warnings,
                  invalidates=[_inv("processes")])
 
 
+def _current_record(detail: dict) -> dict:
+    """Every field an update has to resend, read from the record as it stands.
+
+    apply_update_process builds the whole request from this plus the planned changes,
+    so a field missing here is a field the update blanks.
+    """
+    return {"name": detail.get("name"),
+            "description": detail.get("description"),
+            "category": detail.get("category"),
+            "executor": detail.get("executor"),
+            "config_source": detail.get("config_source"),
+            "code": detail.get("pipeline_code") or {},
+            "settings": detail.get("custom_settings") or {},
+            "parent_process_ids": detail.get("parent_process_ids") or [],
+            "child_process_ids": detail.get("child_process_ids") or [],
+            "documentation_url": detail.get("documentation_url"),
+            "uses_sample_sheet": bool(detail.get("uses_sample_sheet")),
+            "allow_multiple_sources": bool(detail.get("allow_multiple_sources")),
+            "requires_internet": bool(detail.get("requires_internet")),
+            # `rows.process` fills this in for every process, a record predating the
+            # field included; repeating STANDARD here keeps apply from posting an
+            # empty array, which the spec's minItems 1 refuses.
+            "execution_modes": detail.get("execution_modes") or [R.STANDARD_MODE],
+            "linked_project_ids": detail.get("linked_project_ids") or [],
+            "is_tenant_wide": bool(detail.get("is_tenant_wide")),
+            "maintainers": detail.get("maintainers") or [],
+            "tags": detail.get("tags") or [],
+            "file_requirements_message": detail.get("file_requirements_message"),
+            "file_mapping_rules": detail.get("file_mapping_rules") or []}
+
+
 def apply_update_process(reader: reads.Reader, args: dict) -> dict:
     from cirro_api_client.v1.models import (ConfigSource, CustomPipelineSettings,
-                                            RepositoryType)
+                                            FileMappingRule, RepositoryType)
     current, changes = args["current"], args["changes"]
     code = current["code"] or {}
     settings = current["settings"] or {}
@@ -1174,6 +1235,13 @@ def apply_update_process(reader: reads.Reader, args: dict) -> dict:
         category=changes.get("category", current["category"]),
         parent_process_ids=current["parent_process_ids"],
         child_process_ids=current["child_process_ids"],
+        # Only set_process_access plans a change to these two; update_process cannot.
+        linked_project_ids=changes.get("linked_project_ids",
+                                       current["linked_project_ids"]),
+        is_tenant_wide=changes.get("is_tenant_wide", current["is_tenant_wide"]),
+        maintainers=current["maintainers"],
+        tags=current["tags"],
+        file_requirements_message=current["file_requirements_message"],
         uses_sample_sheet=changes.get("uses_sample_sheet",
                                       current["uses_sample_sheet"]),
         allow_multiple_sources=changes.get("allow_multiple_sources",
@@ -1192,6 +1260,8 @@ def apply_update_process(reader: reads.Reader, args: dict) -> dict:
         execution_modes=changes.get("execution_modes",
                                     current["execution_modes"]),
         requires_internet=current["requires_internet"])
+    request.file_mapping_rules = [FileMappingRule.from_dict(rule)
+                                  for rule in current["file_mapping_rules"]]
     if current.get("config_source"):
         request.config_source = ConfigSource(current["config_source"])
     if code.get("repository_path"):
@@ -1221,6 +1291,109 @@ def apply_update_process(reader: reads.Reader, args: dict) -> dict:
     reader.client.processes.update_custom_process(process_id=args["process_id"],
                                                   process=request)
     return {"updated_process_id": args["process_id"], "changed": sorted(changes)}
+
+
+# The global roles that carry CREATE_CUSTOM_PIPELINE_TENANT (Cirro-backend GlobalRole):
+# the only ones that may make a process visible to everyone, or take that back.
+TENANT_ADMIN_ROLES = frozenset({"sys-admins", "administrators"})
+
+
+def _names(given) -> list:
+    return [given] if isinstance(given, str) else list(given or [])
+
+
+def _require_tenant_admin(reader: reads.Reader) -> None:
+    detail = reader.client.users.get(reader.username)
+    reader.cost.call("users.get", detail=True)
+    roles = set(R.plain(getattr(detail, "global_roles", None)) or [])
+    if not roles & TENANT_ADMIN_ROLES:
+        raise errors.Forbidden(
+            "Making a pipeline tenant-wide, or taking that back, is for tenant "
+            f"administrators, and {reader.username} is not one.",
+            what="Cirro refuses it without the tenant-administrator role.",
+            user_action="Ask a tenant administrator, or enable the pipeline in named "
+                        "projects with add_projects instead.",
+        )
+
+
+def plan_set_process_access(reader: reads.Reader, args: dict) -> Draft:
+    """Change which projects a pipeline is enabled in, or whether everyone can run it.
+
+    Its own operation, never a field of update_process: a rename and a change to who
+    can run a pipeline are different decisions, and an approval that buries the second
+    in a diff of the first is how access changes go unnoticed. The op is destructive,
+    so it always prompts and never runs inside a chain; a plan that only widens access
+    is shown as an ordinary write.
+    """
+    _need(args, "set_process_access", "process_id")
+    detail = _owned_process(reader, args["process_id"])
+    linked = list(detail.get("linked_project_ids") or [])
+    wide = bool(detail.get("is_tenant_wide"))
+    names = {p["id"]: p["name"] for p in reader.projects()}
+
+    added = []
+    for given in _names(args.get("add_projects")):
+        row = reader.resolve_project(given)
+        names[row["id"]] = row["name"]
+        if row["id"] not in linked and row["id"] not in added:
+            added.append(row["id"])
+    removed = []
+    for given in _names(args.get("remove_projects")):
+        # A linked project the caller cannot see is still removable by its id.
+        project_id = given if given in linked else reader.resolve_project(given)["id"]
+        if project_id in linked and project_id not in removed:
+            removed.append(project_id)
+
+    wanted_wide = args.get("tenant_wide")
+    widen = wanted_wide is True and not wide
+    narrow = wanted_wide is False and wide
+    if widen or narrow:
+        _require_tenant_admin(reader)
+
+    after = [p for p in linked if p not in removed] + added
+    if not (added or removed or widen or narrow):
+        raise errors.InvalidQuery(
+            "Nothing would change.",
+            what="Every project named is already in the state asked for.", given=args,
+            retry_with=[{"op": "set_process_access",
+                         "args": {"process_id": args["process_id"],
+                                  "add_projects": ["<project>"]}}])
+
+    def label(project_id):
+        return f"{names.get(project_id, '(a project you cannot see)')} ({project_id})"
+
+    lines = [f"Change who can see and run the pipeline {detail['name']} "
+             f"({args['process_id']}).", ""]
+    lines += [f"  Enable in    {label(p)}" for p in added]
+    lines += [f"  Disable in   {label(p)}" for p in removed]
+    if widen:
+        lines.append("  Tenant-wide  off -> on: every member of the tenant can see and "
+                     "run it")
+    if narrow:
+        lines.append("  Tenant-wide  on -> off: only the projects it is enabled in "
+                     "keep it")
+    lines += ["", "  Enabled in afterwards"]
+    lines += [f"    {label(p)}" for p in after] or ["    (none)"]
+
+    warnings = []
+    if not after and not ((wide or widen) and not narrow):
+        warnings.append("Afterwards the pipeline is enabled in no project, so it appears "
+                        "in no project's pipeline list.")
+    if removed or narrow:
+        warnings.append("Members of the projects losing it can no longer launch it. Runs "
+                        "already under way, and datasets it produced, are unaffected.")
+    if widen:
+        warnings.append("Once it is tenant-wide, uploading a new configuration revision "
+                        "also takes the tenant-administrator role.")
+
+    changes = {"linked_project_ids": after}
+    if widen or narrow:
+        changes["is_tenant_wide"] = bool(wanted_wide)
+    return Draft(args={"process_id": args["process_id"], "changes": changes,
+                       "current": _current_record(detail)},
+                 summary="\n".join(lines), warnings=warnings,
+                 invalidates=[_inv("processes")],
+                 risk=None if (removed or narrow) else RISK_WRITE)
 
 
 def plan_archive_process(reader: reads.Reader, args: dict) -> Draft:
@@ -1413,7 +1586,7 @@ PIPELINE_OPS = [
                 "assets_dir", "preprocess_path", "uses_sample_sheet",
                 "allow_multiple_sources", "config_source", "config_repository",
                 "config_repository_type", "config_branch", "config_folder",
-                "repository_type", "execution_modes")),
+                "repository_type", "execution_modes", "projects")),
     Op("update_process", RISK_WRITE, plan_update_process, apply_update_process,
        accepts=("process_id", "name", "description", "category", "version",
                 "entry_point", "executor_version", "uses_sample_sheet",
@@ -1426,6 +1599,9 @@ PIPELINE_OPS = [
                 "stage_dir", "commit_message")),
     Op("sync_process_config", RISK_WRITE, plan_sync_process_config,
        apply_sync_process_config, accepts=("process_id",)),
+    Op("set_process_access", RISK_DESTRUCTIVE, plan_set_process_access,
+       apply_update_process,
+       accepts=("process_id", "add_projects", "remove_projects", "tenant_wide")),
     Op("archive_process", RISK_DESTRUCTIVE, plan_archive_process, apply_archive_process,
        accepts=("process_id",)),
     Op("write_process_config", RISK_LOCAL, plan_write_process_config,

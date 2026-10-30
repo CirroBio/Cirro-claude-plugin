@@ -52,6 +52,12 @@ case, because the files are already yours and already where you put them.
 
 ## Worth knowing
 
+- **A pipeline is enabled in the projects you name when it is registered.** It is
+  listed, and can be launched, only in those projects; Claude asks which ones and the
+  approval names them. Editing the pipeline later keeps them. Enabling or disabling a
+  project afterwards is a change of its own, approved on its own, and disabling one
+  means its members can no longer launch the pipeline. A tenant administrator can also
+  make a pipeline available to everyone in the tenant, or take that back.
 - **Claude only edits pipelines you own.** One belonging to a colleague, or curated by
   Cirro, is refused rather than changed.
 - **Configuration is checked before it goes anywhere**, whether generated or written by
