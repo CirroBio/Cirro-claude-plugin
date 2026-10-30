@@ -502,6 +502,47 @@ def test_a_samplesheet_is_mapped_by_its_file_not_its_field():
     assert "no 'other'" in missing[0].message
 
 
+# A spec that names its groups by their nf-schema titles. A live launch of a form built
+# from one failed at parameter resolution: Cirro's JSONPath refuses a space in a
+# dot-notation segment ("Use bracket notion ['my prop'] ...").
+SPEC_TITLED_GROUPS = {**SPEC, "parameters": [
+    {"name": "skip_trim", "type": "boolean", "group": "Process skipping options",
+     "required": False, "default": False, "description": "Skip trimming"},
+    {"name": "multiqc_title", "type": "string", "group": "Input/output options",
+     "required": False, "description": "MultiQC report title"},
+]}
+
+
+def test_a_group_named_by_its_title_gets_a_key_cirro_can_read():
+    generated = formgen.generate(SPEC_TITLED_GROUPS)
+    form = json.loads(generated[formgen.FORM])["form"]["properties"]
+    mapping = json.loads(generated[formgen.INPUT])
+    assert form["process_skipping_options"]["title"] == "Process skipping options"
+    assert form["input_output_options"]["title"] == "Input/output options"
+    assert mapping["skip_trim"] == "$.dataset.params.process_skipping_options.skip_trim"
+    assert mapping["multiqc_title"] == \
+        "$.dataset.params.input_output_options.multiqc_title"
+    assert not formcheck.check_input_map(mapping, json.loads(generated[formgen.FORM]))
+
+
+def test_a_group_that_is_already_a_key_never_moves():
+    """Regenerating a pipeline must not shift its parameters to new paths."""
+    for name in ("input", "advanced", "_top_level", "Main-options"):
+        assert formgen.group_key(name) == name
+
+
+def test_a_mapping_with_a_space_in_a_path_segment_is_an_error():
+    """Cirro refuses it only when the run launches, so the checker is the last place
+    it can be caught before someone's run fails."""
+    form = {"form": {"type": "object", "properties": {
+        "Process skipping options": {"type": "object", "properties": {
+            "skip_trim": {"type": "boolean"}}}}}}
+    problems = formcheck.check_input_map(
+        {"skip_trim": "$.dataset.params.Process skipping options.skip_trim"}, form)
+    assert [p.level for p in problems] == ["error"]
+    assert "space" in problems[0].message
+
+
 # --- registration planning ---------------------------------------------------
 
 def _write_spec(tmp_path, spec=None):

@@ -107,6 +107,10 @@ cirro:         process_id, category, parent_process_ids, child_process_ids,
                input_mode, execution_modes, managed_parameters[{name, role, note}]
 ```
 
+A `group` is the group's **key** as `workflow-spec` reports it (`input_output_options`),
+not its title ("Input/output options"). The key becomes a segment of the parameter's
+path at launch, and the form shows the title on its own.
+
 A structured input's `name` is the samplesheet's file name, 1-50 letters, digits, `_`
 or `-`; it defaults to the input's own name. `file_format` is `CSV`, `TSV` or `JSON`.
 `default_source_file` names a file — `samplesheet.csv` — that the run form fills the

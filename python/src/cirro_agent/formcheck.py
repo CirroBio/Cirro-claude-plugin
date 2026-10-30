@@ -531,6 +531,17 @@ def check_input_map(document: dict, form: Optional[dict] = None) -> list:
         base = value[value.index("$."):].split("|")[0]
         # Array selectors address the same field: skip_tools[*] is skip_tools.
         base = re.sub(r"\[[^\]]*\]", "", base).rstrip(".")
+        if re.search(r"\s", base):
+            # Cirro reads the map with Jayway JsonPath, which refuses whitespace in a
+            # dot-notation segment -- and only when the run launches, as the run's
+            # failure ("Use bracket notion ['my prop'] ..."). None of the 475 input
+            # maps in Cirro-pipelines has one.
+            problems.append(Problem(
+                ERROR, f"input.{name}",
+                f"maps to {base!r}, and Cirro cannot read a path segment containing "
+                "a space; the run fails at launch",
+                fix="key the form group by an identifier such as "
+                    "process_skipping_options, and keep the words as its title"))
         if present and base.startswith("$.dataset.params.") and base not in present:
             problems.append(Problem(
                 "error", f"input.{name}",

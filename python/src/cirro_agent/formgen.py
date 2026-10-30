@@ -110,6 +110,26 @@ def humanize(name: str) -> str:
     return re.sub(r"[_\-]+", " ", name).strip().capitalize()
 
 
+GROUP_KEY = re.compile(r"[A-Za-z0-9_\-]+")
+
+
+def group_key(name: str) -> str:
+    """The form key for a spec group, which is also a segment of its JSONPath.
+
+    A spec can name a group by its nf-schema title ("Process skipping options")
+    rather than its key, and Cirro cannot read a path segment holding a space: the
+    run fails at launch. A name that is already a key is returned unchanged, so a
+    regenerated form never moves a group that worked.
+    """
+    if GROUP_KEY.fullmatch(name):
+        return name
+    return re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").lower() or "general"
+
+
+def group_title(name: str) -> str:
+    return humanize(name) if GROUP_KEY.fullmatch(name) else name.strip()
+
+
 def infer_path_type(entry: dict) -> str:
     haystack = f"{entry.get('name', '')} {entry.get('description', '')}".lower()
     return "references" if any(h in haystack for h in REFERENCE_HINTS) else "dataset"
@@ -367,14 +387,22 @@ def build_form(spec: dict) -> dict:
     groups: dict = {}
     required: dict = {}
     tables: dict = {}
+    titles: dict = {}
+
+    def key_of(name: str) -> str:
+        key = group_key(name)
+        titles.setdefault(key, group_title(name))
+        return key
 
     def ensure(group: str) -> dict:
         if group not in groups:
-            groups[group] = {"type": "object", "title": humanize(group), "properties": {}}
+            groups[group] = {"type": "object",
+                             "title": titles.get(group) or humanize(group),
+                             "properties": {}}
             required[group] = []
         return groups[group]
 
-    placed = [(entry["group"], entry) for entry in pickers]
+    placed = [(key_of(entry["group"]), entry) for entry in pickers]
     if mode == BROWSE and primary:
         # Nothing selects the dataset up front in browse mode, so the primary input is
         # picked like any other, and the run cannot start without it.
@@ -395,7 +423,7 @@ def build_form(spec: dict) -> dict:
     for entry in spec.get("parameters") or []:
         if entry["name"] in managed or entry.get("hidden"):
             continue
-        group_name = entry.get("group") or "general"
+        group_name = key_of(entry.get("group") or "general")
         group = ensure(group_name)
         parsed = parse_when(entry.get("when") or "")
         if parsed:
@@ -407,7 +435,7 @@ def build_form(spec: dict) -> dict:
         # required-with-a-default is pre-filled and safe; only a must-set field is
         # marked required so the form does not block on values Cirro already has.
         if entry.get("required") and "default" not in entry:
-            required[entry.get("group") or "general"].append(entry["name"])
+            required[group_name].append(entry["name"])
 
     for (group_name, selector), pending in conditional.items():
         block = groups.get(group_name)
@@ -473,11 +501,11 @@ def build_input_map(spec: dict) -> dict:
             )
         mapping[name] = MANAGED_PATHS[role]
     for entry in pickers:
-        mapping[entry["name"]] = _picked_path(entry, entry["group"])
+        mapping[entry["name"]] = _picked_path(entry, group_key(entry["group"]))
     for entry in spec.get("parameters") or []:
         if entry["name"] in managed or entry.get("hidden"):
             continue
-        group = entry.get("group") or "general"
+        group = group_key(entry.get("group") or "general")
         mapping[entry["name"]] = f"$.dataset.params.{group}.{entry['name']}"
     return mapping
 
