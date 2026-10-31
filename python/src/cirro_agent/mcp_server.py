@@ -22,7 +22,7 @@ import secrets
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from mcp.server.mcpserver import MCPServer
 
@@ -76,6 +76,10 @@ DIRECTORY_DOC = (
     " Pass `directory` to work against a session folder outside the current working "
     "directory; the resolved folder and tenant are echoed in the response either way."
 )
+
+# Seconds login_start may take in all, cold worker start included. Above the worker's
+# own FLOW_PUBLISH_TIMEOUT, below the two minutes after which the host stops waiting.
+LOGIN_START_TIMEOUT = 75
 
 
 def _start(directory: Optional[str]) -> Optional[Path]:
@@ -135,6 +139,68 @@ def session_init(base_url: str, directory: Optional[str] = None,
         return exc.to_dict()
 
 
+def _tenant_session(base_url: str, create: bool) -> session_mod.Session:
+    """The tenant folder for `base_url`: made by login_start, only found by login_wait."""
+    if create:
+        return session_mod.init_tenant(base_url)
+    workdir = session_mod.tenant_dir(base_url)
+    if not (workdir / session_mod.SESSION_DIRNAME).is_dir():
+        raise errors.NoSessionFolder(
+            f"No one has signed in to {base_url} on this machine.",
+            what="login_wait waits on a login that login_start began.",
+            user_action=f"Start a login with login_start(base_url={base_url!r}).",
+            retry_with=[{"tool": "login_start", "base_url": base_url}],
+        )
+    return session_mod.load(workdir)
+
+
+def _login_session(base_url: Optional[str], directory: Optional[str],
+                   create: bool) -> session_mod.Session:
+    """The folder a login uses. login_start and login_wait must both arrive here.
+
+    login_start(base_url=...) signs in to that tenant's folder, so a wait that walked
+    from the working directory instead would find nothing it could choose as soon as
+    two tenants are signed in -- which is when a second sign-in happens at all.
+    """
+    start = _start(directory)
+    try:
+        current = session_mod.load(start)
+    except errors.NoSessionFolder:
+        # Only a missing folder may be created here. Anything else -- a tenant conflict
+        # above all -- must surface, not be papered over by binding a new session.
+        if not base_url:
+            raise
+        # A named `directory` means that folder; otherwise sign in for the tenant,
+        # which every directory can reach and no install overwrites. Binding the
+        # working directory by default is how a credential ends up inside whatever
+        # checkout the person happened to be standing in.
+        if start and create:
+            return session_mod.init(start, base_url)
+        if start:
+            raise
+        return _tenant_session(base_url, create)
+    if base_url and session_mod._normalize_base_url(base_url) != current.base_url:
+        if session_mod.is_tenant_dir(current.path):
+            # Resolved by falling back to a tenant nobody bound to this directory, so
+            # naming another one is not a conflict -- it is a second tenant being
+            # signed in to. Tenant folders are one per host, so this rebinds nothing.
+            return _tenant_session(base_url, create)
+        # One folder serves one tenant. Silently logging in to the bound tenant
+        # while the caller named a different one is the wrong kind of safe: it
+        # answers a question nobody asked, and the two paths that used to surface
+        # the binding (session_init, doctor) are no longer on the login path.
+        raise errors.TenantMismatch(
+            f"This folder is bound to {current.base_url}, not {base_url}.",
+            what="A session folder serves exactly one Cirro tenant.",
+            user_action=(f"Work in a directory bound to {base_url}, sign in for "
+                         f"the tenant with session_init(shared=true), or drop the "
+                         f"base_url argument to log in to {current.base_url}."),
+            retry_with=[{"tool": "session_init",
+                         "base_url": base_url, "shared": True}],
+        )
+    return current
+
+
 @server.tool(
     name="login_start",
     title="Begin a Cirro login",
@@ -151,56 +217,23 @@ def session_init(base_url: str, directory: Optional[str] = None,
         "the user's terminal and reports whether that worked in printed_to_terminal, "
         "but relay verification_url in your very next message regardless -- printing "
         "is a courtesy that may not have reached them. Nothing opens a browser. Call "
-        "login_wait only after that message."
+        "login_wait only after that message, with the same base_url and directory. "
+        "`starting` means Cirro has not issued a code yet: call login_wait, which "
+        "returns the link as soon as there is one."
     ) + DIRECTORY_DOC,
 )
 def login_start(base_url: Optional[str] = None,
                 directory: Optional[str] = None) -> dict:
     """Start a device-code login without waiting for it."""
-    request: dict[str, Any] = {"verb": "login_start"}
-    start = _start(directory)
     try:
-        current = session_mod.load(start)
-    except errors.NoSessionFolder as exc:
-        # Only a missing folder may be created here. Anything else -- a tenant conflict
-        # above all -- must surface, not be papered over by binding a new session.
-        if not base_url:
-            return exc.to_dict()
-        try:
-            # A named `directory` means that folder; otherwise sign in for the tenant,
-            # which every directory can reach and no install overwrites. Binding the
-            # working directory by default is how a credential ends up inside whatever
-            # checkout the person happened to be standing in.
-            current = (session_mod.init(start, base_url) if start
-                       else session_mod.init_tenant(base_url))
-        except errors.AgentError as init_error:
-            return init_error.to_dict()
+        current = _login_session(base_url, directory, create=True)
     except errors.AgentError as exc:
         return exc.to_dict()
-    if base_url and session_mod._normalize_base_url(base_url) != current.base_url:
-        if session_mod.is_tenant_dir(current.path):
-            # Resolved by falling back to a tenant nobody bound to this directory, so
-            # naming another one is not a conflict -- it is a second tenant being
-            # signed in to. Tenant folders are one per host, so this rebinds nothing.
-            try:
-                current = session_mod.init_tenant(base_url)
-            except errors.AgentError as init_error:
-                return init_error.to_dict()
-        else:
-            # One folder serves one tenant. Silently logging in to the bound tenant
-            # while the caller named a different one is the wrong kind of safe: it
-            # answers a question nobody asked, and the two paths that used to surface
-            # the binding (session_init, doctor) are no longer on the login path.
-            return errors.TenantMismatch(
-                f"This folder is bound to {current.base_url}, not {base_url}.",
-                what="A session folder serves exactly one Cirro tenant.",
-                user_action=(f"Work in a directory bound to {base_url}, sign in for "
-                             f"the tenant with session_init(shared=true), or drop the "
-                             f"base_url argument to log in to {current.base_url}."),
-                retry_with=[{"tool": "session_init",
-                             "base_url": base_url, "shared": True}],
-            ).to_dict()
-    return runner.call(request, session=current)
+    # The worker's publish timeout starts only once it has imported the SDK, which
+    # takes seconds cold, so it does not bound this call; this does. A daemon already
+    # spawned outlives the worker, and login_wait picks up the link it publishes.
+    return runner.call({"verb": "login_start"}, session=current,
+                       timeout=LOGIN_START_TIMEOUT)
 
 
 @server.tool(
@@ -211,13 +244,18 @@ def login_start(base_url: Optional[str] = None,
         "rather than the device code's lifetime. Returns pending, ok, or a typed "
         "failure -- it can never hang. A pending result is not an error: relay the link "
         "again and call this once more. Only needed when login_start returned pending; "
-        "on a folder that was already logged in it simply confirms the identity."
+        "on a folder that was already logged in it simply confirms the identity. Pass "
+        "the base_url and directory login_start was given, so it finds the same folder."
     ) + DIRECTORY_DOC,
 )
-def login_wait(timeout_s: int = 120, directory: Optional[str] = None) -> dict:
+def login_wait(timeout_s: int = 120, base_url: Optional[str] = None,
+               directory: Optional[str] = None) -> dict:
     """Wait, boundedly, for the sign-in to land."""
-    return runner.call({"verb": "login_wait", "timeout_s": timeout_s},
-                       start=_start(directory))
+    try:
+        current = _login_session(base_url, directory, create=False)
+    except errors.AgentError as exc:
+        return exc.to_dict()
+    return runner.call({"verb": "login_wait", "timeout_s": timeout_s}, session=current)
 
 
 @server.tool(

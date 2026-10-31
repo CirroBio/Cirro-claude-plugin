@@ -247,6 +247,52 @@ def test_login_start_given_a_directory_still_binds_that_directory(tmp_path, monk
     assert not session_mod.bound_tenants()
 
 
+def test_the_wait_finds_the_folder_the_login_started_in(tmp_path, monkeypatch):
+    """With two tenants signed in, a wait resolved from the working directory had
+    nothing it could choose, so the second sign-in could never be waited on."""
+    from cirro_agent import mcp_server
+    session_mod.init_tenant("app.cirro.bio")
+    monkeypatch.chdir(tmp_path)
+    used = []
+    monkeypatch.setattr(mcp_server.runner, "call",
+                        lambda request, **kw: used.append(kw["session"].path) or {"ok": True})
+
+    assert mcp_server.login_start("dev.cirro.bio")["ok"]
+    assert mcp_server.login_wait(base_url="dev.cirro.bio")["ok"]
+    assert used[0].resolve() == used[1].resolve() == (
+        session_mod.tenant_dir("dev.cirro.bio") / ".cirro").resolve()
+
+
+def test_waiting_on_a_tenant_nobody_signed_in_to_creates_nothing(tmp_path, monkeypatch):
+    from cirro_agent import mcp_server
+    session_mod.init_tenant("app.cirro.bio")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mcp_server.runner, "call",
+                        lambda request, **kw: pytest.fail("nothing to wait on"))
+
+    result = mcp_server.login_wait(base_url="dev.cirro.bio")
+
+    assert result["error"]["code"] == "NO_SESSION_FOLDER"
+    assert result["error"]["remediation"]["retry_with"][0]["tool"] == "login_start"
+    assert not session_mod.tenant_dir("dev.cirro.bio").exists()
+
+
+def test_login_start_is_bounded_below_the_hosts_patience(tmp_path, monkeypatch):
+    """The worker's publish timeout starts after a cold SDK import; only the parent
+    can bound the whole call. The host backgrounds a call after two minutes."""
+    from cirro_agent import mcp_server
+    from cirro_agent.worker import auth
+    monkeypatch.chdir(tmp_path)
+    budgets = []
+    monkeypatch.setattr(mcp_server.runner, "call",
+                        lambda request, **kw: budgets.append(kw["timeout"]) or {"ok": True})
+
+    mcp_server.login_start("app.cirro.bio")
+
+    assert budgets == [mcp_server.LOGIN_START_TIMEOUT]
+    assert auth.FLOW_PUBLISH_TIMEOUT < mcp_server.LOGIN_START_TIMEOUT < 120
+
+
 # --- a session folder that arrived with the files around it -------------------------
 
 def _git(repo, *arguments):

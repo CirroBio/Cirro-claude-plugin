@@ -6,6 +6,7 @@ import-order guard, the CIRRO_HOME assertion and the JSON round trip are exercis
 """
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -163,3 +164,21 @@ def test_the_timeout_advice_never_points_at_a_blocked_command():
         assert "web UI" in advice
         assert "CLI" not in advice
     assert "PENDING" in runner._timeout_advice("upload_dataset")
+
+
+def test_a_login_start_out_of_time_points_at_login_wait(bound, monkeypatch):
+    """Retrying login_start would race a daemon the stopped worker had already
+    spawned; login_wait shows the link that daemon publishes."""
+    monkeypatch.setattr(runner, "interpreter", lambda: Path("/usr/bin/false"))
+    monkeypatch.setattr(runner, "check_ready", lambda: {"mode": "dev"})
+
+    def out_of_time(*_args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="worker", timeout=kwargs["timeout"])
+    monkeypatch.setattr(runner.subprocess, "run", out_of_time)
+
+    out = runner.call({"verb": "login_start"}, session=bound, timeout=75)
+
+    remediation = out["error"]["remediation"]
+    assert remediation["retry_with"] == [{"tool": "login_wait",
+                                          "base_url": "app.cirro.test"}]
+    assert "login_wait" in remediation["user_action"]

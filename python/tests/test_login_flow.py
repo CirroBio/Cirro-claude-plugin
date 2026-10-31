@@ -430,6 +430,115 @@ def test_a_dead_child_does_not_hold_the_caller_for_the_whole_timeout(home,
     assert time.monotonic() - started < 1.0
 
 
+def _second_daemon(*_args, **_kwargs):
+    raise AssertionError("a second daemon was spawned beside a live one")
+
+
+def test_a_daemon_slow_to_get_a_code_is_starting_not_a_network_failure(
+        home, monkeypatch):
+    """A live daemon published a good code minutes after the call that spawned it
+    had told the person to check their network."""
+    alive = {"now": False}
+
+    def spawn(*_args, **_kwargs):
+        alive["now"] = True
+        return FakeChild()
+    monkeypatch.setattr(auth.subprocess, "Popen", spawn)
+    monkeypatch.setattr(auth, "_child_alive", lambda: alive["now"])
+    monkeypatch.setattr(auth, "FLOW_PUBLISH_TIMEOUT", 0.2)
+    monkeypatch.setattr(auth.time, "sleep", lambda _s: None)
+
+    result = auth.login_start({"base_url": BASE_URL})
+
+    assert result["ok"] and result["status"] == "starting"
+    assert "login_wait" in result["note"]
+    assert "verification_url" not in result
+
+
+def test_a_live_daemon_without_a_code_yet_is_adopted_not_replaced(home, monkeypatch):
+    (home / auth.PID_FILE).write_text(json.dumps({"pid": 4242, "started_at": time.time()}))
+    monkeypatch.setattr(auth, "_child_alive", lambda: True)
+    monkeypatch.setattr(auth.subprocess, "Popen", _second_daemon)
+    monkeypatch.setattr(auth, "FLOW_PUBLISH_TIMEOUT", 0.2)
+    monkeypatch.setattr(auth.time, "sleep", lambda _s: None)
+
+    result = auth.login_start({"base_url": BASE_URL})
+
+    assert result["status"] == "starting"
+    assert result["adopted_existing"] is True
+
+
+def test_a_daemon_wedged_past_the_stall_limit_is_stopped_and_replaced(
+        home, monkeypatch):
+    """Adopting forever would leave a wedged daemon standing between the person and
+    every later login."""
+    started_at = time.time() - auth.DAEMON_STALL_SECONDS - 1
+    (home / auth.PID_FILE).write_text(json.dumps({"pid": 4242, "started_at": started_at}))
+    alive = {"now": True}
+    stopped = []
+
+    def stop(_home):
+        stopped.append(True)
+        alive["now"] = False
+        return True
+    monkeypatch.setattr(auth, "_child_alive", lambda: alive["now"])
+    monkeypatch.setattr(auth, "_stop_login", stop)
+    monkeypatch.setattr(auth, "FLOW_PUBLISH_TIMEOUT", 0.2)
+    monkeypatch.setattr(auth.time, "sleep", lambda _s: None)
+    _publish_flow(home, monkeypatch)
+
+    result = auth.login_start({"base_url": BASE_URL})
+
+    assert stopped == [True]
+    assert result["status"] == "pending"
+    assert result["verification_url"] == FLOW["verification_url"]
+
+
+def test_a_daemon_that_dies_without_a_word_is_not_called_a_network_failure(
+        home, monkeypatch):
+    monkeypatch.setattr(auth.subprocess, "Popen", FakeChild)
+    monkeypatch.setattr(auth, "_child_alive", lambda: False)
+
+    with pytest.raises(errors.AgentError) as caught:
+        auth.login_start({"base_url": BASE_URL})
+
+    assert caught.value.code != "NETWORK_UNAVAILABLE"
+    assert "exited without issuing a device code" in caught.value.message
+
+
+def test_a_wait_hands_over_a_link_the_moment_it_is_published(home, monkeypatch):
+    """After `starting` the link is the news; holding it to the deadline would hold
+    the person too."""
+    (home / auth.PID_FILE).write_text(json.dumps({"pid": 4242}))
+    monkeypatch.setattr(auth, "_child_alive", lambda: True)
+    polls = {"n": 0}
+
+    def sleep(_seconds):
+        polls["n"] += 1
+        if polls["n"] == 2:
+            (home / auth.FLOW_FILE).write_text(json.dumps(FLOW))
+    monkeypatch.setattr(auth.time, "sleep", sleep)
+
+    started = time.monotonic()
+    result = auth.login_wait({"base_url": BASE_URL, "timeout_s": 120})
+
+    assert result["status"] == "pending"
+    assert result["verification_url"] == FLOW["verification_url"]
+    assert time.monotonic() - started < 5.0
+    assert json.loads((home / auth.FLOW_FILE).read_text())["printed_at"], (
+        "a link handed over must be marked, or every later wait returns at once")
+
+
+def test_a_wait_that_outlasts_a_slow_daemon_has_no_link_to_relay(home, monkeypatch):
+    (home / auth.PID_FILE).write_text(json.dumps({"pid": 4242}))
+    monkeypatch.setattr(auth, "_child_alive", lambda: True)
+
+    result = auth.login_wait({"base_url": BASE_URL, "timeout_s": 0})
+
+    assert result["status"] == "starting"
+    assert "verification_url" not in result
+
+
 def test_logging_out_stops_a_login_that_is_still_running(home, monkeypatch):
     """Removing the pidfile only hides the daemon; it would finish and re-save."""
     signalled = []

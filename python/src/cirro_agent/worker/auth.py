@@ -28,6 +28,9 @@ STATUS_FILE = "login-status.json"
 PID_FILE = "login.pid"
 
 FLOW_PUBLISH_TIMEOUT = 25.0
+# A daemon that has published nothing after this long is wedged rather than slow --
+# issuing a code takes seconds -- so a new login replaces it instead of adopting it.
+DAEMON_STALL_SECONDS = 300.0
 
 
 def _home() -> Path:
@@ -228,6 +231,9 @@ def login_start(request: dict) -> dict:
         adopted = _await_flow(home, base_url, FLOW_PUBLISH_TIMEOUT)
         if adopted is not None:
             return {**adopted, "adopted_existing": True}
+        if _child_alive() and not _stalled(home):
+            return {**_starting(base_url), "adopted_existing": True}
+        _stop_login(home)
 
     for stale in (FLOW_FILE, STATUS_FILE, PID_FILE):
         (home / stale).unlink(missing_ok=True)
@@ -243,14 +249,31 @@ def login_start(request: dict) -> dict:
     _write(home / PID_FILE, {"pid": child.pid, "started_at": time.time()})
 
     published = _await_flow(home, base_url, FLOW_PUBLISH_TIMEOUT)
-    if published is None:
-        raise errors.NetworkUnavailable(
-            f"Cirro at {base_url} did not issue a device code within "
-            f"{int(FLOW_PUBLISH_TIMEOUT)}s.",
-            what="The authorization request did not come back.",
-            user_action=f"Check network access to {base_url}, then retry login.",
-        )
-    return {**published, "reason": reason}
+    if published is not None:
+        return {**published, "reason": reason}
+    if _child_alive():
+        # Slow is not failed: a network error here would send the person to check a
+        # VPN while the daemon goes on to publish a perfectly good code.
+        return {**_starting(base_url), "reason": reason}
+    raise errors.UpstreamError(
+        f"The login helper for {base_url} exited without issuing a device code.",
+        what="The background login process is gone and recorded no reason.",
+        user_action="Start the login again, and run /cirro:doctor if it repeats.",
+    )
+
+
+def _starting(base_url: str) -> dict:
+    return {
+        "ok": True, "status": "starting", "base_url": base_url,
+        "note": ("Cirro has not issued a device code yet, and the login helper is still "
+                 "asking. Call login_wait: it returns the link the moment there is one. "
+                 "Do not call login_start again for it."),
+    }
+
+
+def _stalled(home: Path) -> bool:
+    started = (_read(home / PID_FILE) or {}).get("started_at") or 0
+    return time.time() - float(started) > DAEMON_STALL_SECONDS
 
 
 def _await_flow(home: Path, base_url: str, timeout: float) -> Optional[dict]:
@@ -348,11 +371,17 @@ def login_wait(request: dict) -> dict:
             raise _login_failed(str(status.get("error", "")))
         if not _child_alive() and not status:
             return _no_login_running(home, base_url, started)
+        flow = _read(home / FLOW_FILE)
+        if flow and flow.get("verification_url") and not flow.get("printed_at"):
+            # A link nobody has been shown yet, from a login_start that returned
+            # `starting`. Holding it until the deadline would hold the person too.
+            return _pending(home, flow)
         if time.monotonic() >= deadline:
             break
         time.sleep(1.0)
 
-    flow = _read(home / FLOW_FILE) or {}
+    if not flow:
+        return {**_starting(base_url), "waited_s": int(timeout)}
     return _pending(home, flow, waited_s=int(timeout),
                     note=("Still waiting for the browser login. This is not an error "
                           "-- relay the link again and call login_wait once more."))
