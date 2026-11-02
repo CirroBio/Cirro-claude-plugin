@@ -369,6 +369,50 @@ def test_a_sample_rename_is_shown(monkeypatch):
     assert "no values differ" not in draft.summary
 
 
+# --- stopping runs: launch test runs, cancel each once it has started properly ---
+
+# Running in the fake tenant: ds_0377 and ds_0754 were started by the session's user,
+# ds_1131 by someone else.
+def plan_stop(tenant, session_dir, dataset_id):
+    planned = call(tenant, session_dir, "plan", op="stop_analysis",
+                   args={"project_id": "proj_a", "dataset_id": dataset_id})
+    assert planned["ok"], planned
+    return planned
+
+
+def test_stop_asking_on_a_stop_lets_the_next_one_run_under_the_grant(
+        writable_tenant, session_dir):
+    """With a prompt for every stop, three plans expired while the person was away and
+    the runs they were meant to cancel ran to completion."""
+    first = plan_stop(writable_tenant, session_dir, "ds_0377")
+    assert first["grant_scope"]["op"] == "stop_analysis"
+    applied = call(writable_tenant, session_dir, "apply", plan_id=first["plan_id"],
+                   digest=first["digest"], stop_asking=True,
+                   also_approves=plans.also_approves(first["grant_scope"]),
+                   approved_summary=approved_summary(session_dir, first["plan_id"]))
+    assert applied["ok"], applied
+    assert applied["grant"]["ops"] == ["stop_analysis"]
+
+    held = {"grant_id": "grant_0000test", **applied["grant"]}
+    second = plan_stop(writable_tenant, session_dir, "ds_0754")
+    stopped = apply_granted(writable_tenant, session_dir, second, [held])
+    assert stopped["ok"], stopped
+    assert stopped["grant_id"] == "grant_0000test"
+    assert stopped["result"] == {"stopped": "ds_0754"}
+    assert [c.request.url.path.rsplit("/", 2)[-2] for c in puts(writable_tenant)] == [
+        "ds_0377", "ds_0754"]
+
+
+def test_stopping_another_users_run_is_not_grantable(writable_tenant, session_dir):
+    """A grant is for cancelling the person's own runs; someone else's still asks."""
+    grant = given(writable_tenant, session_dir, ["stop_analysis"])
+    planned = plan_stop(writable_tenant, session_dir, "ds_1131")
+    assert "another user" in not_grantable(planned)
+    refused = apply_granted(writable_tenant, session_dir, planned, [grant])
+    assert refused["error"]["code"] == "NOT_GRANTED"
+    assert plans.load(session_dir, planned["plan_id"]).status == plans.PENDING
+
+
 # --- what a consent prompt says is what is granted ---
 
 def test_stop_asking_needs_the_line_its_prompt_showed(writable_tenant, session_dir):

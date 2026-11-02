@@ -358,6 +358,11 @@ def plan_stop_analysis(reader: reads.Reader, args: dict) -> Draft:
                  "Partial output already written is kept; the run cannot be un-stopped, "
                  "only resumed as a new run."),
         invalidates=[_inv("datasets", project["id"])],
+        # A grant is for cancelling the person's own runs. Someone else's run is
+        # their compute and their wait, and a resume does not give either back.
+        ungrantable=mutations.ungrantable(
+            row["created_by"] != reader.username
+            and "it stops a run another user started"),
     )
 
 
@@ -374,7 +379,7 @@ ANALYSIS_OPS = [
     Op("resume_analysis", RISK_WRITE, plan_resume_analysis, apply_run_analysis,
        outputs=("created_dataset_id",), accepts=RUN_ANALYSIS_ARGS, grantable=True),
     Op("stop_analysis", RISK_WRITE, plan_stop_analysis, apply_stop_analysis,
-       accepts=PROJECT_ARGS + ("dataset_id",)),
+       accepts=PROJECT_ARGS + ("dataset_id",), grantable=True),
 ]
 
 mutations.OPS.update({op.name: op for op in ANALYSIS_OPS})

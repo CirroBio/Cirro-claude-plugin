@@ -177,7 +177,7 @@ the directory you are working in.
   <div class="hd-note" data-note="grant">
     <p class="hd-kicker">In advance</p>
     <p class="hd-title">Approve a kind of change for a session</p>
-    <p>For repetitive work you can approve every later change of a kind you name, in one project, until the session ends. Only six kinds qualify, and none that deletes or changes who has access. Each change is still planned, shown, checked again and logged, and Claude Code shows a notice for every one.</p>
+    <p>For repetitive work you can approve every later change of a kind you name, in one project, until the session ends. Only seven kinds qualify, and none that deletes or changes who has access. Each change is still planned, shown, checked again and logged, and Claude Code shows a notice for every one.</p>
   </div>
   <div class="hd-note" data-note="gate">
     <p class="hd-kicker">The command check</p>
