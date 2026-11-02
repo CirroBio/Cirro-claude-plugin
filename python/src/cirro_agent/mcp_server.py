@@ -305,7 +305,7 @@ ADVISED: set = set()
 # Named here rather than read from `Op.grantable` because this process must not import
 # the worker. `test_write_coverage.py` pins the two together.
 GRANTABLE = ("insert_rows", "update_rows", "update_dataset", "update_sample",
-             "run_analysis", "resume_analysis")
+             "run_analysis", "resume_analysis", "stop_analysis")
 
 
 OFFER = (

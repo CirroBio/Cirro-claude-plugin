@@ -170,7 +170,8 @@ def test_the_grantable_operations_are_exactly_these():
     from cirro_agent.worker import mutations
     grantable = {name for name, op in mutations.OPS.items() if op.grantable}
     assert grantable == {"insert_rows", "update_rows", "update_dataset",
-                         "update_sample", "run_analysis", "resume_analysis"}
+                         "update_sample", "run_analysis", "resume_analysis",
+                         "stop_analysis"}
     assert set(mcp_server.GRANTABLE) == grantable
     assert {mutations.OPS[name].risk for name in grantable} == {mutations.RISK_WRITE}
 

@@ -1,9 +1,10 @@
 # Approving a kind of change
 
 When you are making many changes of one kind, such as filling in a sheet, renaming a
-batch of datasets or launching runs one after another, you can stop being asked about
-that kind of change in one project for the rest of the Claude Code session. This is
-called a *grant*. For a series of sheet inserts it goes like this:
+batch of datasets, or launching test runs and stopping each one once it has started
+properly, you can stop being asked about that kind of change in one project for the
+rest of the Claude Code session. This is called a *grant*. For a series of sheet
+inserts it goes like this:
 
 1. **The first insert** asks for your approval as usual.
 2. **The second** comes with an offer from Claude under the plan: should it stop asking
@@ -31,14 +32,15 @@ change.
 
 ## What can be granted
 
-Only six kinds of change can be granted: `insert_rows`, `update_rows`,
-`update_dataset`, `update_sample`, `run_analysis` and `resume_analysis`. Nothing that
-deletes anything or changes who has access can be, however you ask, and a chain of
-steps is never covered by a grant. Approve one deletion and ask for another, and Claude
-tells you once that deletions always ask, rather than leaving you to wonder where the
-offer went.
+Only seven kinds of change can be granted: `insert_rows`, `update_rows`,
+`update_dataset`, `update_sample`, `run_analysis`, `resume_analysis` and
+`stop_analysis`. Stopping a run qualifies because it deletes nothing: the output
+written so far is kept, and the run can be resumed. Nothing that deletes anything or
+changes who has access can be, however you ask, and a chain of steps is never covered
+by a grant. Approve one deletion and ask for another, and Claude tells you once that
+deletions always ask, rather than leaving you to wonder where the offer went.
 
-Even among those six, some changes still ask for your approval under a grant, and
+Even among those seven, some changes still ask for your approval under a grant, and
 Claude tells you why:
 
 - one plan that edits more than 50 datasets, inserts or updates more than 50 sheet
@@ -49,6 +51,7 @@ Claude tells you why:
 - blanking sheet cells, or inserting rows from a file on your computer
 - a launch given its own list of addresses to email; leaving the default, which emails
   you, is covered
+- stopping a run that someone else started; a grant covers stopping your own runs
 
 ## How long a grant lasts
 

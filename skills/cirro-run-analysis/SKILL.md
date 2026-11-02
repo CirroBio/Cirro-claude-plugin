@@ -217,3 +217,9 @@ plan(op="stop_analysis", args={"project_id": "...", "dataset_id": "ds_running"})
 
 Refused with `WRONG_STATUS` if the run has already finished. Partial output is kept; a
 stopped run cannot be un-stopped, only resumed as a new run.
+
+Stops are approved the way launches are. When the person is launching test runs and
+cancelling each once it has started properly, a stop plan can carry `offer`, and a
+grant for `stop_analysis` lets later stops in the project go through `apply_granted`
+without a prompt. A stop of a run another user started always asks and carries
+`not_grantable`; say so in one line.

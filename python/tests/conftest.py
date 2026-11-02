@@ -341,6 +341,8 @@ def writable_tenant(fake_tenant):
         json=_detail_payload(fake_tenant["datasets"][0]))
     router.delete(url__regex=rf"{API}/projects/proj_a/datasets/ds_\w+$").respond(
         status_code=204)
+    router.put(url__regex=rf"{API}/projects/proj_a/execution/ds_\w+/stop$").respond(
+        json={"success": ["job_1"], "failed": []})
     router.get(f"{API}/processes/proc_rnaseq/parameters").respond(json=PARAMETER_SPEC)
     return fake_tenant
 

@@ -50,11 +50,12 @@ decided per plan. A planner sets `Draft.ungrantable` -- built with
 `mutations.ungrantable(cond and "reason", ...)` -- for a variant that removes data or
 reaches far: a retype (it re-derives sample records), removed tags or folders, deleted
 or blanked sample metadata, blanked cells, rows from a local file, a launch emailing
-given addresses, more than `GRANT_MAX_TARGETS` datasets or rows. Such a plan has no
-`grant_scope`, so no grant matches it, no offer is made for it, and its response
-carries `not_grantable` so the model can say why it still prompts. A reviewer ran 40
-retypes with sample re-ingest under a grant a rename had earned; that is what this is
-for. A new grantable op needs the same audit of its variants.
+given addresses, a stop of a run another user started, more than `GRANT_MAX_TARGETS`
+datasets or rows. Such a plan has no `grant_scope`, so no grant matches it, no offer is
+made for it, and its response carries `not_grantable` so the model can say why it still
+prompts. A reviewer ran 40 retypes with sample re-ingest under a grant a rename had
+earned; that is what this is for. A new grantable op needs the same audit of its
+variants.
 
 ## Keep the docs current
 
