@@ -370,9 +370,9 @@ def _config_settings(args: dict, source: str, code_repo: str,
     """Where a repo-backed configuration lives, or None when Cirro stores it.
 
     repository_type is required. Without it Cirro cannot tell how to reach the
-    configuration repository and rejects the create -- as a 500 NullPointerException
-    for some folder names, and as a 400 for others. A WITH_PROCESS config is in the
-    workflow's own repository, so it always shares the code repository's type; an
+    configuration repository and rejects the create -- as a 500 for some folder names,
+    and as a 400 for others. A WITH_PROCESS config is in the workflow's own
+    repository, so it always shares the code repository's type; an
     EXTERNAL one may be a repository of different visibility and can be overridden.
     """
     if source == STORAGE:
@@ -971,10 +971,10 @@ def plan_sync_process_config(reader: reads.Reader, args: dict) -> Draft:
 
     code = detail.get("pipeline_code") or {}
     if code.get("repository_type") == GITHUB_PRIVATE and not settings.get("is_authorized"):
-        # Cirro-backend's own rule (ProcessRecord.hasCodeAuthorization): a sync of a
-        # custom process whose code is in a private repository is refused with a 403
-        # until the GitHub connection is authorized. Both fields are on the record
-        # already read, so the refusal comes before the approval rather than after it.
+        # Cirro's own rule: a sync of a custom process whose code is in a private
+        # repository is refused with a 403 until the GitHub connection is authorized.
+        # Both fields are on the record already read, so the refusal comes before the
+        # approval rather than after it.
         raise errors.Forbidden(
             f"Cirro will not sync {args['process_id']}: its code is in the private "
             f"repository {code.get('repository_path')}, and the GitHub connection for "

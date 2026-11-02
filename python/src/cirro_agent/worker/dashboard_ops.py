@@ -118,8 +118,8 @@ def _render(header: list, changes: list, profiles: list, warnings: list, schema_
 
 
 def _criteria(base: dict, document: dict) -> dict:
-    """The portal's record envelope: its type tag, and a scope refined from the graph
-    while the record is still provisional (the portal's `refineScopeCriteria`)."""
+    """Data Studio's record envelope: its type tag, and a scope refined from the graph
+    while the record is still provisional, as Data Studio refines it."""
     criteria = {k: v for k, v in (base or {}).items() if k != "revision"}
     criteria["type"] = D.SESSION_TYPE
     provisional = (criteria.get("scope") in (None, "project") and not criteria.get("datasetId")

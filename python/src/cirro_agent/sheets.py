@@ -3,9 +3,9 @@
 Pure and cirro-free, like dashboards.py: the worker reads the sheet and sends the
 writes; everything here works on the API's plain dicts.
 
-The checks are the backend's own rules, run first so a plan names the problem. Most of
-them the backend enforces too, but not all, and not in a form an agent can act on: a
-cell it cannot cast is bound straight into DuckDB, and the failure comes back as a 500
+The checks are Cirro's own rules, run first so a plan names the problem. Most of them
+Cirro enforces too, but not all, and not in a form an agent can act on: Cirro does not
+cast a cell to its column's type, and a value it cannot store comes back as a 500
 ("Failed to insert rows") with the column and the value gone. So every value is
 coerced here to what its column holds, and a value that will not go is refused with
 its row and column.
@@ -18,14 +18,14 @@ import math
 import re
 from typing import Optional
 
-# Cirro-backend lib-common Validation.SQL_IDENTIFIER: table, namespace and column names.
+# Table, namespace and column names, as Cirro accepts them.
 IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,127}$")
-# SystemEntities: namespaces the backend keeps for itself.
+# Namespaces Cirro keeps for itself.
 RESERVED_NAMESPACES = ("cirro_entity", "sheets")
-# CirroSystemColumns: maintained by the backend on every write, never by a caller.
+# Columns Cirro maintains on every write, never a caller.
 SYSTEM_PREFIX = "sys_"
 ROW_ID = "_row_id"
-# The namespace the portal creates sheets in (sheet.service.ts).
+# The namespace the web app creates sheets in.
 DEFAULT_NAMESPACE = "default"
 MAX_NAME_LENGTH = 100
 MAX_ALLOWED_VALUES = 1000
@@ -43,14 +43,14 @@ MAX_SELECTED = MAX_DELETE
 DATA_TYPES = ("STRING", "INTEGER", "BIGINT", "DOUBLE", "FLOAT", "BOOLEAN", "DATE",
               "TIMESTAMP")
 # SemanticColumnType values a column may be created with. ENUM_MULTI is refused by
-# the backend ("not yet supported"); FOREIGN_KEY needs a reference this module does
+# Cirro ("not yet supported"); FOREIGN_KEY needs a reference this module does
 # not build.
 KINDS = ("STANDARD", "URL", "ENUM_SINGLE", "CIRRO_FILE", "CIRRO_FOLDER", "CIRRO_DATASET")
 CIRRO_KINDS = ("CIRRO_FILE", "CIRRO_FOLDER", "CIRRO_DATASET")
 _STRING_KINDS = ("URL", "ENUM_SINGLE") + CIRRO_KINDS
 _UNIQUE_REFUSED = ("DOUBLE", "FLOAT")
-# The type changes an Iceberg table accepts. The backend's dry run does not check this;
-# anything else passes the preview and fails the ALTER with a 500 (SchemaDiffSqlBuilder).
+# The type changes a sheet column accepts. Cirro's dry run does not check this; anything
+# else passes the preview and fails the change itself with a 500.
 WIDENINGS = {("INTEGER", "BIGINT"), ("FLOAT", "DOUBLE")}
 _INT32 = (-2**31, 2**31 - 1)
 _INT64 = (-2**63, 2**63 - 1)
@@ -59,7 +59,7 @@ COLUMN_KEYS = ("name", "type", "label", "description", "required", "unique", "va
                "kind", "hidden")
 ALTER_KEYS = ("rename", "type", "label", "description", "values", "hidden", "required")
 
-# The backend's FilterOperator, and the spellings `where` accepts for each.
+# cirro_api_client's FilterOperator, and the spellings `where` accepts for each.
 OPERATORS = {"=": "EQUALS", "!=": "NOT_EQUALS", ">": "GREATER_THAN",
              ">=": "GREATER_THAN_OR_EQUALS", "<": "LESS_THAN",
              "<=": "LESS_THAN_OR_EQUALS", "like": "LIKE", "not like": "NOT_LIKE",
@@ -83,8 +83,8 @@ def sheet_url(base_url: str, project_id: str, sheet_id: str) -> str:
 
 
 def sql_name(label: str) -> str:
-    """The portal's `deriveSqlName`: lowercase, non-alphanumeric runs to `_`, and a
-    `t_` prefix on a leading digit, because the backend refuses one."""
+    """A label's SQL name, derived as the web app does: lowercase, non-alphanumeric
+    runs to `_`, and a `t_` prefix on a leading digit, because Cirro refuses one."""
     name = "_".join(p for p in re.split(r"[^a-z0-9]+", label.strip().lower()) if p)
     return f"t_{name}" if name[:1].isdigit() else name
 
@@ -97,7 +97,7 @@ def identifier_problem(value, what: str) -> Optional[str]:
 
 
 def user_columns(columns: list) -> list:
-    """A sheet's columns without the ones the backend maintains."""
+    """A sheet's columns without the ones Cirro maintains."""
     return [c for c in columns or [] if not str(c.get("name", "")).startswith(SYSTEM_PREFIX)]
 
 
@@ -108,7 +108,7 @@ def column_def(spec, where: str) -> dict:
 
     `{"name", "type", "label", "description", "required", "unique", "values", "kind",
     "hidden"}` -- `values` makes an ENUM_SINGLE column, and `kind` names a URL or a
-    Cirro file, folder or dataset reference, all of which the backend stores as STRING.
+    Cirro file, folder or dataset reference, all of which Cirro stores as STRING.
     """
     if not isinstance(spec, dict):
         raise SheetError(f"{where} must be an object like {{\"name\": ..., \"type\": ...}}",
@@ -127,7 +127,7 @@ def column_def(spec, where: str) -> dict:
     if problem:
         raise SheetError(problem, f"{where}.name")
     if name.lower().startswith(SYSTEM_PREFIX) or name.lower() == ROW_ID:
-        raise SheetError(f"{where}.name {name!r} is reserved for the columns the backend "
+        raise SheetError(f"{where}.name {name!r} is reserved for the columns Cirro "
                          "maintains", f"{where}.name")
     values = spec.get("values")
     kind = str(spec.get("kind") or ("ENUM_SINGLE" if values is not None else "STANDARD"))
@@ -187,7 +187,7 @@ def check_columns(columns: list, where: str = "columns") -> list:
 
 def alter_columns(current: list, drop, alter, add) -> list:
     """The target column list for an update: the current columns, matched by `id`,
-    with `drop` removed, `alter` applied and `add` appended. The backend diffs the two
+    with `drop` removed, `alter` applied and `add` appended. Cirro diffs the two
     lists by id, so every current column keeps its id and a new one has none."""
     by_name = {c["name"]: c for c in user_columns(current)}
     drop = list(drop or [])
@@ -241,8 +241,8 @@ def _altered(column: dict, change, where: str) -> dict:
                 and (column.get("dataType"), data_type) not in WIDENINGS:
             raise SheetError(
                 f"{where}: a {column.get('dataType')} column cannot become {data_type}. A "
-                "sheet is an Iceberg table, which only widens a type (INTEGER to BIGINT, "
-                "FLOAT to DOUBLE); add a new column and copy the values instead",
+                "sheet column only widens its type (INTEGER to BIGINT, FLOAT to DOUBLE); "
+                "add a new column and copy the values instead",
                 f"{where}.type")
         out["dataType"] = data_type
     if "values" in change:
@@ -281,7 +281,7 @@ def describe_column(column: dict) -> str:
 # ------------------------------------------------------------------ values
 
 def cirro_uri(kind: str, project_id: str, dataset_id: str, path: str = "") -> str:
-    """A Cirro reference as the backend stores it,
+    """A Cirro reference as Cirro stores it,
     `cirro:<tenant>:<project>:data:<dataset>/<path>` -- the tenant segment may be empty,
     and the path is relative to the dataset's data directory."""
     path = str(path or "").lstrip("/")
@@ -306,7 +306,7 @@ def _check_cirro_uri(kind: str, value: str) -> None:
 def coerce(column: dict, value, project_id: Optional[str] = None):
     """`value` as `column` stores it, or ValueError saying why it will not go.
 
-    What the backend would otherwise hand to DuckDB as-is: `"5"` for an INTEGER, a
+    What Cirro would otherwise try to store as sent: `"5"` for an INTEGER, a
     `2026-09-30T12:00:00Z` string for a TIMESTAMP, `"yes"` for a BOOLEAN."""
     if value is None:
         if column.get("required"):
@@ -420,7 +420,7 @@ def _date(value) -> str:
 
 def _timestamp(value) -> str:
     """ISO text in UTC without an offset: a TIMESTAMP column has no time zone, and
-    DuckDB will not cast an offset-bearing string into one."""
+    Cirro refuses an offset-bearing string for one."""
     if isinstance(value, dt.date) and not isinstance(value, dt.datetime):
         value = dt.datetime(value.year, value.month, value.day)
     if isinstance(value, str):
@@ -509,11 +509,11 @@ def shown(value) -> str:
 # ------------------------------------------------------------------ selections
 
 def row_filter(where, columns: list, project_id: Optional[str] = None) -> dict:
-    """`where` as the backend's Filter.
+    """`where` as cirro_api_client's Filter.
 
     Shorthand: `{"status": "failed"}` (equals), `{"batch": [1, 2]}` (in),
     `{"notes": null}` (is null), `{"score": {">=": 5}}` (any of the OPERATORS);
-    several keys are ANDed. The backend's own shape --
+    several keys are ANDed. The API's own shape --
     `{"column", "operator", "values"}` or `{"logicalOperator", "conditions"}` -- is
     passed through with its columns checked.
     """

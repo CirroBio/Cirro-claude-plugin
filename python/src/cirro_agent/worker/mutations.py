@@ -161,7 +161,7 @@ def _check_tags(args: dict) -> None:
     """Refuse a `tags` argument that Cirro would reject, or would store as something else.
 
     A tag here is a plain string, wrapped as `Tag(value=...)` on the wire. Cirro's Tag
-    also has a `key`, but Cirro-backend marks it deprecated and nothing here reads it
+    also has a `key`, but Cirro has deprecated it and nothing here reads it
     back, so a {"key", "value"} object has no faithful form: passed through, it reached
     the wire as {"value": {...}} and the upload was refused at apply, after approval
     ("expected VALUE_STRING"). A bare string is refused too, since `list("qc")` is two
@@ -194,9 +194,10 @@ def _check_tags(args: dict) -> None:
         )
 
 
-# Cirro-backend declares the name on every request that creates or renames a dataset --
-# UploadDatasetRequest, UpdateDatasetRequest, ImportDataRequest, RunAnalysisRequest --
-# `@NotBlank @Size(max = 100)`, and refuses anything else only once the change is applied.
+# Every request that creates or renames a dataset -- UploadDatasetRequest,
+# UpdateDatasetRequest, ImportDataRequest, RunAnalysisRequest -- needs a non-blank name
+# of at most 100 characters, and Cirro refuses anything else only once the change is
+# applied.
 DATASET_NAME_MAX = 100
 
 
@@ -209,8 +210,8 @@ def _check_dataset_name(name) -> None:
             retry_with=[{"name": "..."}],
         )
 
-    # `@Size` counts what Java's String.length() counts: UTF-16 code units, so a
-    # character outside the Basic Multilingual Plane, such as an emoji, is two.
+    # Cirro counts the length in UTF-16 code units, so a character outside the Basic
+    # Multilingual Plane, such as an emoji, is two.
     def units(text: str) -> int:
         return len(text.encode("utf-16-le")) // 2
 

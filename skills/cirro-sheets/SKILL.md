@@ -70,7 +70,7 @@ plan(op="delete_rows", args={"project_id": ..., "sheet_id": ..., "row_ids": [42,
 
 - **`where`**: `{"col": value}` equals, `{"col": [a, b]}` in, `{"col": null}` is null,
   `{"col": {">=": 5}}` (`=`, `!=`, `>`, `>=`, `<`, `<=`, `like`, `not like`, `in`,
-  `not in`). Several keys are ANDed. For OR, pass the backend's own shape:
+  `not in`). Several keys are ANDed. For OR, pass the API's own `Filter` shape:
   `{"logicalOperator": "OR", "conditions": [{"column": ..., "operator": "EQUALS",
   "values": [...]}, ...]}`. Or name rows with `row_ids`.
 - One update or delete selects at most 10,000 rows. Narrow the filter or split the work.

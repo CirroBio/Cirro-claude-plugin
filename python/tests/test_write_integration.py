@@ -209,9 +209,9 @@ def test_healthomics_is_named_in_the_approval_text(writable_tenant, session_dir)
 
 
 def test_batch_is_an_omitted_field_not_an_explicit_value(writable_tenant, session_dir):
-    """`resolveEnvironmentType` returns undefined for Batch rather than AWS_BATCH, and
-    an explicit value interacts differently with the backend's compute-environment
-    conflict check. Asking for AWS_BATCH normalizes to omitting it."""
+    """The web app omits the field for Batch rather than sending AWS_BATCH, and an
+    explicit value interacts differently with Cirro's compute-environment conflict
+    check. Asking for AWS_BATCH normalizes to omitting it."""
     for given in (None, "AWS_BATCH"):
         result = plan_run(writable_tenant, session_dir, environment_type=given)
         assert result["ok"], result
@@ -223,7 +223,7 @@ def test_batch_is_an_omitted_field_not_an_explicit_value(writable_tenant, sessio
 
 def test_a_pipeline_that_does_not_declare_healthomics_is_refused_in_plan(
         writable_tenant, session_dir):
-    """The backend refuses it too, but after approval. Refusing in plan keeps the
+    """Cirro refuses it too, but after approval. Refusing in plan keeps the
     failure on the read-only side of the gate."""
     result = plan_run(writable_tenant, session_dir, process="proc_sarek",
                       environment_type="AWS_OMICS")
@@ -244,7 +244,7 @@ def test_the_process_mode_vocabulary_is_not_the_request_vocabulary(
 
 def test_an_environment_this_operation_cannot_set_up_is_refused(
         writable_tenant, session_dir):
-    """NONE and LOCAL_AGENT are real EnvironmentType values; the backend rejects the
+    """NONE and LOCAL_AGENT are real EnvironmentType values; Cirro rejects the
     first outright and the second is not something run_analysis can arrange."""
     for given in ("NONE", "LOCAL_AGENT", "AWS_LAMBDA"):
         result = plan_run(writable_tenant, session_dir, environment_type=given)
@@ -254,8 +254,8 @@ def test_an_environment_this_operation_cannot_set_up_is_refused(
 def test_an_environment_type_and_a_compute_environment_conflict_in_plan(
         writable_tenant, session_dir):
     """A customer compute environment already names where the run executes, which is
-    why the portal sends no environmentType when one is selected. The backend 400s on
-    the combination, and that arrives after approval."""
+    why the web app sends no environmentType when one is selected. Cirro 400s on the
+    combination, and that arrives after approval."""
     result = plan_run(writable_tenant, session_dir, environment_type="AWS_OMICS",
                       compute_environment="HPC test")
     assert result["error"]["code"] == "INVALID_QUERY"
@@ -688,9 +688,9 @@ def test_an_unreadable_read_reply_names_the_status_and_the_body(fake_tenant,
 ])
 def test_a_launch_whose_reply_cannot_confirm_it_is_not_reported_as_retryable(
         writable_tenant, session_dir, status, body, said):
-    """Observed on ocra twice: a launch failed with a bare JSONDecodeError, retryable,
+    """Seen twice in live use: a launch failed with a bare JSONDecodeError, retryable,
     with nothing saying whether the run had started. A 2xx means Cirro took it and a
-    5xx may follow a launch the backend finished, so planning it again could start a
+    5xx may follow a launch Cirro finished, so planning it again could start a
     second run. The way forward is the read that settles it."""
     planned = plan_run(writable_tenant, session_dir)
     writable_tenant["router"].post(f"{API}/projects/proj_a/execution").respond(
@@ -1449,8 +1449,8 @@ def test_every_op_that_writes_tags_holds_them_to_a_list_of_strings(
 def test_a_dataset_name_cirro_would_refuse_is_refused_before_the_approval(
         writable_tenant, session_dir, tmp_path):
     """2026-09-21: "uploadDatasetRequest.name: size must be between 0 and 100", after
-    the approval. Cirro-backend puts `@Size(max = 100)` on the name of every request
-    that creates or renames a dataset, so all four are held to it."""
+    the approval. Every request that creates or renames a dataset caps the name at 100
+    characters, so all four are held to it."""
     too_long = "RNAseq " + "x" * 94
     assert len(too_long) == 101
     for op, args in [
@@ -1473,8 +1473,8 @@ def test_a_dataset_name_cirro_would_refuse_is_refused_before_the_approval(
     assert at_the_limit["ok"], at_the_limit
 
 
-def test_the_name_limit_counts_what_java_counts():
-    """`@Size` counts UTF-16 code units, so a character outside the Basic Multilingual
+def test_the_name_limit_counts_utf16_code_units():
+    """Cirro counts UTF-16 code units, so a character outside the Basic Multilingual
     Plane is two of them -- a name Python measures at 100 can be 101 to Cirro."""
     from cirro_agent import errors
     from cirro_agent.worker import mutations

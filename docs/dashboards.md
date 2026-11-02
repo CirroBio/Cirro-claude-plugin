@@ -6,7 +6,8 @@ it"*, and read or change the ones you already have.
 
 It works in the same terms you do: a table to read from, a query over it, a chart or
 table of the result, a filter. Before anything is saved, the plan **runs the
-dashboard's data on your machine** with the same engine the portal uses (DuckDB), so
+dashboard's data on your machine** with the same engine the portal uses
+([DuckDB](https://docs.cirro.bio/features/data-studio/)), so
 the approval tells you how many rows each chart will show and which columns it is
 drawing. A dashboard that would come out blank, because a column is missing or a chart
 was given the wrong kind of column, is refused with the reason instead of saved. You can

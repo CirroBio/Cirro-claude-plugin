@@ -239,18 +239,19 @@ class Reader:
         )
 
     def has_parent_processes(self, process_id: str) -> bool:
-        """Whether anything can feed this process -- the portal's `hasParentProcesses`.
+        """Whether anything can feed this process, as the web app decides it.
 
         Two halves, and both are load-bearing: a process may declare its own
         `parent_process_ids`, or be named in another process's `child_process_ids`.
-        `pipeline.context.tsx` unions the two and gates submit on
-        `hasParentProcesses && !sourceDatasets.length`, so a process with neither is
-        launched from the UI with an empty source list.
+        The web app unions the two and refuses a launch with no source datasets only
+        when that union is non-empty, so a process with neither is launched from the UI
+        with an empty source list.
 
-        Deliberately not the invokability rule from `pipeline-row-data.tsx`, which
-        additionally drops parents carrying no `dataType`. That one decides whether to
-        offer a pipeline in a list; this one decides whether an empty input is legal,
-        and reading the looser of the two would accept a launch the platform gates.
+        Deliberately not the rule the web app uses to list a pipeline as runnable,
+        which additionally drops parents carrying no `dataType`. That one decides
+        whether to offer a pipeline in a list; this one decides whether an empty input
+        is legal, and reading the looser of the two would accept a launch the platform
+        gates.
 
         The listing is already fetched by `resolve_process`, so this costs no call.
         """
@@ -510,10 +511,10 @@ def dataset_cost(reader: Reader, project_id: str, dataset_id: str) -> dict:
     Never cached: a running analysis's cost grows as its tasks finish, so a snapshot
     would answer "what did this run cost" with a figure from earlier in the same run.
     A dataset nobody computed -- an upload, or an executor with no task-level
-    accounting -- has no cost record. Observed on dev, the endpoint refuses that with
-    400 "This dataset does not have an execution associated with it", which the
-    dispatcher would otherwise render as a retryable UPSTREAM_ERROR telling the reader
-    to check Cirro's service status. It is neither retryable nor a service fault, so
+    accounting -- has no cost record. The endpoint refuses that with 400 "This dataset
+    does not have an execution associated with it", which the dispatcher would otherwise
+    render as a retryable UPSTREAM_ERROR telling the reader to check Cirro's service
+    status. It is neither retryable nor a service fault, so
     it becomes the typed refusal `dataset_tasks` raises for the same situation -- and
     never a zero total, which would read as a run that cost nothing.
     """

@@ -3,12 +3,13 @@
 Pure and cirro-free. The worker resolves names and loads data; everything here works on
 plain dicts, so the planner, the reads and the tests share one implementation.
 
-A dashboard record's `dashboardData` is the portal's `PersistedDashboard`: a node graph
-(`ir`), canvas positions, and one or more pages of tiles. What a valid graph is --
-node types, ports, config fields, chart channels, the tile grid -- is owned by the
-portal's `@cirrobio/dashboard` package and exported as `dashboard-schema.json`. A copy
-is vendored in `data/`; the worker prefers the one the tenant's portal serves, so a
-plan validates against the portal that will render it.
+A dashboard record's `dashboardData` is the document Data Studio saves
+(https://docs.cirro.bio/features/data-studio/): a node graph (`ir`), canvas positions,
+and one or more pages of tiles. What a valid graph is -- node types, ports, config
+fields, chart channels, the tile grid -- is owned by the portal, which publishes it as
+`/schemas/dashboard-schema.json`. A copy is vendored in `data/`; the worker prefers
+the one the tenant's portal serves, so a plan validates against the portal that will
+render it.
 
 The portal does not reject a bad document. It resets a node config whose field has the
 wrong type to `{}`, drops tiles that name no node, and draws a chart with an unbound
@@ -27,12 +28,13 @@ SCHEMA_FILE = Path(__file__).parent / "data" / "dashboard-schema.json"
 # The shape of dashboard-schema.json this module reads (its own `format` field).
 SCHEMA_FORMAT = 1
 
-# The portal's record envelope (Cirro-portal dashboard-session-store.ts). `list` there
-# shows only records whose criteria carry this type, so a record without it is invisible.
+# The record envelope Data Studio writes. Its dashboard list shows only records whose
+# criteria carry this type, so a record without it is invisible.
 SESSION_TYPE = "sql-room"
 RECORD_SCHEMA_VERSION = 1
 
-# DynamoDB's item limit is 400 KB and the blob shares it with every other attribute.
+# Cirro stores a dashboard record of at most 400 KB, and the blob shares that with every
+# other field of the record.
 MAX_BLOB_BYTES = 350_000
 
 TABULAR_TYPES = ("csv", "tsv", "parquet", "json", "txt", "tab", "dsv")
@@ -88,8 +90,8 @@ class Schema:
 
     def ports(self, node: dict) -> tuple:
         """(inputs, outputs) for one node instance: static ports plus the manifest's
-        config-derived ones, per the schema's declarative `dynamicPorts` rule. Mirrors
-        the reference interpreter in the portal's dashboard-schema.test.ts."""
+        config-derived ones, per the schema's declarative `dynamicPorts` rule, read as
+        the portal reads it."""
         spec = self.node_types.get(node.get("type"))
         if spec is None:
             return [], []
@@ -128,7 +130,7 @@ def vendored_schema() -> Schema:
 
 
 def empty_document(schema: Schema) -> dict:
-    """What the portal's `initialGraphState` persists for a graph with no nodes."""
+    """What Data Studio saves for a graph with no nodes."""
     return {"version": schema.persist_version, "ir": {"nodes": [], "edges": []},
             "positions": {}, "dashboards": [{"id": "default", "name": "Default", "tiles": []}],
             "activeDashboardId": "default"}
@@ -151,7 +153,8 @@ def is_session_blob(document) -> bool:
 
 
 def infer_scope(document: dict) -> dict:
-    """The portal's `inferScope`: one source pins the record to its dataset or sheet."""
+    """The record's scope, as Data Studio sets it: one source pins the record to its
+    dataset or sheet."""
     sources = [n for n in document["ir"]["nodes"]
                if n["type"] in ("dataset-source", "dataset-file")]
     if len(sources) != 1:
@@ -165,7 +168,7 @@ def infer_scope(document: dict) -> dict:
 
 
 def file_table_name(path: str) -> str:
-    """The portal's `fileTableName`: a SQL-safe alias from a file's basename."""
+    """A SQL-safe alias from a file's basename, as Data Studio names a file's table."""
     base = re.sub(r"\.[^.]+$", "", path.split("/")[-1])
     ident = re.sub(r"^(\d)", r"_\1", re.sub(r"[^A-Za-z0-9_]", "_", base))
     return ident or "file"
@@ -177,7 +180,7 @@ def file_type(path: str) -> Optional[str]:
 
 
 def title_case(identifier: str) -> str:
-    """The portal's `titleCaseIdentifier`: `gene_name` -> `Gene Name`."""
+    """A column name as Data Studio titles it: `gene_name` -> `Gene Name`."""
     words = " ".join(w[:1].upper() + w[1:] for w in re.split(r"[_-]+", identifier) if w)
     return words or identifier
 
@@ -215,7 +218,7 @@ def _get_path(obj, path: list):
 
 def _mark_column(value) -> Optional[str]:
     """The column an axis channel names for labelling: `col` or `{bin: col}`, never an
-    aggregate -- the portal's `channelColumn`."""
+    aggregate -- as Data Studio reads it."""
     if isinstance(value, str):
         return value
     if (isinstance(value, dict) and len(value) == 1 and "bin" in value
@@ -226,8 +229,8 @@ def _mark_column(value) -> Optional[str]:
 
 def build_spec(schema: Schema, chart_id: str, bindings: dict) -> str:
     """A Mosaic spec for a catalog chart with `bindings` (channel -> column) written at
-    each channel's paths, and humanized axis titles -- what the portal's `buildSpec`
-    and `patchChannel` produce, serialized the way its `serializeSpec` does."""
+    each channel's paths, and humanized axis titles -- what Data Studio writes for a
+    new chart, serialized the way it serializes one."""
     chart = schema.charts[chart_id]
     spec = {"$schema": schema.mosaic_schema_url, "plot": copy.deepcopy(chart["base"]["plot"])}
     for ch in chart["channels"]:
@@ -245,7 +248,7 @@ def build_spec(schema: Schema, chart_id: str, bindings: dict) -> str:
 
 def read_bindings(schema: Schema, chart_id: str, spec_text) -> dict:
     """channel -> column read back from a spec's first path per channel, ignoring the
-    literal the chart's own skeleton bakes in there (the portal's `tryReadBindings`)."""
+    literal the chart's own skeleton bakes in there, as Data Studio reads them back."""
     chart = schema.charts.get(chart_id)
     try:
         spec = json.loads(spec_text) if isinstance(spec_text, str) else None
@@ -266,7 +269,7 @@ def read_bindings(schema: Schema, chart_id: str, spec_text) -> dict:
 
 def patch_spec(schema: Schema, chart_id: str, spec_text, updates: dict) -> str:
     """`updates` (channel -> column, or None to clear) written into an existing spec in
-    place -- the portal's `patchChannel`. Everything else in the spec survives, hand
+    place, as Data Studio edits a channel. Everything else in the spec survives, hand
     edits included; a cleared channel gets back the literal its skeleton puts there. An
     axis title that still names the column being replaced follows it, while one its
     author typed is kept. A spec that does not parse is rebuilt from the skeleton."""
@@ -404,7 +407,7 @@ def _has_cycle(document: dict) -> bool:
 
 
 def _structure_issues(document) -> list:
-    """What the portal's `fromPersisted` refuses to load at all."""
+    """What Data Studio refuses to load at all."""
     if not isinstance(document, dict):
         return [_issue("error", "structure", "dashboardData must be an object")]
     ir = document.get("ir")

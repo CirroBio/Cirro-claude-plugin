@@ -40,8 +40,8 @@ ENVIRONMENT_TYPES = (AWS_OMICS, AWS_BATCH)
 def _environment_type(args: dict, process: dict) -> Optional[str]:
     """Which execution environment to ask for, or None to let Cirro choose.
 
-    None is what the portal sends for Batch -- `resolveEnvironmentType` returns
-    undefined rather than AWS_BATCH -- so an explicit AWS_BATCH is normalized to it.
+    None is what the web app sends for Batch -- it omits the field rather than sending
+    AWS_BATCH -- so an explicit AWS_BATCH is normalized to it.
     """
     given = args.get("environment_type")
     if not given:
@@ -56,7 +56,7 @@ def _environment_type(args: dict, process: dict) -> Optional[str]:
         )
     if value not in ENVIRONMENT_TYPES:
         # NONE and LOCAL_AGENT are real EnvironmentType values and are still refused:
-        # the backend rejects NONE outright, and a local-agent run is not something
+        # Cirro rejects NONE outright, and a local-agent run is not something
         # this operation can set up.
         raise errors.InvalidQuery(
             f"environment_type {given!r} is not one this operation accepts.",
@@ -68,7 +68,7 @@ def _environment_type(args: dict, process: dict) -> Optional[str]:
     if value == AWS_BATCH:
         return None
     if args.get("compute_environment"):
-        # The backend 400s on this combination, and that arrives after approval. A
+        # Cirro 400s on this combination, and that arrives after approval. A
         # customer compute environment already names where it runs, which is why the
         # portal sends no environmentType whenever one is selected.
         raise errors.InvalidQuery(
@@ -81,7 +81,7 @@ def _environment_type(args: dict, process: dict) -> Optional[str]:
         )
     modes = process.get("execution_modes") or []
     if R.HEALTHOMICS_MODE not in modes:
-        # The backend refuses this too, but refusing it here keeps the failure on the
+        # Cirro refuses this too, but refusing it here keeps the failure on the
         # read-only side of the approval gate.
         raise errors.InvalidQuery(
             f"{process['name']!r} does not declare {R.HEALTHOMICS_MODE} and cannot run "
@@ -177,8 +177,8 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
         "notification_emails": notify,
         "compute_environment_id": compute,
         # None means "omit", which is how the portal asks for Batch. Sending AWS_BATCH
-        # explicitly is a different request and interacts differently with the
-        # backend's compute-environment conflict check.
+        # explicitly is a different request and interacts differently with
+        # Cirro's compute-environment conflict check.
         "environment_type": environment_type,
         "resume_dataset_id": args.get("resume_dataset_id"),
         "source_sample_ids": args.get("source_sample_ids") or [],
@@ -274,8 +274,8 @@ def _launch_failure(exc: Exception, args: dict) -> errors.AgentError:
 
     A refusal (a 4xx) or a failure before the launch was sent started nothing, so
     planning again is safe. Anything else may follow a launch Cirro went ahead with: a
-    2xx whose body could not be read, a 5xx (a gateway gives up on a request the
-    backend goes on to finish), or a connection that ended before the reply. Reported
+    2xx whose body could not be read, a 5xx (a gateway gives up on a request
+    Cirro goes on to finish), or a connection that ended before the reply. Reported
     as a retryable upstream fault, any of these invites a second launch -- a bare
     `JSONDecodeError` reached people that way, with nothing saying whether the run had
     started.

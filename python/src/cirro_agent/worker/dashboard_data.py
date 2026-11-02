@@ -90,7 +90,7 @@ def _quote_literal(value: str) -> str:
 
 
 def _reader_expr(path: str, file_type: str) -> str:
-    """The portal's `fileReaderExpr`, over a local path."""
+    """The table expression Data Studio reads a file with, over a local path."""
     literal = _quote_literal(path)
     if file_type == "parquet":
         return f"read_parquet({literal})"
@@ -110,7 +110,7 @@ def column_class(duck_type: str) -> str:
     return "categorical"
 
 
-# The portal's `looksNumeric`: decimal or scientific only, never hex.
+# What Data Studio treats as numeric text: decimal or scientific only, never hex.
 _NUMBER_PATTERN = r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?"
 
 
@@ -121,7 +121,7 @@ def _looks_numeric(text: str) -> bool:
 
 
 def _system_column(name: str) -> bool:
-    """The portal's `isSystemColumn`: backend plumbing it never loads into a view."""
+    """A column Cirro maintains, which Data Studio never loads into a view."""
     return name == "_row_id" or name.startswith("sys_")
 
 
@@ -314,7 +314,8 @@ class Runner:
         return out
 
     def _aliases(self, document, node, upstream) -> None:
-        """The portal's `aliasDDLs`: by position, `query` and `in1` both the first input
+        """A query's inputs, named as Data Studio names them: by position, `query` and
+        `in1` both the first input
         and `in2..N` the rest (there is no `in0`), one view per input port, and one per
         source table name."""
         nodes = {n["id"]: n for n in document["ir"]["nodes"]}
@@ -341,9 +342,9 @@ class Runner:
                                  f"SELECT * FROM {source}")
 
     def _substitute(self, document, node, sql: str) -> str:
-        """The portal's `substituteParams` over `collectParams`: each wired `{token}`
-        becomes a typed literal from the control or param feeding it. Unwired tokens stay,
-        and DuckDB reports them -- which is what the portal shows too."""
+        """Parameters filled in as Data Studio fills them: each wired `{token}` becomes
+        a typed literal from the control or param feeding it. Unwired tokens stay, and
+        DuckDB reports them -- which is what the portal shows too."""
         nodes = {n["id"]: n for n in document["ir"]["nodes"]}
         literals = {}
         for edge in document["ir"]["edges"]:

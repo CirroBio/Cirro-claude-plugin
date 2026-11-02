@@ -1,5 +1,5 @@
 """Sheets: the column, value and selection rules, and each operation end to end against
-an in-memory sheets backend that behaves the way Cirro-backend's does."""
+an in-memory sheets API that behaves the way Cirro's does."""
 
 import json
 
@@ -88,7 +88,7 @@ def test_row_problems_name_the_row_and_the_column():
     assert S.duplicates(SAMPLES, [{"sample_id": "a"}, {"sample_id": "a"}])
 
 
-def test_where_shorthand_becomes_the_backend_filter():
+def test_where_shorthand_becomes_the_api_filter():
     columns = S.user_columns(SAMPLES)
     assert S.row_filter({"status": "failed"}, columns) == {
         "column": "status", "operator": "EQUALS", "values": ["failed"]}
@@ -126,7 +126,7 @@ def test_a_timestamp_read_back_equals_the_one_written():
     assert not S.stored_equal(column, None, "2026-09-02 08:30:00")
 
 
-# --- a sheets backend ------------------------------------------------------------
+# --- a sheets API ----------------------------------------------------------------
 
 def _matches(row, node):
     if "conditions" in node:
@@ -570,7 +570,7 @@ def test_a_view_that_is_not_ready_is_refused_before_approval_saying_why(
 
 def test_a_refresh_refused_as_not_ready_is_the_sheet_s_status_not_a_bad_request(
         sheets_tenant, session_dir):
-    """Observed on dev as INVALID_QUERY "The view was not refreshed: Sheet is not
+    """Seen in live use as INVALID_QUERY "The view was not refreshed: Sheet is not
     ready" with "Fix the request and plan again" -- but nothing in the request was
     wrong; a job had started on the view after the plan checked it."""
     _materialized_view(sheets_tenant["sheets"], "COMPLETED")
@@ -586,8 +586,8 @@ def test_a_refresh_refused_as_not_ready_is_the_sheet_s_status_not_a_bad_request(
 
 def test_a_failed_sheet_reads_with_its_last_jobs_error_and_can_be_deleted(sheets_tenant,
                                                                           session_dir):
-    """Observed on dev: a materialized view whose job failed answers "Sheet is not
-    ready" for its rows and refuses a refresh, but the backend still deletes it."""
+    """A materialized view whose job failed answers "Sheet is not ready" for its rows
+    and refuses a refresh, but Cirro still deletes it."""
     sheets_tenant["sheets"]["sheets"]["sheet-1"]["status"] = "FAILED"
     read = call(sheets_tenant, session_dir, "sheet", id="sheet-1",
                 scope={"project_ids": ["proj_a"]})

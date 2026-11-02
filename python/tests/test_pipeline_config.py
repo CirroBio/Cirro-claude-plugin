@@ -349,7 +349,7 @@ def test_config_settings_carry_a_repository_type(tmp_path):
     """Cirro cannot reach the configuration repository without knowing its type.
 
     Omitting it is not a soft failure: the API rejects the create, as a 500
-    NullPointerException for some folder names and a 400 for others.
+    for some folder names and a 400 for others.
     """
     reader = MagicMock()
     reader.processes.return_value = []
@@ -957,7 +957,7 @@ def test_a_refused_create_reports_cirro_s_reason_and_that_nothing_was_registered
     """A 400 arrives as a parsed PortalErrorResponse, not an exception.
 
     Reading only its missing id reported "the API accepted the request but returned no
-    process id" -- twice on dev inside a chain, for a create Cirro had refused, with
+    process id" -- twice inside a chain, for a create Cirro had refused, with
     its reason dropped and a retry suggested. A chain with the same process name then
     succeeded the same day: nothing had been registered, so nothing collided.
     """
@@ -1036,7 +1036,7 @@ def _repo_backed(code_type: str, is_authorized: bool) -> dict:
 
 
 def test_a_sync_cirro_will_refuse_for_github_authorization_is_refused_at_plan():
-    """Observed on dev five times: the plan only warned, the person approved, and Cirro
+    """Seen five times in live use: the plan only warned, the person approved, and Cirro
     answered 403 "Process not authorized, please authorize GitHub connection" -- which
     came back as a retryable UPSTREAM_ERROR saying "retry once", so it was.
 
