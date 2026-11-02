@@ -166,6 +166,16 @@ def call(request: dict, *, session: Optional[session_mod.Session] = None,
             cwd=str(plugin_root()),
         )
     except subprocess.TimeoutExpired:
+        if request.get("verb") == "login_start":
+            # Retrying login_start is the wrong advice here: a daemon the worker had
+            # already spawned is still asking for a code, and login_wait shows it.
+            return errors.UpstreamError(
+                f"Starting the login did not finish within {timeout}s.",
+                what="The worker was stopped; a login it had begun may still be starting.",
+                retry_with=[{"tool": "login_wait", "base_url": session.base_url}],
+                user_action=("Call login_wait: it returns the link once Cirro issues one, "
+                             "or reports that no login is running."),
+            ).to_dict()
         return errors.UpstreamError(
             f"The operation did not finish within {timeout}s.",
             what="The worker was terminated.",

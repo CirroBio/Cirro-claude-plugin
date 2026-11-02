@@ -45,7 +45,7 @@ Do not run `cirro-agent read doctor` first: `login_start` returns
 the same typed errors, and a diagnostic pass before the thing you are diagnosing just
 puts another approval prompt between the user and their link.
 
-One of three things comes back:
+One of four things comes back:
 
 - `status: "pending"` — a login is under way. `verification_url` is a one-click link
   with the code already in it. **Put it in your very next message, before anything
@@ -55,6 +55,10 @@ One of three things comes back:
   says whether that worked. Treat it as a courtesy — a desktop host has no terminal,
   and a full-screen interface may redraw over it — and your own message as the
   delivery. Nothing opens a browser for them; they follow the link themselves.
+- `status: "starting"` — Cirro has not issued a code yet, though the login is still
+  asking for one. Go straight to `login_wait`: it returns `pending` with the link the
+  moment there is one, and that link then goes in your next message. Do not call
+  `login_start` again for it.
 - `status: "already_authenticated"` — **you are done. Stop here.** It reports the
   username and proves it with a live API call, so trust it. Do not go on to
   `login_wait`, do not offer a link, and do not announce a login the person did not
@@ -67,14 +71,24 @@ One of three things comes back:
 
 ### 3. Wait — only if a login actually started
 
-Reached only from `pending`. Call `login_wait` **after** the message carrying the link, never bundled ahead of it.
-It returns as soon as the sign-in lands, so a prompt reply is not slowed down by
-the timeout — but it will sit for the full `timeout_s` if the person steps away.
+Reached only from `pending` or `starting`. From `pending`, call `login_wait` **after**
+the message carrying the link, never bundled ahead of it. Pass it the same `base_url`
+— and `directory`, if you named one — that `login_start` was given:
 
-It returns `ok`, `pending`, or a typed failure. **`pending` is not an error.** It means
-the person has not finished signing in yet. Say so, offer the link again, and call
+```
+login_wait(base_url="app.cirro.bio")
+```
+
+Without them it looks for the session from the working directory, and with several
+tenants signed in it cannot tell which one you mean. It returns as soon as the sign-in
+lands, so a prompt reply is not slowed down by the timeout — but it will sit for the
+full `timeout_s` if the person steps away.
+
+It returns `ok`, `pending`, `starting`, or a typed failure. **`pending` is not an
+error.** It means the person has not finished signing in yet. Say so, offer the link again, and call
 `login_wait` once more. Never treat it as a failure and never retry `login_start`
 while a login is pending — that invalidates the code the user is looking at.
+`starting` from `login_wait` means the code still has not come; call it once more.
 
 ### 4. Confirm
 
