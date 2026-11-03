@@ -36,8 +36,10 @@ PROVEN_EXTENSIONS = {
     "name": "display name at the root of a form",
     "help": "shorter variant of help_text",
     "value": "fixed value for a field the user does not set",
-    # Documented with structured inputs (Cirro-docs#332) rather than observed: its
-    # value is checked against `structuredInputs` instead of being taken on trust.
+    # Documented with structured inputs rather than observed
+    # (https://docs.cirro.bio/pipelines/configuring-pipeline/, "Sample Sheets and Other
+    # Structured Inputs"): its value is checked against `structuredInputs` instead of
+    # being taken on trust.
     "schema": "names a structuredInputs entry; the field becomes a table the user "
               "fills in",
 }
@@ -74,12 +76,11 @@ PATH_TYPES = ("dataset",) + REFERENCE_PATH_TYPES
 # nf-schema's, so a parameter copied from a nextflow_schema.json keeps its picker. Any
 # one of them in a form -- or any structured input -- puts the portal in browse mode:
 # no input-dataset selector, paths picked from the whole project, and the run's input
-# datasets read off the picked paths (`inputDatasetsEnabled` in Cirro-portal's
-# configure.fn.ts).
+# datasets read off the picked paths.
 PATH_FORMATS = ("file-path", "file-path-pattern", "directory-path", "path")
 
-# A structured input's name becomes its file name, and the run API caps how many one
-# launch carries (`RunAnalysisRequest.structuredInputs`, @Size(max = 10)).
+# A structured input's name becomes its file name, and Cirro refuses a launch that
+# carries more than ten (`RunAnalysisRequest.structured_inputs` in cirro_api_client).
 STRUCTURED_NAME = re.compile(r"^[A-Za-z0-9_-]{1,50}$")
 STRUCTURED_FORMATS = ("CSV", "TSV", "JSON")
 STRUCTURED_KEYS = ("fileFormat", "schema", "defaultSourceFile", "examples")

@@ -281,13 +281,13 @@ def describe_column(column: dict) -> str:
 # ------------------------------------------------------------------ values
 
 # The resource type every dataset reference carries, in sheet cells and run parameters
-# alike (`EntityType.DATASET.toResourceType()` in Cirro-backend, since #876).
+# alike. Cirro refuses the older `data`.
 URI_RESOURCE = "dataset"
 
 
 def dataset_uri(project_id: str, dataset_id: str, path: Optional[str] = None) -> str:
     """A reference to a dataset, `cirro:<tenant>:<project>:dataset:<dataset>/<path>`,
-    as the backend writes it -- the tenant segment left empty for the current one.
+    as Cirro writes it -- the tenant segment left empty for the current one.
 
     `path` is relative to the dataset's data directory. None names the dataset itself;
     an empty path names its whole data directory, which is a folder.

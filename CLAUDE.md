@@ -427,9 +427,8 @@ for. The capability is a property of the process, set at registration, which is 
 run path can only refuse a mode the pipeline never declared and never grant one.
 
 **A dataset reference says `dataset`.** Cirro URIs are
-`cirro:<tenant>:<project>:dataset:<id>[/<path>]` in sheet cells and run parameters alike
-(`EntityType.DATASET.toResourceType()`, since Cirro-backend#876); the sheet writer used
-to say `data`, which the backend refuses. The path is relative to the dataset's data
+`cirro:<tenant>:<project>:dataset:<id>[/<path>]` in sheet cells and run parameters
+alike; the sheet writer used to say `data`, which Cirro refuses. The path is relative to the dataset's data
 folder, an empty path is that whole folder, and the project segment, when present, must
 be the dataset's own -- a shared dataset's is the project it was shared from.
 `sheets.dataset_uri` and `parse_dataset_uri` are the one implementation of both halves.
@@ -479,11 +478,11 @@ Cirro-pipelines' main drew nothing new from them, and the two pilot samplesheet 
 
 **A form runs in one of two modes, and the form decides which.** Any field with a path
 `format` or any `structuredInputs` entry puts the portal in browse mode
-(`formcheck.browse_mode`, after `inputDatasetsEnabled` in Cirro-portal): no input-dataset
+(`formcheck.browse_mode`): no input-dataset
 selector, paths picked from the whole project as `cirro::<project>:dataset:<id>/<path>`
 URIs, a multi-select submitted as a list, a samplesheet field's rows sent as a file
 rather than in params, and the run's input datasets read off the URIs -- the portal
-sends them as `sourceDatasetIds`, and the backend unions in every dataset URI in the
+sends them as `sourceDatasetIds`, and Cirro unions in every dataset URI in the
 params and rows besides. Generation chooses through `cirro.input_mode`, and a spec
 without it is `select` so that regenerating an older pipeline cannot move it: the one
 deliberate change to select output is `[*]` on multi-select mappings, which gives the
@@ -495,13 +494,13 @@ so `reads.launch_form` is the one statement of the difference and params are val
 against it -- through the SDK's own `jsonschema.validate`, so a conditional form is held
 to the draft it always was. That is also why the launch posts through the generated
 route instead of `ExecutionService.run_analysis`: the service validates against the
-form as served and refuses the list a multi-select sends. Cirro-backend checks no
-samplesheet row against its columns -- `StructuredInputSerializer` writes what it is
-given -- so the planner is the only check a row gets. A CSV or TSV takes its header from
-where keys first appear across rows, which is why every row carries every column. The
-plan infers inputs from Cirro URIs only; the backend still also reads legacy
-`s3://project-*/datasets/<uuid>` paths in params (marked for removal as CI-1986), and a
-run whose params lean on one shows that dataset in the approval only if it is named.
+form as served and refuses the list a multi-select sends. Cirro checks no samplesheet
+row against its columns -- it writes what it is given -- so the planner is the only
+check a row gets. A CSV or TSV takes its header from where keys first appear across
+rows, which is why every row carries every column. The plan infers inputs from Cirro
+URIs only; Cirro still also reads legacy `s3://project-*/datasets/<uuid>` paths in
+params, and a run whose params lean on one shows that dataset in the approval only if
+it is named.
 
 **Every op family registers itself into `mutations.OPS`.** `mutations.py` holds the
 shared core -- `Draft`, `Op`, the risk classes, the resolvers, `OPS` and `get_op` -- and

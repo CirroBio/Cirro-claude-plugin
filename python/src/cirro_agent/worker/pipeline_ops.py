@@ -1293,7 +1293,7 @@ def apply_update_process(reader: reads.Reader, args: dict) -> dict:
     return {"updated_process_id": args["process_id"], "changed": sorted(changes)}
 
 
-# The global roles that carry CREATE_CUSTOM_PIPELINE_TENANT (Cirro-backend GlobalRole):
+# The global roles that carry `Permission.CREATE_CUSTOM_PIPELINE_TENANT` (cirro_api_client):
 # the only ones that may make a process visible to everyone, or take that back.
 TENANT_ADMIN_ROLES = frozenset({"sys-admins", "administrators"})
 

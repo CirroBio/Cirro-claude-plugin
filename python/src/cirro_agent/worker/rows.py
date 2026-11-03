@@ -269,7 +269,7 @@ def process_detail(detail, base: Optional[dict] = None) -> dict:
     row["file_mapping_rules"] = [
         rule.to_dict() if hasattr(rule, "to_dict") else rule
         for rule in plain(getattr(detail, "file_mapping_rules", None)) or []]
-    # Who can see and run the process. The backend derives its read access from these
+    # Who can see and run the process. Cirro derives its read access from these
     # two on every write, so an update that does not resend them unlinks every
     # project and turns a tenant-wide process private.
     row["linked_project_ids"] = plain(getattr(detail, "linked_project_ids", None)) or []

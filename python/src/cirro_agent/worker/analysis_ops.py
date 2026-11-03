@@ -9,7 +9,7 @@ says otherwise, which is what the web UI does; `_notify` explains the mechanics.
 A run's input datasets are the ones it names and the ones its picked paths point into.
 A form with path pickers or a samplesheet (`formcheck.browse_mode`) has no input-dataset
 selector in the portal: the person picks files from the whole project, and the portal
-and the backend both read the inputs off the Cirro URIs in the params and the rows.
+and the run API both read the inputs off the Cirro URIs in the params and the rows.
 The planner reads them the same way, so the approval names every dataset the run reads.
 """
 import re
@@ -31,7 +31,7 @@ RUN_ANALYSIS_ARGS = PROJECT_ARGS + FOLDER_ARGS + (
     "resume_dataset_id", "structured_inputs",
 )
 
-# Rows one samplesheet may carry (Cirro-backend StructuredInputDto, @Size(max = 10_000)).
+# Rows one samplesheet may carry; Cirro refuses a launch with more.
 MAX_STRUCTURED_ROWS = 10_000
 
 # The path formats whose value has to be a file rather than a folder.
@@ -141,7 +141,7 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
     source_ids = args.get("source_dataset_ids") or []
     if not source_ids and args.get("dataset_id"):
         source_ids = [args["dataset_id"]]
-    # In the backend's order: named first, then what the rows and params point into.
+    # In Cirro's order: named first, then what the rows and params point into.
     # dict.fromkeys rather than a set, whose order changes between the plan and the
     # re-plan at apply and would make every such plan stale.
     input_ids = list(dict.fromkeys([*source_ids, *picked_from]))
@@ -545,7 +545,7 @@ def _at(params: dict, path: str):
 
 def _uris(value, where: str) -> list:
     """(where, value) for every string in `value` that is a dataset reference -- what the
-    backend scans params and rows for to find a run's inputs."""
+    run API scans params and rows for to find a run's inputs."""
     if isinstance(value, str):
         return [(where, value)] if sheets.parse_dataset_uri(value) else []
     if isinstance(value, dict):
@@ -557,9 +557,9 @@ def _uris(value, where: str) -> list:
 
 
 def _referenced(reader: reads.Reader, project_id: str, value: str, where: str) -> str:
-    """The id of the dataset a reference names, refused where the backend would refuse.
+    """The id of the dataset a reference names, refused where Cirro would refuse.
 
-    The backend resolves a reference only if it names the dataset's own project, or
+    Cirro resolves a reference only if it names the dataset's own project, or
     none; a shared dataset's own project is the one it was shared from.
     """
     uri = sheets.parse_dataset_uri(value)
@@ -659,7 +659,7 @@ def _tables(reader: reads.Reader, project_id: str, document: Optional[dict], giv
             picked_from: dict, warnings: list) -> dict:
     """Each samplesheet as the launch sends it: {name: {"file_format", "rows"}}.
 
-    Cirro-backend writes the rows as they arrive -- it checks none of them against the
+    Cirro writes the rows as they arrive -- it checks none of them against the
     form -- so this is the only check a row gets before a pipeline reads it.
     """
     definitions = reads.structured_inputs(document)
@@ -734,7 +734,7 @@ def _row(reader: reads.Reader, project_id: str, name: str, definition: dict, row
             # The column's pattern is checked with the rest of the row below.
             value = _picked(reader, project_id, value, spec, f"{where}.{column}", warnings)
         cells[column] = value
-    # Every reference in a row is an input to the backend, whatever its column.
+    # Every reference in a row is an input to the run, whatever its column.
     for found, value in _uris(cells, where):
         picked_from.setdefault(_referenced(reader, project_id, value, found),
                                f"samplesheet {name}")

@@ -1688,7 +1688,7 @@ def test_a_csv_row_carries_every_column_in_order(writable_tenant, session_dir):
 ])
 def test_a_row_that_does_not_fit_the_samplesheet_is_refused(writable_tenant, session_dir,
                                                             rows, said):
-    """Cirro-backend writes rows as they arrive, so the plan is the only check one gets
+    """Cirro writes rows as they arrive, so the plan is the only check one gets
     before a pipeline reads it."""
     error = plan_browse(writable_tenant, session_dir, rows=rows)["error"]
     assert error["code"] == "INVALID_QUERY"

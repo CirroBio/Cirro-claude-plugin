@@ -72,7 +72,7 @@ def test_values_are_stored_as_their_column_holds_them(column, value, stored):
      "allowed"),
     ({"dataType": "STRING", "semanticType": "CIRRO_DATASET"}, "cirro::p:dataset:ds/x",
      "dataset alone"),
-    # The resource type the backend refuses since it settled on `dataset`.
+    # The older resource type, which Cirro refuses.
     ({"dataType": "STRING", "semanticType": "CIRRO_FILE"}, "cirro::p:data:ds/x",
      "not a Cirro reference"),
     ({"dataType": "STRING", "required": True}, None, "required"),
