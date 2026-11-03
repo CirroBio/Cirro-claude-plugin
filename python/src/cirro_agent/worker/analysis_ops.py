@@ -145,14 +145,14 @@ def plan_run_analysis(reader: reads.Reader, args: dict) -> Draft:
     # dict.fromkeys rather than a set, whose order changes between the plan and the
     # re-plan at apply and would make every such plan stale.
     input_ids = list(dict.fromkeys([*source_ids, *picked_from]))
-    # A pipeline nothing can feed takes no input dataset, and the platform supports
-    # that at every layer: `sourceDatasetIds` is @NotNull rather than @NotEmpty, the
-    # only server-side check is `size() > 1 && !allowMultipleSources()`, and the portal
-    # gates submit on `hasParentProcesses && !sourceDatasets.length`. Demanding one
-    # here made every parentless pipeline unlaunchable through the plugin -- including
-    # the shipped `process-nf-core-fetchngs`, which downloads from SRA and has no input
-    # by design. Where the process does have parents an empty selection is still a
-    # mistake, and still refused -- but a picked path counts as one, as in the portal.
+    # A pipeline nothing can feed takes no input dataset, and Cirro accepts that: the
+    # launch's `source_dataset_ids` is required but may be empty, a process's
+    # `allow_multiple_sources` limits it only from above, and the portal submits such a
+    # run for a pipeline with no parent process. Demanding one here made every
+    # parentless pipeline unlaunchable through the plugin -- including the shipped
+    # `process-nf-core-fetchngs`, which downloads from SRA and has no input by design.
+    # Where the process does have parents an empty selection is still a mistake, and
+    # still refused -- but a picked path counts as one, as in the portal.
     if not input_ids and reader.has_parent_processes(process["id"]):
         raise errors.InvalidQuery(
             "run_analysis needs at least one input dataset.",

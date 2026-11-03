@@ -80,7 +80,7 @@ PATH_TYPES = ("dataset",) + REFERENCE_PATH_TYPES
 PATH_FORMATS = ("file-path", "file-path-pattern", "directory-path", "path")
 
 # A structured input's name becomes its file name, and Cirro refuses a launch that
-# carries more than ten (`RunAnalysisRequest.structured_inputs` in cirro_api_client).
+# carries more than ten.
 STRUCTURED_NAME = re.compile(r"^[A-Za-z0-9_-]{1,50}$")
 STRUCTURED_FORMATS = ("CSV", "TSV", "JSON")
 STRUCTURED_KEYS = ("fileFormat", "schema", "defaultSourceFile", "examples")

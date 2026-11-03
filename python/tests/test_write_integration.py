@@ -286,9 +286,8 @@ def test_a_batch_run_says_when_healthomics_was_available(writable_tenant, sessio
 
 def test_a_pipeline_nothing_feeds_launches_with_no_input_dataset(
         writable_tenant, session_dir):
-    """The platform allows it at every layer -- `sourceDatasetIds` is @NotNull rather
-    than @NotEmpty, the only server check is `size() > 1 && !allowMultipleSources()`,
-    and the portal gates submit on `hasParentProcesses && !sourceDatasets.length`.
+    """Cirro accepts a launch with no input dataset -- `source_dataset_ids` may be
+    empty, and the portal submits such a run for a pipeline with no parent process.
     Demanding an input here made every parentless pipeline, `fetchngs` among them,
     unlaunchable through the plugin."""
     result = plan_run(writable_tenant, session_dir, process="proc_fetch",

@@ -428,8 +428,9 @@ run path can only refuse a mode the pipeline never declared and never grant one.
 
 **A dataset reference says `dataset`.** Cirro URIs are
 `cirro:<tenant>:<project>:dataset:<id>[/<path>]` in sheet cells and run parameters
-alike; the sheet writer used to say `data`, which Cirro refuses. The path is relative to the dataset's data
-folder, an empty path is that whole folder, and the project segment, when present, must
+alike; the sheet writer used to say `data`, which Cirro refuses. The path is relative
+to the dataset's data folder, an empty path is that whole folder, and the project
+segment, when present, must
 be the dataset's own -- a shared dataset's is the project it was shared from.
 `sheets.dataset_uri` and `parse_dataset_uri` are the one implementation of both halves.
 
