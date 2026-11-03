@@ -171,11 +171,11 @@ def check_form(document: dict) -> list:
                     f"pathType must be one of {PATH_TYPES}, not {path_type!r}"))
             # `process` makes it a dataset picker -- the user selects a whole dataset
             # produced by those processes, so no file glob applies. Its absence widens
-            # the picker rather than emptying it: `configure.fn.ts` starts from every
-            # completed dataset in the project, narrows only `if ('process' in field)`,
-            # and sets `readOnly` when nothing matches. So a bare dataset picker is
-            # legal and this is a warning; a bare references picker resolves nothing
-            # and stays an error.
+            # the picker rather than emptying it: the launch form starts from every
+            # completed dataset in the project, narrows only when the field names a
+            # `process`, and makes the picker read-only when nothing matches. So a
+            # bare dataset picker is legal and this is a warning; a bare references
+            # picker resolves nothing and stays an error.
             if not any(field.get(k) for k in ("file", "folder", "process")):
                 if path_type == "references":
                     problems.append(Problem(

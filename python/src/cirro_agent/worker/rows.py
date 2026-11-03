@@ -187,7 +187,7 @@ def project(obj) -> dict:
 
 def execution_modes(obj) -> list:
     """Which execution environments a process declares: STANDARD, HEALTHOMICS, or both.
-    The server never sends an empty list (Cirro-backend's ProcessServiceTest asserts it)."""
+    Cirro never sends an empty list."""
     return [str(m) for m in obj.execution_modes]
 
 

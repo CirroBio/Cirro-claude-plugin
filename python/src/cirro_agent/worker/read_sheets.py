@@ -62,7 +62,7 @@ def do_sheet(request: dict) -> dict:
                           row_filter=row_filter, order_by=request.get("order_by"),
                           descending=bool(request.get("desc")))
     else:
-        # The backend answers "Sheet is not ready" for its rows; what went wrong is on
+        # Cirro answers "Sheet is not ready" for its rows; what went wrong is on
         # the sheet's last job.
         page = {}
         last = next(iter(sheet_jobs(reader, project_id, detail["id"])), None)

@@ -11,12 +11,12 @@ has moved:
 
 - a row write re-reads the rows it selected and compares them, `sys_updated_at`
   included, so a cell someone edited in the portal since the plan stops it;
-- a schema write sends the `schemaVersionId` it was planned against, which the
-  backend checks, and first compares the sheet's names, columns and view definition.
+- a schema write sends the `schemaVersionId` it was planned against, which Cirro
+  checks, and first compares the sheet's names, columns and view definition.
 
-Every value is coerced to its column's type at plan time (sheets.py): the backend
-binds cells straight into DuckDB, and a cast it cannot make comes back as a 500 with
-the row and column gone.
+Every value is coerced to its column's type at plan time (sheets.py): Cirro does not
+cast cells, and a value it cannot store comes back as a 500 with the row and column
+gone.
 """
 
 import re
@@ -48,7 +48,7 @@ def _invalid(exc: S.SheetError, op: str) -> errors.InvalidQuery:
                                field=exc.field, retry_with=[{"op": op}])
 
 
-# Cirro-backend's 400 for a write to a sheet whose status is not COMPLETED, whatever
+# Cirro's 400 for a write to a sheet whose status is not COMPLETED, whatever
 # the status is and whatever the write was.
 SHEET_NOT_READY = "Sheet is not ready"
 
@@ -61,7 +61,7 @@ NOT_READY = {
 
 
 def _refusals(what: str, field: str, op: str) -> dict:
-    """What a sheet route's refusals mean to the caller: the backend's 400s carry the
+    """What a sheet route's refusals mean to the caller: Cirro's 400s carry the
     rule that was broken, and a 409 is a schema version that moved.
 
     One 400 is about the sheet rather than the request: "not ready" means its status
@@ -625,7 +625,7 @@ def plan_delete_sheet(reader: reads.Reader, args: dict) -> Draft:
     _need(args, "delete_sheet", "sheet_id")
     project = _project(reader, args)
     detail = _sheet(reader, project["id"], args["sheet_id"])
-    # A sheet whose last job failed can still be deleted; the backend allows it.
+    # A sheet whose last job failed can still be deleted; Cirro allows it.
     _writable(detail, "delete_sheet", table_only=False, statuses=("COMPLETED", "FAILED"))
     rows = detail.get("totalRowCount")
     columns = S.user_columns(detail.get("columns"))
@@ -885,7 +885,7 @@ def plan_refresh_sheet(reader: reads.Reader, args: dict) -> Draft:
     _need(args, "refresh_sheet", "sheet_id")
     project = _project(reader, args)
     detail = _sheet(reader, project["id"], args["sheet_id"])
-    # The backend refuses to refresh a FAILED view too ("Sheet is not ready").
+    # Cirro refuses to refresh a FAILED view too ("Sheet is not ready").
     _writable(detail, "refresh_sheet", table_only=False)
     if detail.get("sheetType") != "VIEW" or detail.get("virtual"):
         raise errors.NotSupported(

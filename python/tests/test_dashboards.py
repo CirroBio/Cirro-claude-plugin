@@ -1,10 +1,9 @@
 """Data Studio dashboards: the document rules, the change list, the data run, and the
 plan -> apply cycle against a fake tenant.
 
-`data/dashboard-spec-parity.json` was produced by the portal's own chart code
-(`patchChannel` per channel, then `humanizeSpecAxisLabels`, over each catalog chart's
-skeleton), so the spec builder here is checked against the thing that renders it.
-Regenerate it from Cirro-portal's packages/dashboard when the chart catalog changes.
+`data/dashboard-spec-parity.json` was produced by the portal's own chart code, over
+each catalog chart's skeleton, so the spec builder here is checked against the thing
+that renders it. Regenerate it from the portal when the chart catalog changes.
 """
 
 import json
@@ -217,9 +216,9 @@ def test_a_wrong_typed_field_is_an_error_because_the_portal_wipes_the_config(sch
 
 
 def test_problems_on_nodes_a_change_did_not_write_are_only_warnings(schema):
-    """A dashboard from a newer portal build (dev ran `spatialdata` tiles before the schema
-    had them, and extra chart fields) must stay editable: only what the change wrote can
-    be refused."""
+    """A dashboard from a newer portal build (`spatialdata` tiles were in use before the
+    schema had them, and extra chart fields) must stay editable: only what the change
+    wrote can be refused."""
     document, _ = build(schema, STARTER)
     document["ir"]["nodes"].append({"id": "spat0001", "type": "futurenode", "config": {}})
     document["dashboards"][0]["tiles"].append(
@@ -362,7 +361,7 @@ def test_sql_reads_its_inputs_by_every_portal_alias(schema, local_files):
 
 
 def test_in1_is_the_first_input_not_the_second(schema, tmp_path):
-    """The portal's `aliasDDLs` names the first input both `query` and `in1`, the second
+    """Data Studio names the first input both `query` and `in1`, the second
     `in2`, and has no `in0`. Reading `in1` as the second joined a file with itself and
     the plan still showed a plausible count."""
     run = runner(schema, tmp_path)
