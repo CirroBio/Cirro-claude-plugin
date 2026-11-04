@@ -1,4 +1,6 @@
 """Reading a workflow's own declarations. No tenant, no network."""
+import json
+
 from cirro_agent import workflow_spec as WS
 
 
@@ -32,3 +34,41 @@ def test_a_params_block_at_the_very_end_of_the_file_is_not_a_crash(tmp_path):
     flags = []
     assert WS._params_from_config(tmp_path, flags) == ([], [])
     assert [f["code"] for f in flags] == ["PARAMS_BLOCK_UNTERMINATED"]
+
+
+def test_samplesheet_columns_carry_what_a_structured_input_needs(tmp_path):
+    """The columns become a structured input's schema, so their pickers, patterns and
+    choices have to survive the read -- and a column holding a list cannot be built."""
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "schema_input.json").write_text(json.dumps({
+        "type": "array", "items": {"type": "object", "required": ["sample"], "properties": {
+            "sample": {"type": "string", "pattern": "^\\S+$",
+                       "errorMessage": "Sample names cannot contain spaces"},
+            "fastq_1": {"type": "string", "format": "file-path", "exists": True},
+            "strandedness": {"type": "string", "enum": ["auto", "forward"]},
+            "lanes": {"type": "array", "items": {"type": "integer"}}}}}))
+    columns = {c["name"]: c for c in WS._samplesheet_columns(tmp_path, [])}
+    assert columns["sample"]["required"] is True
+    assert columns["sample"]["pattern"] == "^\\S+$"
+    assert columns["sample"]["errorMessage"] == "Sample names cannot contain spaces"
+    assert columns["fastq_1"]["format"] == "file-path" and "exists" not in columns["fastq_1"]
+    assert columns["strandedness"]["enum"] == ["auto", "forward"]
+    assert columns["lanes"]["unsupported"]
+    assert "unsupported" not in columns["sample"]
+
+
+def test_a_parameter_declaring_its_samplesheet_schema_is_a_structured_input_candidate():
+    entry = WS._param_entry("input", {"type": "string", "format": "file-path",
+                                      "schema": "assets/schema_input.json"},
+                            "input_output_options", True)
+    assert entry["schema"] == "assets/schema_input.json"
+    hints = WS.candidates([entry])
+    assert [c["name"] for c in hints["structured_input"]] == ["input"]
+    assert "primary input" in hints["structured_input"][0]["why"]
+    assert not hints["primary_data_input"], "one parameter, one suggestion"
+
+
+def test_every_path_format_cirro_reads_is_a_path():
+    for fmt in ("file-path", "file-path-pattern", "directory-path", "path"):
+        assert WS._param_entry("x", {"type": "string", "format": fmt}, "g",
+                               False)["is_path"], fmt

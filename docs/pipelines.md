@@ -15,6 +15,18 @@ something like *"Turn github.com/nf-core/fetchngs into a Cirro pipeline."*
    the mapping from that form to the workflow's parameters, and the compute settings,
    then registers the pipeline.
 
+## The form your colleagues fill in
+
+A new pipeline's form lets whoever runs it pick files and folders from anywhere in the
+project, and the run's input datasets are the ones those picks come from. A workflow that
+reads a samplesheet gets a table in the form instead, one row per sample with a file
+picker in each file column, and Cirro writes the samplesheet the workflow expects. Nobody
+has to format one by hand, and no preprocess script has to build it at launch.
+
+A pipeline configured before this keeps the form it has, including when Claude updates
+its configuration. Ask if you want one moved to the new form; it changes how everyone
+runs that pipeline.
+
 ## Where the configuration lives
 
 You choose: uploaded into Cirro, kept in the workflow's own repository, or kept in a
@@ -40,6 +52,12 @@ case, because the files are already yours and already where you put them.
 
 ## Worth knowing
 
+- **A pipeline is enabled in the projects you name when it is registered.** It is
+  listed, and can be launched, only in those projects; Claude asks which ones and the
+  approval names them. Editing the pipeline later keeps them. Enabling or disabling a
+  project afterwards is a change of its own, approved on its own, and disabling one
+  means its members can no longer launch the pipeline. A tenant administrator can also
+  make a pipeline available to everyone in the tenant, or take that back.
 - **Claude only edits pipelines you own.** One belonging to a colleague, or curated by
   Cirro, is refused rather than changed.
 - **Configuration is checked before it goes anywhere**, whether generated or written by

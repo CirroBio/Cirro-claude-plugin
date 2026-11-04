@@ -210,6 +210,7 @@ def process(obj) -> dict:
         "pipeline_type": plain(getattr(obj, "pipeline_type", None)),
         "is_archived": bool(plain(getattr(obj, "is_archived", None))),
         "uses_sample_sheet": bool(plain(getattr(obj, "uses_sample_sheet", None))),
+        "requires_internet": bool(plain(getattr(obj, "requires_internet", None))),
         "documentation_url": plain(getattr(obj, "documentation_url", None)),
         "child_process_ids": plain(getattr(obj, "child_process_ids", None)) or [],
         "parent_process_ids": plain(getattr(obj, "parent_process_ids", None)) or [],
@@ -262,8 +263,19 @@ def process_detail(detail, base: Optional[dict] = None) -> dict:
 
     row["config_location"] = _config_location(row)
     row["code_location"] = _code_location(row.get("pipeline_code"))
-    rules = plain(getattr(detail, "file_mapping_rules", None)) or []
-    row["file_mapping_rules"] = rules
+    # Dicts in the wire's own shape, so an update can rebuild the rules with
+    # FileMappingRule.from_dict; the model objects themselves do not survive a plan
+    # record.
+    row["file_mapping_rules"] = [
+        rule.to_dict() if hasattr(rule, "to_dict") else rule
+        for rule in plain(getattr(detail, "file_mapping_rules", None)) or []]
+    # Who can see and run the process. Cirro derives its read access from these
+    # two on every write, so an update that does not resend them unlinks every
+    # project and turns a tenant-wide process private.
+    row["linked_project_ids"] = plain(getattr(detail, "linked_project_ids", None)) or []
+    row["is_tenant_wide"] = bool(plain(getattr(detail, "is_tenant_wide", None)))
+    row["maintainers"] = plain(getattr(detail, "maintainers", None)) or []
+    row["tags"] = _tag_values(detail)
     return row
 
 

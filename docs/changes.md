@@ -99,6 +99,11 @@ and as whom. Ask Claude who you are signed in as and it names the folder.
   portal. The plan names the address before you approve. Ask Claude to notify someone
   else, or nobody. If your Cirro profile has analysis notifications turned off, or your
   address cannot be looked up, nobody is emailed and the plan says so.
+- **A launch names every dataset it reads.** On a pipeline whose form has you pick files
+  from anywhere in the project, the run's input datasets are the ones those picks come
+  from, and the plan lists each with the pick that brought it in. A samplesheet the form
+  builds is shown row by row, and a row that does not fit its columns is refused while
+  the plan is still read-only, since Cirro writes the rows as given.
 - **A run can target AWS HealthOmics** instead of Cirro's default AWS Batch, if the
   pipeline supports it. Ask for it and the plan's `Compute` line names the target before
   you approve. A pipeline that does not declare HealthOmics is refused while the plan is
@@ -126,7 +131,7 @@ and as whom. Ask Claude who you are signed in as and it names the folder.
 | Metadata | `update_sample`, `update_project_schema` |
 | Sharing | `create_share`, `delete_share`, `subscribe_share`, `unsubscribe_share` |
 | Workspaces | `create_workspace`, `start_workspace`, `stop_workspace`, `delete_workspace` |
-| Pipelines | `create_process`, `update_process`, `upload_process_config`, `sync_process_config`, `archive_process` |
+| Pipelines | `create_process`, `update_process`, `upload_process_config`, `sync_process_config`, `set_process_access` (which projects a pipeline is enabled in, and for tenant administrators whether everyone can run it), `archive_process` |
 | Dashboards | `create_dashboard`, `edit_dashboard`, `delete_dashboard` |
 | Sheets | `create_sheet` (a table, optionally with rows or from a local file, or a view over SQL), `update_sheet` (rename it, add, drop, rename or retype columns, change a view's SQL), `delete_sheet`, `insert_rows`, `update_rows`, `delete_rows`, `refresh_sheet` (a materialized view) |
 | Your computer | `write_process_config`, `commit_process_config`, `download_files` |

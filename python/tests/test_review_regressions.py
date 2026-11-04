@@ -234,16 +234,18 @@ def test_every_sdk_enum_unwraps_not_just_whitelisted_ones():
         assert "." not in str(R.plain(member))
 
 
-def test_run_analysis_tags_reach_the_request():
+def test_run_analysis_tags_reach_the_request(monkeypatch):
     """The planner recorded tags and the executor dropped them."""
     from unittest.mock import MagicMock
-    reader = MagicMock()
+    from cirro_api_client.v1.api.execution import run_analysis
+    launched = MagicMock()
+    monkeypatch.setattr(run_analysis, "sync_detailed", launched)
     from cirro_agent.worker import analysis_ops
-    analysis_ops.apply_run_analysis(reader, {
+    analysis_ops.apply_run_analysis(MagicMock(), {
         "project_id": "p", "process_id": "proc", "name": "n",
         "source_dataset_ids": ["ds"], "params": {}, "description": "",
         "notification_emails": [], "tags": ["keep-me"]})
-    request = reader.client.execution.run_analysis.call_args.kwargs["request"]
+    request = launched.call_args.kwargs["body"]
     assert [t.value for t in request.tags] == ["keep-me"]
 
 
@@ -270,11 +272,18 @@ def test_a_cold_fetch_is_not_reported_as_a_cache_hit():
 
 # --- the form walk sees conditional fields ----------------------------------
 
-def test_spec_shape_declares_parameters_hidden_behind_a_selector():
+def _serving(monkeypatch, form):
+    """A reader whose process serves this form, in the {form, ui} shape the parameters
+    route returns."""
+    from unittest.mock import MagicMock
+    monkeypatch.setattr(reads, "process_parameters",
+                        lambda _reader, _process_id: {"form": form, "ui": {}})
+    return MagicMock()
+
+
+def test_spec_shape_declares_parameters_hidden_behind_a_selector(monkeypatch):
     """Walking `properties` alone reported every conditional parameter as undeclared,
     so run_analysis warned "usually a typo" on live, correctly mapped fields."""
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
     form = {"type": "object", "properties": {
         "cnv_options": {"type": "object", "properties": {
             "use_qdnaseq": {"type": "boolean", "default": False}},
@@ -284,13 +293,7 @@ def test_spec_shape_declares_parameters_hidden_behind_a_selector():
                                                      "default": 500}}},
                 {"properties": {"use_qdnaseq": {"enum": [False]}}}]}}}}}
 
-    reader = MagicMock()
-    # ParameterSpecification.form_spec_json is `form_schema.form.additional_properties`
-    # -- a plain dict that is already the schema, never a model and never the
-    # {form, ui} pair. A double that hands back either of those tests a shape the API
-    # does not produce.
-    reader.client.processes.get_parameter_spec.return_value = SimpleNamespace(
-        form_spec_json=form)
+    reader = _serving(monkeypatch, form)
     fields = {f["path"]: f for f in reads.spec_shape(reader, "proc_x")}
     assert "cnv_options.qdnaseq_bin_size" in fields
     assert fields["cnv_options.qdnaseq_bin_size"]["default"] == 500
@@ -340,16 +343,10 @@ def test_both_form_walk_consumers_see_if_then_conditional_fields():
         [("error", "form.align.bwa_seed.pathType")]
 
 
-def test_spec_shape_declares_parameters_behind_an_if_then():
+def test_spec_shape_declares_parameters_behind_an_if_then(monkeypatch):
     """spec_shape reached for the narrower of the two walks, so an if/then form's
     conditional parameters read as undeclared -- the same wrong answer as before."""
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-
-    reader = MagicMock()
-    # The form half only -- see the note in the cnv_options test above.
-    reader.client.processes.get_parameter_spec.return_value = SimpleNamespace(
-        form_spec_json=IF_THEN_FORM["form"])
+    reader = _serving(monkeypatch, IF_THEN_FORM["form"])
     fields = {f["path"]: f for f in reads.spec_shape(reader, "proc_y")}
     assert "align.star_index" in fields and "align.bwa_threads" in fields
     assert fields["align.star_index"]["default"] == "GRCh38"

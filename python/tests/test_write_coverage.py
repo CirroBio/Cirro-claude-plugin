@@ -53,7 +53,7 @@ GATED = {
     "WorkspaceService.stop": "stop_workspace",
     "WorkspaceService.delete": "delete_workspace",
     "ProcessService.create_custom_process": "create_process",
-    "ProcessService.update_custom_process": "update_process",
+    "ProcessService.update_custom_process": "update_process, set_process_access",
     "ProcessService.sync_custom_process": "sync_process_config",
     "ProcessService.archive": "archive_process",
     "DashboardService.create": "create_dashboard",

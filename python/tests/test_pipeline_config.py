@@ -6,6 +6,7 @@ configuration looks like, not what seemed reasonable.
 """
 import json
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -46,6 +47,16 @@ SPEC = {
               "managed_parameters": [{"name": "outdir", "role": "output_directory",
                                       "note": "set by Cirro"}]},
 }
+
+# SPEC with a multi-select picker, the one input whose generated mapping changed when
+# the portal began sending every multi-select as a list.
+SPEC_MULTIPLE = {**SPEC, "inputs": SPEC["inputs"] + [
+    {"name": "fastq", "description": "FASTQ files to include", "type": "file",
+     "required": False, "group": "input", "multiple": True}]}
+
+# What the generator produced for both before it learned browse mode, so a spec that
+# does not ask for browse mode can be shown to regenerate unchanged.
+SELECT_GOLDEN = Path(__file__).parent / "data" / "formgen-select-golden.json"
 
 
 @pytest.fixture
@@ -107,11 +118,112 @@ def test_secondary_file_inputs_become_pickers(form):
     assert all(f["type"] == "string" for f in (inputs["ref"], inputs["bed"]))
 
 
+def _mapped_fields(input_map):
+    # `[*]` addresses the same field, joined.
+    return {v.replace("[*]", "") for v in input_map.values()
+            if isinstance(v, str) and v.startswith("$.")}
+
+
 def test_every_form_field_is_mapped(form, input_map):
     groups = {f"$.dataset.params.{g}" for g in form["form"]["properties"]}
     leaves = formcheck.form_paths(form) - groups
-    mapped = {v for v in input_map.values() if isinstance(v, str) and v.startswith("$.")}
+    mapped = _mapped_fields(input_map)
     assert leaves <= mapped, f"unmapped: {sorted(leaves - mapped)}"
+
+
+def test_a_spec_that_names_no_input_mode_regenerates_as_before():
+    """Updating a pipeline regenerates its configuration from its spec, so a spec written
+    before browse mode existed must not move its pipeline into it."""
+    golden = json.loads(SELECT_GOLDEN.read_text())
+    assert formgen.generate(SPEC) == golden["spec"]
+    multiple = formgen.generate(SPEC_MULTIPLE)
+    before = golden["spec_multiple"]
+    assert {k: v for k, v in multiple.items() if k != formgen.INPUT} == \
+        {k: v for k, v in before.items() if k != formgen.INPUT}
+    now, then = json.loads(multiple[formgen.INPUT]), json.loads(before[formgen.INPUT])
+    assert now == {**then, "fastq": then["fastq"] + "[*]"}, \
+        "the one change: a multi-select is now sent as a list, and [*] joins it again"
+
+
+def test_an_unknown_input_mode_is_refused():
+    spec = {**SPEC, "cirro": {**SPEC["cirro"], "input_mode": "both"}}
+    with pytest.raises(errors.AgentError) as caught:
+        formgen.generate(spec)
+    assert caught.value.field == "cirro.input_mode"
+    assert caught.value.candidates == ["select", "browse"]
+
+
+BROWSE_SPEC = {**SPEC_MULTIPLE, "cirro": {**SPEC["cirro"], "input_mode": "browse"}}
+
+
+def test_browse_mode_picks_every_input_as_a_path():
+    assets = formgen.generate(BROWSE_SPEC)
+    form, input_map = json.loads(assets[formgen.FORM]), json.loads(assets[formgen.INPUT])
+    inputs = form["form"]["properties"]["input"]
+    assert inputs["properties"]["bam"] == {
+        "type": "string", "title": "Bam", "format": "directory-path",
+        "description": "BAM files for the sample"}, "the primary is a folder picked"
+    assert "bam" in inputs["required"]
+    assert input_map["bam"] == "$.dataset.params.input.bam"
+    assert not any("$.inputs" in v for v in input_map.values() if isinstance(v, str)), \
+        "nothing selects input datasets up front, so $.inputs has no order to rely on"
+    assert inputs["properties"]["bed"]["format"] == "file-path"
+    assert inputs["properties"]["bed"]["pattern"] == r"\.bed$"
+    assert "file" not in inputs["properties"]["bed"]
+    assert inputs["properties"]["ref"]["pathType"] == "reference", \
+        "reference files are in no dataset, so they keep the reference picker"
+    assert input_map["fastq"] == "$.dataset.params.input.fastq[*]"
+    assert formcheck.browse_mode(form)
+    assert not formcheck.browse_mode(json.loads(formgen.generate(SPEC)[formgen.FORM]))
+    report = formcheck.check_assets(assets)
+    assert report["ok"], report["problems"]
+
+
+STRUCTURED_SPEC = {**BROWSE_SPEC, "inputs": [
+    {"name": "input", "description": "One row per sequencing run", "type": "file",
+     "required": True, "structured": {
+         "name": "samplesheet", "file_format": "csv",
+         "default_source_file": "samplesheet.csv",
+         "columns": [
+             {"name": "sample", "type": "string", "required": True, "pattern": r"^\S+$",
+              "error_message": "Sample names cannot contain spaces"},
+             {"name": "fastq_1", "format": "file-path", "required": True,
+              "title": "FASTQ (R1)"},
+             {"name": "fastq_2", "format": "file-path"},
+             {"name": "strandedness", "enum": ["auto", "forward", "reverse"]},
+         ]}},
+] + SPEC["inputs"][1:]}
+
+
+def test_a_structured_input_becomes_a_samplesheet_the_form_builds():
+    assets = formgen.generate(STRUCTURED_SPEC)
+    form, input_map = json.loads(assets[formgen.FORM]), json.loads(assets[formgen.INPUT])
+    field = form["form"]["properties"]["input"]["properties"]["input"]
+    assert field["schema"] == "samplesheet" and "format" not in field
+    definition = form["structuredInputs"]["samplesheet"]
+    assert definition["fileFormat"] == "CSV"
+    assert definition["defaultSourceFile"] == "samplesheet.csv"
+    items = definition["schema"]["items"]
+    assert definition["schema"]["type"] == "array" and items["type"] == "object"
+    assert list(items["properties"]) == ["sample", "fastq_1", "fastq_2", "strandedness"]
+    assert items["required"] == ["sample", "fastq_1"]
+    assert items["properties"]["sample"]["errorMessage"] == \
+        "Sample names cannot contain spaces"
+    assert items["properties"]["fastq_1"]["format"] == "file-path"
+    assert input_map["input"] == "$.structuredInputs.samplesheet.path", \
+        "a samplesheet's rows are written to a file, never into $.dataset.params"
+    report = formcheck.check_assets(assets)
+    assert report["ok"] and not report["n_warnings"], report["problems"]
+
+
+def test_a_structured_input_needs_browse_mode():
+    """Its table alone puts the portal in browse mode, so a select-mode spec with one
+    describes a form that would not behave as written."""
+    spec = {**STRUCTURED_SPEC, "cirro": SPEC["cirro"]}
+    with pytest.raises(errors.AgentError) as caught:
+        formgen.generate(spec)
+    assert caught.value.field == "cirro.input_mode"
+    assert caught.value.candidates == ["browse"]
 
 
 def test_only_must_set_parameters_are_required(form):
@@ -301,6 +413,136 @@ def test_python_named_groups_are_flagged_in_uploaded_python():
     assert any("(?<name>" in p["message"] for p in report["problems"])
 
 
+def _one_field(**field):
+    return {"ui": {}, "form": {"type": "object", "properties": {
+        "g": {"type": "object", "properties": {"x": {"type": "string", **field}}}}}}
+
+
+def test_the_documented_reference_spelling_is_accepted():
+    """The docs now spell it `reference`; 30 production fields still say `references`,
+    and the portal reads both."""
+    for spelling in ("reference", "references"):
+        assert not [p for p in formcheck.check_form(_one_field(
+            pathType=spelling, file="**/star_index/**/SA")) if p.level == "error"]
+        assert any(p.level == "error" and "offers nothing" in p.message
+                   for p in formcheck.check_form(_one_field(pathType=spelling)))
+
+
+def test_a_schema_that_names_no_structured_input_is_an_error():
+    """The portal makes any field carrying `schema` a samplesheet table, so the
+    nextflow_schema.json path nf-core puts there renders a table with no columns."""
+    for value in ("assets/schema_input.json", "samplesheet"):
+        problems = formcheck.check_form(_one_field(schema=value))
+        assert any(p.level == "error" and "no such entry" in p.message
+                   for p in problems), value
+
+
+def _with_table(definition, *, bound=True):
+    doc = _one_field(schema="sheet") if bound else _one_field()
+    return {**doc, "structuredInputs": {"sheet": definition}}
+
+
+GOOD_TABLE = {"fileFormat": "TSV", "schema": {"type": "array", "items": {
+    "type": "object", "properties": {"sample": {"type": "string"}},
+    "required": ["sample"]}}}
+
+
+def test_a_well_formed_structured_input_is_clean():
+    document = _with_table(GOOD_TABLE)
+    assert not formcheck.check_form(document)
+    assert not formcheck.check_structured_inputs(document)
+
+
+@pytest.mark.parametrize("change, said", [
+    ({"fileFormat": "XLSX"}, "fileFormat must be one of"),
+    ({"schema": {"type": "object", "properties": {}}}, "one property per column"),
+    ({"schema": {"type": "array", "items": {"type": "object", "properties": {
+        "files": {"type": "array", "items": {"type": "string"}}}}}}, "holds one value"),
+    ({"schema": {"type": "array", "items": {"type": "object", "properties": {
+        "sample": {"type": "string"}}, "required": ["sample", "fastq"]}}},
+     "which are not columns"),
+])
+def test_a_structured_input_cirro_cannot_write_is_an_error(change, said):
+    problems = formcheck.check_structured_inputs(_with_table({**GOOD_TABLE, **change}))
+    assert any(p.level == "error" and said in p.message for p in problems), problems
+
+
+def test_a_structured_input_name_must_be_usable_as_a_file_name():
+    document = {**_one_field(schema="my sheet"),
+                "structuredInputs": {"my sheet": GOOD_TABLE}}
+    assert any(p.level == "error" and "file's name" in p.message
+               for p in formcheck.check_structured_inputs(document))
+
+
+def test_an_unbound_or_overgrown_structured_input_is_a_warning():
+    unbound = formcheck.check_structured_inputs(_with_table(GOOD_TABLE, bound=False))
+    assert [p.level for p in unbound] == ["warning"]
+    assert "never shows it" in unbound[0].message
+    extra = formcheck.check_structured_inputs(_with_table({**GOOD_TABLE, "rows": []}))
+    assert [p.level for p in extra] == ["warning"] and "ignored" in extra[0].message
+
+
+def test_more_structured_inputs_than_a_launch_carries_is_an_error():
+    document = {**_one_field(), "structuredInputs": {
+        f"s{i}": GOOD_TABLE for i in range(formcheck.MAX_STRUCTURED_INPUTS + 1)}}
+    assert any(p.level == "error" and "at most" in p.message
+               for p in formcheck.check_structured_inputs(document))
+
+
+def test_a_samplesheet_is_mapped_by_its_file_not_its_field():
+    document = _with_table(GOOD_TABLE)
+    assert not formcheck.check_input_map({"input": "$.structuredInputs.sheet.path"},
+                                         document)
+    wrong = formcheck.check_input_map({"input": "$.dataset.params.g.x"}, document)
+    assert [p.level for p in wrong] == ["error"]
+    assert "$.structuredInputs.sheet.path" in wrong[0].fix
+    missing = formcheck.check_input_map({"input": "$.structuredInputs.other.path"},
+                                        document)
+    assert [p.level for p in missing] == ["error"]
+    assert "no 'other'" in missing[0].message
+
+
+# A spec that names its groups by their nf-schema titles. A live launch of a form built
+# from one failed at parameter resolution: Cirro's JSONPath refuses a space in a
+# dot-notation segment ("Use bracket notion ['my prop'] ...").
+SPEC_TITLED_GROUPS = {**SPEC, "parameters": [
+    {"name": "skip_trim", "type": "boolean", "group": "Process skipping options",
+     "required": False, "default": False, "description": "Skip trimming"},
+    {"name": "multiqc_title", "type": "string", "group": "Input/output options",
+     "required": False, "description": "MultiQC report title"},
+]}
+
+
+def test_a_group_named_by_its_title_gets_a_key_cirro_can_read():
+    generated = formgen.generate(SPEC_TITLED_GROUPS)
+    form = json.loads(generated[formgen.FORM])["form"]["properties"]
+    mapping = json.loads(generated[formgen.INPUT])
+    assert form["process_skipping_options"]["title"] == "Process skipping options"
+    assert form["input_output_options"]["title"] == "Input/output options"
+    assert mapping["skip_trim"] == "$.dataset.params.process_skipping_options.skip_trim"
+    assert mapping["multiqc_title"] == \
+        "$.dataset.params.input_output_options.multiqc_title"
+    assert not formcheck.check_input_map(mapping, json.loads(generated[formgen.FORM]))
+
+
+def test_a_group_that_is_already_a_key_never_moves():
+    """Regenerating a pipeline must not shift its parameters to new paths."""
+    for name in ("input", "advanced", "_top_level", "Main-options"):
+        assert formgen.group_key(name) == name
+
+
+def test_a_mapping_with_a_space_in_a_path_segment_is_an_error():
+    """Cirro refuses it only when the run launches, so the checker is the last place
+    it can be caught before someone's run fails."""
+    form = {"form": {"type": "object", "properties": {
+        "Process skipping options": {"type": "object", "properties": {
+            "skip_trim": {"type": "boolean"}}}}}}
+    problems = formcheck.check_input_map(
+        {"skip_trim": "$.dataset.params.Process skipping options.skip_trim"}, form)
+    assert [p.level for p in problems] == ["error"]
+    assert "space" in problems[0].message
+
+
 # --- registration planning ---------------------------------------------------
 
 def _write_spec(tmp_path, spec=None):
@@ -317,6 +559,7 @@ def test_with_process_requires_the_config_repo_to_be_the_code_repo(tmp_path):
     reader.base_url = "app.cirro.test"
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path), "config_source": "WITH_PROCESS",
             "config_repository": "SomeoneElse/other-repo"})
     assert caught.value.code == "INVALID_QUERY"
@@ -329,6 +572,7 @@ def test_external_requires_a_config_repository(tmp_path):
     reader.processes.return_value = []
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path), "config_source": "EXTERNAL"})
     assert "config_repository" in caught.value.message
 
@@ -338,6 +582,7 @@ def test_with_process_defaults_to_the_workflow_repo_and_dot_cirro(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path), "config_source": "WITH_PROCESS"})
     settings = draft.args["custom_settings"]
     assert settings == {"repository": "epi2me-labs/wf-demo", "branch": "main",
@@ -355,6 +600,7 @@ def test_config_settings_carry_a_repository_type(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path), "config_source": "WITH_PROCESS",
         "config_folder": "cirro"})
     assert draft.args["custom_settings"]["repository_type"] == "GITHUB_PUBLIC"
@@ -367,6 +613,7 @@ def test_with_process_config_shares_the_code_repository_type(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path), "config_source": "WITH_PROCESS",
         "repository_type": "GITHUB_PRIVATE"})
     assert draft.args["repository_type"] == "GITHUB_PRIVATE"
@@ -379,6 +626,7 @@ def test_external_config_repository_type_can_differ_from_the_code(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path), "config_source": "EXTERNAL",
         "config_repository": "OrgName/workflow-configs",
         "repository_type": "GITHUB_PRIVATE",
@@ -392,6 +640,7 @@ def test_an_unacceptable_process_name_is_refused(tmp_path):
     reader.processes.return_value = []
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
             "name": "Pipeline [beta]"})
     assert caught.value.code == "INVALID_QUERY"
@@ -403,6 +652,7 @@ def test_registering_over_an_existing_id_is_refused(tmp_path):
     reader.processes.return_value = [{"id": "process-wf-demo-1", "owner": "someone"}]
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path), "config_source": "STORAGE"})
     assert "already exists" in caught.value.message
 
@@ -420,6 +670,7 @@ def test_a_spec_without_a_workflow_version_is_refused(tmp_path):
     reader.base_url = "app.cirro.test"
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path, spec), "config_source": "STORAGE"})
     assert caught.value.code == "INVALID_QUERY"
     assert "version" in caught.value.message
@@ -465,6 +716,7 @@ def test_python_named_groups_in_file_mapping_rules_are_refused(tmp_path):
     reader.processes.return_value = []
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path, spec), "config_source": "STORAGE"})
     assert "(?P<name>" in caught.value.message
     assert caught.value.retry_with[0]["sample_matching_pattern"] == \
@@ -506,7 +758,7 @@ def test_any_op_module_can_be_imported_first(first):
     import sys
     code = (f"from cirro_agent.worker import {first};"
             "from cirro_agent.worker.mutations import OPS;"
-            "assert len(OPS) == 44, len(OPS);"
+            "assert len(OPS) == 45, len(OPS);"
             "assert 'create_process' in OPS and 'run_analysis' in OPS and 'chain' in OPS")
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr[-800:]
@@ -934,6 +1186,7 @@ def test_create_process_validates_the_authored_assets_it_will_upload(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
         "assets_dir": str(directory)})
     assert draft.args["assets_dir"] == str(directory.resolve())
@@ -950,7 +1203,8 @@ CREATE_ARGS = {
     "entry_point": "main.nf", "executor_version": None,
     "uses_sample_sheet": False, "allow_multiple_sources": True,
     "config_source": "STORAGE", "custom_settings": None,
-    "file_mapping_rules": [], "design_spec": "spec.md"}
+    "file_mapping_rules": [], "design_spec": "spec.md",
+    "linked_project_ids": ["proj_a"]}
 
 
 def test_a_refused_create_reports_cirro_s_reason_and_that_nothing_was_registered():
@@ -1020,7 +1274,9 @@ def _reader_for(record):
         config_source=record.get("config_source"),
         custom_settings=namespace(record.get("custom_settings")),
         pipeline_code=namespace(record.get("pipeline_code")),
-        file_mapping_rules=[])
+        file_mapping_rules=[],
+        linked_project_ids=record.get("linked_project_ids", []),
+        is_tenant_wide=record.get("is_tenant_wide", False))
     return reader
 
 
@@ -1162,6 +1418,156 @@ def test_allow_multiple_sources_is_read_from_the_detail_payload():
     assert row["allow_multiple_sources"] is False
 
 
+def test_who_can_see_a_process_is_read_from_the_detail_payload():
+    """An update resends these from the record it read, so they have to be on it --
+    and in a shape a plan record can hold, which the rule models are not."""
+    import json
+    from cirro_api_client.v1.models import FileMappingRule
+    rule = {"description": "Reads", "isSample": True, "min": 1, "max": 10,
+            "fileNamePatterns": [{"exampleName": "s1_R1.fastq.gz", "description": "R1",
+                                  "sampleMatchingPattern": "(?<sampleName>.*)_R1"}]}
+    detail = SimpleNamespace(
+        allow_multiple_sources=True, config_source="STORAGE", custom_settings=None,
+        pipeline_code=None, file_mapping_rules=[FileMappingRule.from_dict(rule)],
+        linked_project_ids=["proj_a"], is_tenant_wide=True,
+        maintainers=["maintainer@example.org"], tags=[SimpleNamespace(value="genomics")])
+    row = rows.process_detail(detail, base=_owned())
+    assert row["linked_project_ids"] == ["proj_a"]
+    assert row["is_tenant_wide"] is True
+    assert row["maintainers"] == ["maintainer@example.org"]
+    assert row["tags"] == ["genomics"]
+    assert json.loads(json.dumps(row["file_mapping_rules"])) == [rule]
+
+
+def _projects_reader():
+    reader = MagicMock()
+    reader.processes.return_value = []
+    reader.base_url = "app.cirro.test"
+    known = {"Proj A": "proj_a", "proj_a": "proj_a", "Proj B": "proj_b"}
+    names = {"proj_a": "Proj A", "proj_b": "Proj B"}
+    reader.resolve_project.side_effect = lambda given: {
+        "id": known[given], "name": names[known[given]]}
+    return reader
+
+
+def test_a_registration_without_projects_is_refused(tmp_path):
+    """Registered with no project, a pipeline appears in no project's pipeline list:
+    Cirro grants read access to it through those links alone."""
+    with pytest.raises(errors.AgentError) as caught:
+        pipeline_ops.plan_create_process(_projects_reader(), {
+            "design_spec": _write_spec(tmp_path), "config_source": "STORAGE"})
+    assert caught.value.code == "INVALID_QUERY"
+    assert caught.value.field == "projects"
+
+
+def test_a_registration_names_the_projects_it_is_enabled_in(tmp_path):
+    draft = pipeline_ops.plan_create_process(_projects_reader(), {
+        "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
+        "projects": ["Proj A", "Proj B", "proj_a"]})
+    assert draft.args["linked_project_ids"] == ["proj_a", "proj_b"], \
+        "one project named twice is linked once"
+    assert "Enabled in      Proj A (proj_a), Proj B (proj_b)" in draft.summary
+
+
+# --- who can see and run a pipeline ------------------------------------------
+
+def _access_reader(linked, tenant_wide=False, roles=()):
+    reader = _reader_for(_owned(linked_project_ids=linked, is_tenant_wide=tenant_wide))
+    visible = {"proj_a": "Proj A", "proj_b": "Proj B"}
+    reader.projects.return_value = [{"id": k, "name": v} for k, v in visible.items()]
+    by_name = {v: k for k, v in visible.items()}
+    reader.resolve_project.side_effect = lambda given: {
+        "id": by_name.get(given, given), "name": visible[by_name.get(given, given)]}
+    reader.client.users.get.return_value = SimpleNamespace(global_roles=list(roles))
+    return reader
+
+
+def _plan_access(reader, **args):
+    from cirro_agent.worker import mutations
+    return mutations.OPS["set_process_access"].planned(
+        reader, {"process_id": "org-demo", **args})
+
+
+def test_access_changes_are_their_own_operation_and_never_granted():
+    """A rename and a change to who can run a pipeline are different decisions; the
+    second must not ride along in a diff of the first, a chain, or a grant."""
+    from cirro_agent.worker import mutations
+    op = mutations.OPS["set_process_access"]
+    assert op.risk == mutations.RISK_DESTRUCTIVE and not op.grantable
+    assert not {"add_projects", "remove_projects", "tenant_wide"} & set(
+        mutations.OPS["update_process"].accepts)
+
+
+def test_enabling_a_pipeline_in_a_project_is_an_ordinary_write():
+    from cirro_agent.worker import mutations
+    draft = _plan_access(_access_reader(["proj_a"]), add_projects="Proj B")
+    assert draft.args["changes"] == {"linked_project_ids": ["proj_a", "proj_b"]}
+    assert draft.risk == mutations.RISK_WRITE
+    assert "Enable in    Proj B (proj_b)" in draft.summary
+
+
+def test_disabling_a_pipeline_in_a_project_is_destructive():
+    draft = _plan_access(_access_reader(["proj_a", "proj_b"]), remove_projects="Proj A")
+    assert draft.args["changes"] == {"linked_project_ids": ["proj_b"]}
+    assert draft.risk is None, "the op's own destructive risk applies"
+    assert any("can no longer launch it" in w for w in draft.warnings)
+
+
+def test_a_project_the_caller_cannot_see_is_removable_by_id():
+    draft = _plan_access(_access_reader(["proj_a", "proj_hidden"]),
+                         remove_projects=["proj_hidden"])
+    assert draft.args["changes"] == {"linked_project_ids": ["proj_a"]}
+    assert "(a project you cannot see) (proj_hidden)" in draft.summary
+
+
+def test_disabling_the_last_project_warns_that_nobody_will_see_it():
+    draft = _plan_access(_access_reader(["proj_a"]), remove_projects="Proj A")
+    assert any("enabled in no project" in w for w in draft.warnings)
+
+
+def test_an_access_change_that_changes_nothing_is_refused():
+    with pytest.raises(errors.AgentError) as caught:
+        _plan_access(_access_reader(["proj_a"]), add_projects="Proj A")
+    assert caught.value.code == "INVALID_QUERY"
+
+
+def test_only_a_tenant_administrator_may_make_a_pipeline_tenant_wide():
+    with pytest.raises(errors.AgentError) as caught:
+        _plan_access(_access_reader(["proj_a"], roles=["pipeline-developers"]),
+                     tenant_wide=True)
+    assert caught.value.code == "FORBIDDEN"
+
+    from cirro_agent.worker import mutations
+    draft = _plan_access(_access_reader(["proj_a"], roles=["sys-admins"]),
+                         tenant_wide=True)
+    assert draft.args["changes"]["is_tenant_wide"] is True
+    assert draft.risk == mutations.RISK_WRITE
+    assert any("tenant-administrator role" in w for w in draft.warnings)
+
+
+def test_taking_tenant_wide_back_is_destructive_and_also_for_administrators():
+    reader = _access_reader(["proj_a"], tenant_wide=True, roles=["administrators"])
+    draft = _plan_access(reader, tenant_wide=False)
+    assert draft.args["changes"] == {"linked_project_ids": ["proj_a"],
+                                     "is_tenant_wide": False}
+    assert draft.risk is None
+    with pytest.raises(errors.AgentError) as caught:
+        _plan_access(_access_reader(["proj_a"], tenant_wide=True), tenant_wide=False)
+    assert caught.value.code == "FORBIDDEN"
+
+
+def test_an_update_cannot_change_who_sees_the_pipeline():
+    """update_process resends the links it read; only set_process_access plans new
+    ones, so a rename can never move them."""
+    from cirro_agent.worker import mutations
+    draft = mutations.OPS["update_process"].planned(
+        _reader_for(_owned(linked_project_ids=["proj_a"], is_tenant_wide=True)),
+        {"process_id": "org-demo", "name": "Demo 2"})
+    assert "linked_project_ids" not in draft.args["changes"]
+    assert draft.args["current"]["linked_project_ids"] == ["proj_a"]
+    assert draft.args["current"]["is_tenant_wide"] is True
+
+
 # --- execution modes ---------------------------------------------------------
 #
 # The vocabulary a process declares, not the one a run request speaks. A pipeline that
@@ -1173,6 +1579,7 @@ def test_a_registration_declares_the_modes_it_was_given(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
         "execution_modes": ["HEALTHOMICS", "standard"]})
     # Canonical order and case, however the caller spelled it: apply re-plans and
@@ -1187,6 +1594,7 @@ def test_a_registration_that_names_no_mode_declares_nothing(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path), "config_source": "STORAGE"})
     assert draft.args["execution_modes"] is None
     assert "Cirro default (STANDARD -- AWS Batch)" in draft.summary
@@ -1200,6 +1608,7 @@ def test_the_design_spec_can_declare_the_modes(tmp_path):
     reader.processes.return_value = []
     reader.base_url = "app.cirro.test"
     draft = pipeline_ops.plan_create_process(reader, {
+        "projects": "Proj A",
         "design_spec": _write_spec(tmp_path, spec), "config_source": "STORAGE"})
     assert draft.args["execution_modes"] == ["HEALTHOMICS"]
 
@@ -1213,6 +1622,7 @@ def test_an_environment_type_is_refused_where_a_mode_belongs(tmp_path):
     reader.base_url = "app.cirro.test"
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
             "execution_modes": ["AWS_OMICS"]})
     assert caught.value.code == "INVALID_QUERY"
@@ -1227,6 +1637,7 @@ def test_an_empty_mode_list_is_refused_rather_than_sent(tmp_path):
     reader.base_url = "app.cirro.test"
     with pytest.raises(errors.AgentError) as caught:
         pipeline_ops.plan_create_process(reader, {
+            "projects": "Proj A",
             "design_spec": _write_spec(tmp_path), "config_source": "STORAGE",
             "execution_modes": []})
     assert caught.value.code == "INVALID_QUERY"

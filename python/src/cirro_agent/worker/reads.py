@@ -7,8 +7,9 @@ reports, and the name-to-id resolution a filter or a planner asks for
 
 Beside it sits the single implementation of each expensive fetch -- `dataset_detail`,
 `dataset_manifest`, `dataset_tasks`, `process_detail`, `process_revision`,
-`process_assets`, `spec_shape`, `file_count`, `dataset_cost`, `project_metrics`,
-`all_project_metrics` -- so that two verbs asking Cirro the same question pay for it
+`process_assets`, `process_parameters`, `spec_shape`, `file_count`, `dataset_cost`,
+`project_metrics`, `all_project_metrics` -- so that two verbs asking Cirro the same
+question pay for it
 once and shape the answer identically.
 
 The verbs themselves live in `read_query` (query, get), `read_summaries` (summarize,
@@ -646,44 +647,138 @@ def process_assets(reader: Reader, process_id: str,
     return content, unreadable
 
 
+def process_parameters(reader: Reader, process_id: str) -> Optional[dict]:
+    """A process's run form as Cirro serves it: {"form", "ui", "structuredInputs"}.
+
+    Fetched raw. The SDK's ParameterSpecification keeps only `form` and `ui`, and the
+    generated ProcessParameterSchema drops `defaultSourceFile`, so neither can describe
+    a samplesheet. Never snapshotted: apply re-plans against it, and a form revised in
+    between has to be seen. None for a process Cirro does not have; any other failure
+    propagates.
+    """
+    from cirro_api_client.v1.api.processes import get_process_parameters
+    return send(reader, get_process_parameters, what="Reading the run form failed.",
+                cost="processes.parameter_spec", process_id=process_id)
+
+
+def launch_form(document: Optional[dict]) -> dict:
+    """The run form in the shape a launch's params take, which is not the shape served.
+
+    The portal submits a `multiple` picker as a list, and takes a samplesheet field out
+    of params into a file of its own. Validated as served, params would be refused for
+    the list the portal sends and for lacking the samplesheet it never sends. A path
+    picker's `pattern` is about the path within a dataset rather than the URI the value
+    is, so it is dropped here and checked against that path by the launch planner.
+    """
+    import copy
+    form = copy.deepcopy((document or {}).get("form") or {})
+    _as_submitted(form)
+    return form
+
+
+def _as_submitted(node) -> None:
+    if isinstance(node, list):
+        for item in node:
+            _as_submitted(item)
+        return
+    if not isinstance(node, dict):
+        return
+    properties = node.get("properties")
+    if isinstance(properties, dict):
+        tables = [name for name, field in properties.items()
+                  if isinstance(field, dict) and "schema" in field]
+        for name in tables:
+            del properties[name]
+        if tables and isinstance(node.get("required"), list):
+            node["required"] = [n for n in node["required"] if n not in tables]
+        for field in properties.values():
+            if not isinstance(field, dict):
+                continue
+            if field.get("format") in formcheck.PATH_FORMATS:
+                field.pop("pattern", None)
+            if field.pop("multiple", False):
+                items = {key: field.pop(key) for key in ("type", "enum", "format", "pattern")
+                         if key in field}
+                field.update(type="array", items=items)
+            _as_submitted(field)
+    for wrapper in formcheck.WRAPPERS:
+        branch = node.get(wrapper)
+        if wrapper == "dependencies" and isinstance(branch, dict):
+            for sub in branch.values():
+                _as_submitted(sub)
+        elif branch is not None:
+            _as_submitted(branch)
+
+
+def structured_inputs(document: Optional[dict]) -> dict:
+    """Each samplesheet a run form builds, by the name its rows are sent under.
+
+    {name: {"field", "required", "file_format", "default_source_file", "row_schema",
+    "columns"}}, where `row_schema` is the JSON Schema one row must match and `field` is
+    the params path of the form field the table hangs on. A definition no field binds is
+    left out: the portal never shows it, so a launch has nothing to send for it.
+    """
+    document = document or {}
+    definitions = document.get("structuredInputs") or {}
+    found = {}
+    for record in formcheck.walk_form(document.get("form") or {}, ""):
+        field = record["field"]
+        name = field.get("schema") if isinstance(field, dict) else None
+        definition = definitions.get(name) if isinstance(name, str) else None
+        if not isinstance(definition, dict) or name in found:
+            continue
+        items = (definition.get("schema") or {}).get("items") or {}
+        required = set(items.get("required") or [])
+        columns = []
+        for column, spec in (items.get("properties") or {}).items():
+            spec = spec if isinstance(spec, dict) else {}
+            columns.append({"name": column, "type": spec.get("type") or "string",
+                            "format": spec.get("format"), "required": column in required,
+                            **({"enum": spec["enum"]} if "enum" in spec else {})})
+        found[name] = {"field": record["path"], "required": record["required"],
+                       "file_format": definition.get("fileFormat"),
+                       "default_source_file": definition.get("defaultSourceFile"),
+                       "row_schema": items, "columns": columns}
+    return found
+
+
 def spec_shape(reader: Reader, process_id: Optional[str]) -> Optional[list]:
     """Every parameter a process declares, each with the path it must be nested at.
 
     Returns None when the spec cannot be read, which callers must not confuse with a
     process that declares nothing: the first means "unknown", the second "no
     parameters", and only the first should suppress an undeclared-key warning.
+    """
+    document = run_form(reader, process_id) if process_id else None
+    return form_fields(launch_form(document)) if document is not None else None
 
-    A record is {"path", "type", "title", "description", "required", "conditional",
-    "is_group", "default", "has_default"}. The path is what makes this usable: real
-    Cirro forms group their parameters, so `wes` is submitted as `analysis_type.wes`
-    and never at the top level. Reporting the leaf name alone described a flat
-    parameter surface that no form has -- and because a form does not set
-    `additionalProperties: false`, the flat object a caller then built validated
+
+def run_form(reader: Reader, process_id: str) -> Optional[dict]:
+    """`process_parameters` for a read, where an unreadable form is None, not a failure."""
+    try:
+        document = process_parameters(reader, process_id)
+    except Exception:
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def form_fields(form: dict) -> list:
+    """The parameters a form declares, as `spec_shape` reports them.
+
+    A record is {"path", "type", "format", "title", "description", "required",
+    "conditional", "is_group", "default", "has_default"}. The path is what makes this
+    usable: real Cirro forms group their parameters, so `wes` is submitted as
+    `analysis_type.wes` and never at the top level. Reporting the leaf name alone
+    described a flat parameter surface that no form has -- and because a form does not
+    set `additionalProperties: false`, the flat object a caller then built validated
     cleanly, was ignored by the pipeline, and surfaced minutes into a billed run as
     defaults nobody chose.
 
     Groups are records too, typed `object` and flagged `is_group`. They are the keys
     actually submitted at the top level, so omitting them made a correct run's
     parameters read as undeclared -- the same wrong answer from the other direction.
+    `format` names a path picker, whose value is a Cirro URI.
     """
-    if not process_id:
-        return None
-    try:
-        spec = reader.client.processes.get_parameter_spec(process_id=process_id)
-        reader.cost.call("processes.parameter_spec")
-    except Exception:
-        return None
-    # `get_parameter_spec` returns the hand-written ParameterSpecification, whose
-    # `form_spec_json` is `form_schema.form.additional_properties` -- already the
-    # JSONSchema, with `properties` at its root. It is a plain dict, never a generated
-    # model, and never the {form, ui} pair. Note this is the OPPOSITE shape from
-    # `metadata.get_project_schema`, which does hand back the whole FormSchema; the two
-    # look alike and are not, so `declared_schema_keys` exists separately for that one.
-    # Unwrapping a `form` key here would descend into any parameter that happens to be
-    # named `form` and analyse the wrong subtree.
-    form = getattr(spec, "form_spec_json", None)
-    if not isinstance(form, dict):
-        return None
     # formcheck.walk_form is the one correct walk over a form: conditional fields live
     # inside dependencies.<selector>.oneOf[] and then/else, and walking `properties`
     # alone reported every conditional parameter as undeclared. The empty prefix makes
@@ -697,9 +792,13 @@ def spec_shape(reader: Reader, process_id: Optional[str]) -> Optional[list]:
             continue
         seen.add(record["path"])
         is_group = field.get("type") == "object" and "properties" in field
+        items = field.get("items")
+        picks = field.get("format") or (items.get("format") if isinstance(items, dict)
+                                        else None)
         fields.append({
             "path": record["path"],
             "type": field.get("type") or ("object" if is_group else None),
+            "format": picks if picks in formcheck.PATH_FORMATS else None,
             # The key name carries the meaning for most parameters and carries none
             # for some: a `command` string means nothing without the description
             # saying where the inputs are mounted and where output must be written.

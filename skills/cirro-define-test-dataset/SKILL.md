@@ -73,9 +73,14 @@ prefix, and many workflows template the sample name into the filename.
 
 Write `test-plan.md` beside the design spec, in the working folder — not into the
 workflow repository. Frontmatter carries `dataset` (source, provenance, files),
-`run.parameters` (scalars, nested by the design spec's `group`), `run.file_inputs`
-(secondary pickers, paths relative to the dataset root), `run.expected_runtime_minutes`,
-and `success_criteria`.
+`run.parameters` (scalars, nested by the design spec's `group`), `run.file_inputs`,
+`run.structured_inputs`, `run.expected_runtime_minutes`, and `success_criteria`.
+
+`run.file_inputs` are the pickers' values, as paths relative to the dataset root. In a
+`browse`-mode spec the primary input is one of them too — usually the dataset's whole
+data folder, an empty path. `run.structured_inputs` holds each samplesheet as its rows,
+keyed by the structured input's name, with each file cell a path relative to the
+dataset root; give every required column a value.
 
 Validate that the frontmatter parses before finishing, and confirm every file named in
 `file_inputs` actually exists in `dataset.files`.

@@ -280,26 +280,53 @@ def describe_column(column: dict) -> str:
 
 # ------------------------------------------------------------------ values
 
-def cirro_uri(kind: str, project_id: str, dataset_id: str, path: str = "") -> str:
-    """A Cirro reference as Cirro stores it,
-    `cirro:<tenant>:<project>:data:<dataset>/<path>` -- the tenant segment may be empty,
-    and the path is relative to the dataset's data directory."""
-    path = str(path or "").lstrip("/")
+# The resource type every dataset reference carries, in sheet cells and run parameters
+# alike. Cirro refuses the older `data`.
+URI_RESOURCE = "dataset"
+
+
+def dataset_uri(project_id: str, dataset_id: str, path: Optional[str] = None) -> str:
+    """A reference to a dataset, `cirro:<tenant>:<project>:dataset:<dataset>/<path>`,
+    as Cirro writes it -- the tenant segment left empty for the current one.
+
+    `path` is relative to the dataset's data directory. None names the dataset itself;
+    an empty path names its whole data directory, which is a folder.
+    """
+    head = f"cirro::{project_id}:{URI_RESOURCE}:{dataset_id}"
+    if path is None:
+        return head
+    path = str(path).lstrip("/")
     path = path[len("data/"):] if path.startswith("data/") else path
-    if kind == "CIRRO_DATASET":
-        return f"cirro::{project_id}:data:{dataset_id}"
-    return f"cirro::{project_id}:data:{dataset_id}/{path}"
+    return f"{head}/{path}"
+
+
+def parse_dataset_uri(value) -> Optional[dict]:
+    """{"project_id", "dataset_id", "path"} of a dataset reference, or None for anything
+    else. `path` is None when the reference names the dataset alone; the project is ""
+    when the reference leaves it to the current one."""
+    if not isinstance(value, str) or not value.startswith("cirro:"):
+        return None
+    head, slash, path = value.partition("/")
+    parts = head.split(":")
+    if len(parts) != 5 or parts[3] != URI_RESOURCE or not parts[4]:
+        return None
+    return {"project_id": parts[2], "dataset_id": parts[4], "path": path if slash else None}
+
+
+def cirro_uri(kind: str, project_id: str, dataset_id: str, path: str = "") -> str:
+    """The reference a cell of this kind stores."""
+    return dataset_uri(project_id, dataset_id,
+                       None if kind == "CIRRO_DATASET" else (path or ""))
 
 
 def _check_cirro_uri(kind: str, value: str) -> None:
-    parts = value[len("cirro:"):].split(":", 3) if value.startswith("cirro:") else []
-    if len(parts) != 4 or not parts[3]:
-        raise ValueError("is not a Cirro reference (cirro:<tenant>:<project>:data:"
+    uri = parse_dataset_uri(value)
+    if uri is None:
+        raise ValueError(f"is not a Cirro reference (cirro::<project>:{URI_RESOURCE}:"
                          "<dataset>/<path>, or {\"dataset\": ..., \"path\": ...})")
-    _, _, path = parts[3].partition("/")
-    if kind == "CIRRO_FILE" and not path:
+    if kind == "CIRRO_FILE" and not uri["path"]:
         raise ValueError("names a dataset, and a CIRRO_FILE cell needs a file path")
-    if kind == "CIRRO_DATASET" and "/" in parts[3]:
+    if kind == "CIRRO_DATASET" and uri["path"] is not None:
         raise ValueError("has a path, and a CIRRO_DATASET cell names the dataset alone")
 
 

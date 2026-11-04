@@ -36,6 +36,12 @@ PROVEN_EXTENSIONS = {
     "name": "display name at the root of a form",
     "help": "shorter variant of help_text",
     "value": "fixed value for a field the user does not set",
+    # Documented with structured inputs rather than observed
+    # (https://docs.cirro.bio/pipelines/configuring-pipeline/, "Sample Sheets and Other
+    # Structured Inputs"): its value is checked against `structuredInputs` instead of
+    # being taken on trust.
+    "schema": "names a structuredInputs entry; the field becomes a table the user "
+              "fills in",
 }
 
 # Keys inside these are chosen by the pipeline author, not the renderer, so they are
@@ -57,12 +63,28 @@ WARNING = "warning"
 # `folder` picker was rejected by the portal in a real incident.
 UNPROVEN_EXTENSIONS = {
     "folder": "no production form uses it and the portal has rejected it; select files "
-              "with a `file` glob instead",
-    "schema": "no production form uses it",
+              "with a `file` glob, or a folder with `format: directory-path`",
     "mimetype": "no production form uses it",
 }
 
-PATH_TYPES = ("dataset", "references")
+# `reference` is the documented spelling; `references` is older and still accepted by
+# the portal, and 30 production fields use it.
+REFERENCE_PATH_TYPES = ("reference", "references")
+PATH_TYPES = ("dataset",) + REFERENCE_PATH_TYPES
+
+# The `format` values that make a string field a file or folder picker. They are
+# nf-schema's, so a parameter copied from a nextflow_schema.json keeps its picker. Any
+# one of them in a form -- or any structured input -- puts the portal in browse mode:
+# no input-dataset selector, paths picked from the whole project, and the run's input
+# datasets read off the picked paths.
+PATH_FORMATS = ("file-path", "file-path-pattern", "directory-path", "path")
+
+# A structured input's name becomes its file name, and Cirro refuses a launch that
+# carries more than ten.
+STRUCTURED_NAME = re.compile(r"^[A-Za-z0-9_-]{1,50}$")
+STRUCTURED_FORMATS = ("CSV", "TSV", "JSON")
+STRUCTURED_KEYS = ("fileFormat", "schema", "defaultSourceFile", "examples")
+MAX_STRUCTURED_INPUTS = 10
 
 # The upstream API's regex engine wants (?<name>...); the JSON assets in Cirro-pipelines
 # use Python's (?P<name>...). Passing the wrong dialect to the wrong side 400s.
@@ -177,7 +199,7 @@ def check_form(document: dict) -> list:
             # bare dataset picker is legal and this is a warning; a bare references
             # picker resolves nothing and stays an error.
             if not any(field.get(k) for k in ("file", "folder", "process")):
-                if path_type == "references":
+                if path_type in REFERENCE_PATH_TYPES:
                     problems.append(Problem(
                         ERROR, f"{where}.file",
                         "a references picker needs a `file` glob to select files; "
@@ -203,7 +225,106 @@ def check_form(document: dict) -> list:
             problems.append(Problem(
                 "error", f"{where}.enumNames",
                 "enumNames must be parallel to enum"))
+
+    # The portal makes any field carrying `schema` a samplesheet table, so one that
+    # names nothing -- a `schema: assets/schema_input.json` copied from nf-core above
+    # all -- renders a table with no columns.
+    definitions = document.get("structuredInputs") or {}
+    for where, name in structured_bindings(form).items():
+        if not isinstance(name, str) or name not in definitions:
+            problems.append(Problem(
+                ERROR, f"{where}.schema",
+                f"`schema` names {name!r}, but structuredInputs has no such entry; a "
+                "field carrying `schema` is a samplesheet table",
+                fix="add the entry to structuredInputs, or remove `schema` -- a path "
+                    "copied from nextflow_schema.json does not belong in the form"))
     return problems + check_branch_overlap(form)
+
+
+def structured_bindings(form: dict, prefix: str = "form") -> dict:
+    """Every field that is a samplesheet table, as {path: the entry its `schema` names}.
+
+    The portal's test is the presence of the key (`isSchemaFileField`), so the value is
+    returned as found, whatever it is.
+    """
+    return {path: field["schema"] for path, field in iter_fields(form, prefix)
+            if isinstance(field, dict) and "schema" in field}
+
+
+def browse_mode(document: dict) -> bool:
+    """Whether the portal runs this form without an input-dataset selector."""
+    if (document or {}).get("structuredInputs"):
+        return True
+    form = (document or {}).get("form") or {}
+    return any(isinstance(field, dict) and field.get("format") in PATH_FORMATS
+               for _path, field in iter_fields(form))
+
+
+def check_structured_inputs(document: dict) -> list:
+    """Each entry must be a file Cirro can write: a named table of single-value columns."""
+    definitions = document.get("structuredInputs")
+    if definitions is None:
+        return []
+    if not isinstance(definitions, dict):
+        return [Problem(ERROR, "structuredInputs",
+                        "structuredInputs must be an object keyed by input name")]
+    problems = []
+    if len(definitions) > MAX_STRUCTURED_INPUTS:
+        problems.append(Problem(
+            ERROR, "structuredInputs",
+            f"{len(definitions)} structured inputs; a launch carries at most "
+            f"{MAX_STRUCTURED_INPUTS}"))
+    bound = set(structured_bindings(document.get("form") or {}).values())
+    for name, definition in definitions.items():
+        where = f"structuredInputs.{name}"
+        if not STRUCTURED_NAME.match(name):
+            problems.append(Problem(
+                ERROR, where,
+                "the name becomes the file's name, so it must be 1-50 letters, digits, "
+                "`_` or `-`"))
+        if not isinstance(definition, dict):
+            problems.append(Problem(ERROR, where, "an entry must be an object"))
+            continue
+        if definition.get("fileFormat") not in STRUCTURED_FORMATS:
+            problems.append(Problem(
+                ERROR, f"{where}.fileFormat",
+                f"fileFormat must be one of {STRUCTURED_FORMATS}, not "
+                f"{definition.get('fileFormat')!r}"))
+        extra = sorted(set(definition) - set(STRUCTURED_KEYS))
+        if extra:
+            problems.append(Problem(
+                WARNING, where,
+                f"{', '.join(extra)} is not part of a structured input and is ignored",
+                fix=f"keep to {', '.join(STRUCTURED_KEYS)}"))
+        schema = definition.get("schema")
+        items = schema.get("items") if isinstance(schema, dict) else None
+        columns = items.get("properties") if isinstance(items, dict) else None
+        # `columns` being a dict means `items` and `schema` are too.
+        if (not isinstance(columns, dict) or not columns
+                or schema.get("type") != "array" or items.get("type") != "object"):
+            problems.append(Problem(
+                ERROR, f"{where}.schema",
+                "schema must be an array whose items are an object with one property "
+                "per column"))
+            continue
+        for column, spec in columns.items():
+            if isinstance(spec, dict) and (spec.get("type") in ("object", "array")
+                                           or "properties" in spec or "items" in spec):
+                problems.append(Problem(
+                    ERROR, f"{where}.schema.items.properties.{column}",
+                    "a column holds one value; object and array columns are not "
+                    "supported"))
+        unknown = [n for n in items.get("required") or [] if n not in columns]
+        if unknown:
+            problems.append(Problem(
+                ERROR, f"{where}.schema.items.required",
+                f"requires {', '.join(map(repr, unknown))}, which are not columns"))
+        if name not in bound:
+            problems.append(Problem(
+                WARNING, where,
+                "no form field names this input in its `schema`, so the run form never "
+                "shows it"))
+    return problems
 
 
 def iter_dependency_branches(form: dict, prefix: str = "form") -> list:
@@ -391,6 +512,9 @@ def check_input_map(document: dict, form: Optional[dict] = None) -> list:
     # A bare JSON Schema (no {ui, form} wrapper) yields no paths, so cross-checking
     # against it would flag every mapping.
     present = form_paths(form) if (form and "form" in form) else set()
+    wrapped = form if (form and "form" in form) else {}
+    definitions = wrapped.get("structuredInputs") or {}
+    tables = structured_bindings(wrapped.get("form") or {}, "$.dataset.params")
 
     for name, value in document.items():
         # A value may be a JSONPath, a literal the workflow always receives, or a
@@ -408,12 +532,37 @@ def check_input_map(document: dict, form: Optional[dict] = None) -> list:
         base = value[value.index("$."):].split("|")[0]
         # Array selectors address the same field: skip_tools[*] is skip_tools.
         base = re.sub(r"\[[^\]]*\]", "", base).rstrip(".")
+        if re.search(r"\s", base):
+            # Cirro reads the map with Jayway JsonPath, which refuses whitespace in a
+            # dot-notation segment -- and only when the run launches, as the run's
+            # failure ("Use bracket notion ['my prop'] ..."). None of the 475 input
+            # maps in Cirro-pipelines has one.
+            problems.append(Problem(
+                ERROR, f"input.{name}",
+                f"maps to {base!r}, and Cirro cannot read a path segment containing "
+                "a space; the run fails at launch",
+                fix="key the form group by an identifier such as "
+                    "process_skipping_options, and keep the words as its title"))
         if present and base.startswith("$.dataset.params.") and base not in present:
             problems.append(Problem(
                 "error", f"input.{name}",
                 f"maps to {base}, but the form has no such field",
                 fix="add the field to the form, or drop the mapping -- a dangling "
                     "mapping silently resolves to nothing at launch"))
+        if base in tables:
+            problems.append(Problem(
+                ERROR, f"input.{name}",
+                f"maps to {base}, a samplesheet table; its rows are written to a file, "
+                "not to $.dataset.params, so this resolves to nothing at launch",
+                fix=f"map $.structuredInputs.{tables[base]}.path"))
+        if wrapped and base.startswith("$.structuredInputs."):
+            table = base.split(".")[2]
+            if table not in definitions:
+                problems.append(Problem(
+                    ERROR, f"input.{name}",
+                    f"maps to {base}, but structuredInputs has no {table!r}",
+                    fix="name an entry of structuredInputs, as "
+                        "$.structuredInputs.<name>.path"))
 
     # No check for the reverse direction: a form field with no mapping is routine --
     # selectors that only gate conditional sections are never workflow parameters.
@@ -440,6 +589,8 @@ def check_assets(assets: dict) -> dict:
     form = parsed.get("process-form.json")
     if form is not None:
         problems += check_form(form)
+        if isinstance(form, dict) and "form" in form:
+            problems += check_structured_inputs(form)
     if "process-input.json" in parsed:
         problems += check_input_map(parsed["process-input.json"], form)
     if "process-output.json" in parsed:

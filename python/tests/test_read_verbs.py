@@ -174,6 +174,30 @@ def test_process_params_reports_declared_keys_and_defaults(writable_tenant, sess
     assert result["process"]["execution_modes"] == ["STANDARD", "HEALTHOMICS"]
 
 
+def test_process_params_describes_a_browse_mode_form(writable_tenant, session_dir):
+    """The read someone runs before a launch has to say how this form takes its inputs:
+    which parameters are picked paths, what each samplesheet's columns are, and that
+    no dataset is named up front."""
+    from conftest import API
+    from test_write_integration import BROWSE_FORM
+    writable_tenant["router"].get(f"{API}/processes/proc_rnaseq/parameters").respond(
+        json=BROWSE_FORM)
+    result = _read(writable_tenant, session_dir, "process_params", id="proc_rnaseq")["result"]
+    assert result["input_mode"] == "browse"
+    by_path = {p["path"]: p for p in result["parameters"]}
+    assert by_path["input.reads"]["format"] == "directory-path"
+    assert by_path["input.fastq"]["type"] == "array", "a multi-select is sent as a list"
+    assert "input.samplesheet" not in by_path, "a samplesheet is not a parameter"
+    assert "input.samplesheet" not in result["required"]
+    [sheet] = result["structured_inputs"]
+    assert sheet["name"] == "samplesheet" and sheet["field"] == "input.samplesheet"
+    assert sheet["required"] is True and sheet["file_format"] == "CSV"
+    assert [c["name"] for c in sheet["columns"] if c["required"]] == ["sample", "fastq_1"]
+    launch = result["next_calls"][0]["call"]["args"]
+    assert "dataset_id" not in launch, "nothing is named up front in browse mode"
+    assert launch["structured_inputs"] == {"samplesheet": []}
+
+
 def test_process_params_carries_the_labels_a_key_name_cannot(
         writable_tenant, session_dir):
     """For most pipelines the key names carry the meaning. For some they carry none --

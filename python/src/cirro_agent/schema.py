@@ -162,6 +162,7 @@ PROCESS = EntitySpec(
         "pipeline_type": (LIST, "pipeline family"),
         "is_archived": (LIST, "archived processes cannot be run"),
         "uses_sample_sheet": (LIST, "whether a samplesheet is required"),
+        "requires_internet": (LIST, "whether the pipeline needs Internet access to run"),
         "documentation_url": (LIST, "external docs"),
         "child_process_ids": (LIST, "processes that can consume this one's output"),
         "parent_process_ids": (LIST, "processes whose output this one can consume"),
