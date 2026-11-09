@@ -242,7 +242,7 @@ wheels = [
 
 [[package]]
 name = "cirro"
-version = "1.16.1"
+version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
@@ -260,9 +260,9 @@ dependencies = [
     { name = "s3fs" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/10/aa/714a256218cb17e6773aed3ff96a3f4b9624d6ede395bb1c2a80b7ce9454/cirro-1.16.1.tar.gz", hash = "sha256:f8447646e27496cdbf2af26a6623cdfc9058abe3f6b32278825fb9504802127a", size = 104034 }
+sdist = { url = "https://files.pythonhosted.org/packages/31/62/82bcac23982f0535021ffb70545bd53c9f57d2970c997a982585f09bb4a4/cirro-1.17.0.tar.gz", hash = "sha256:5141a4a081ac69aa712cef2db0c4715f39c343c5e63db20fd5c19036a5075b59", size = 109473 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/16/1b/5a4bff4d257142594bfb79768715b2755cdc4d4630452c37cae8b420dcb5/cirro-1.16.1-py3-none-any.whl", hash = "sha256:289ed22e5281f6b6edcde5f36c5081f09911fffeb619f0d732c4e48457bf5c2e", size = 137084 },
+    { url = "https://files.pythonhosted.org/packages/84/17/7b0021d4487af2158d4eef5a7b9b5b1cf09e8c25c1eccc77c1b7ccc2474a/cirro-1.17.0-py3-none-any.whl", hash = "sha256:f499acb3f520abb82a65bbc9813d6e80ce407fbbb298f8d584de330969827c50", size = 143294 },
 ]
 
 [[package]]
@@ -287,7 +287,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cirro", specifier = ">=1.16.1,<2" },
+    { name = "cirro", specifier = ">=1.17.0,<2" },
     { name = "duckdb", specifier = ">=1.1,<2" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=7" },
     { name = "jsonschema", specifier = ">=4" },

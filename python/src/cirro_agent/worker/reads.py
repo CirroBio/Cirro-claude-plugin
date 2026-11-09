@@ -650,11 +650,12 @@ def process_assets(reader: Reader, process_id: str,
 def process_parameters(reader: Reader, process_id: str) -> Optional[dict]:
     """A process's run form as Cirro serves it: {"form", "ui", "structuredInputs"}.
 
-    Fetched raw. The SDK's ParameterSpecification keeps only `form` and `ui`, and the
-    generated ProcessParameterSchema drops `defaultSourceFile`, so neither can describe
-    a samplesheet. Never snapshotted: apply re-plans against it, and a form revised in
-    between has to be seen. None for a process Cirro does not have; any other failure
-    propagates.
+    Fetched raw. The SDK's ParameterSpecification reads structured inputs, but its
+    StructuredInputSpecification keeps only the format, schema and examples, so a
+    samplesheet's `defaultSourceFile` is not on it, and it never marks a samplesheet
+    required when only a form branch requires it. Never snapshotted: apply re-plans
+    against it, and a form revised in between has to be seen. None for a process Cirro
+    does not have; any other failure propagates.
     """
     from cirro_api_client.v1.api.processes import get_process_parameters
     return send(reader, get_process_parameters, what="Reading the run form failed.",

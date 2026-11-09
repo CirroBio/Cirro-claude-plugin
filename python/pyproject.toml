@@ -4,7 +4,7 @@ version = "0.16.0"
 description = "Agent-facing interface to the Cirro data platform"
 requires-python = ">=3.10,<3.14"
 dependencies = [
-    "cirro>=1.16.1,<2",
+    "cirro>=1.17.0,<2",
     "mcp>=1.2",
     "duckdb>=1.1,<2",
     "jsonschema>=4",
