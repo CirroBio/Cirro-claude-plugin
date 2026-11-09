@@ -133,8 +133,11 @@ naming a .py path after a `;` is not two commands. A heredoc body is a payload:
 re-enters the parser on it only when the line feeds it to a shell -- `bash <<'EOF'`
 runs its body, `cat > notes.md <<'EOF'` writes it. Both reached the same wrong answer
 from opposite directions: a docstring naming the gate was blocked as though the gate
-were being run. The SDK markers are still searched over the raw command, bodies
-included, so `python3 <<EOF ... import cirro` is unaffected.
+were being run. A heredoc opened inside a quoted substitution is still a heredoc --
+`gh pr create --body "$(cat <<'EOF'` is how a model writes a PR body -- so the operator
+is looked for with `$(...)` left unmasked, and `consumes_commands` reads the text after
+each opener for the shell that takes the body. The SDK markers are still searched over
+the raw command, bodies included, so `python3 <<EOF ... import cirro` is unaffected.
 
 **Every interpreter in a segment is judged, not only the program it starts with.**
 `program_index` finds where a segment's program starts, past assignments, shell
@@ -146,6 +149,13 @@ the same `judge_program`. `bash -lc` and other option clusters holding `c` hand 
 command like `-c`; an option's value (`-W ignore`, `--with pandas`) is no longer read as
 the script; `cd` and `pushd` are followed, and a script is looked for both where the
 shell went and where it started, since a subshell's `cd` does not outlast it.
+The one exception is an argument the program can only read: `runnable_end` stops the
+search at a program in `NEVER_RUN_ARGUMENTS` (`ls`, `grep`, `cat` and the like), and
+after the `--` of a git subcommand that takes a pathspec. `python` is this
+repository's source directory, and `git grep -- python` beside a path naming the SDK
+was refused as an interpreter reading stdin. A program that can run an argument --
+`find`, `xargs`, `sort`, `rg`, `sed`, `awk` -- stays off that list; widen it only
+with a program that cannot.
 
 The SDK named anywhere in a command counts only against an interpreter whose code the
 gate cannot read: one reading stdin, or a script that is not there yet because the same
