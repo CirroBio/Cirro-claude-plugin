@@ -79,8 +79,8 @@ workflow repository. Frontmatter carries `dataset` (source, provenance, files),
 `run.file_inputs` are the pickers' values, as paths relative to the dataset root. In a
 `browse`-mode spec the primary input is one of them too — usually the dataset's whole
 data folder, an empty path. `run.structured_inputs` holds each samplesheet as its rows,
-keyed by the structured input's name, with each file cell a path relative to the
-dataset root; give every required column a value.
+keyed by the structured input's name, with each file, folder or path cell a path
+relative to the dataset root; give every required column a value of its column's type.
 
 Validate that the frontmatter parses before finishing, and confirm every file named in
 `file_inputs` actually exists in `dataset.files`.

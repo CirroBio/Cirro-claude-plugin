@@ -79,12 +79,19 @@ PATH_TYPES = ("dataset",) + REFERENCE_PATH_TYPES
 # datasets read off the picked paths.
 PATH_FORMATS = ("file-path", "file-path-pattern", "directory-path", "path")
 
+# The design spec's name for each picker, as an input's or a column's `type`.
+PATH_FORMAT_BY_TYPE = {"file": "file-path", "folder": "directory-path", "path": "path"}
+
 # A structured input's name becomes its file name, and Cirro refuses a launch that
 # carries more than ten.
 STRUCTURED_NAME = re.compile(r"^[A-Za-z0-9_-]{1,50}$")
 STRUCTURED_FORMATS = ("CSV", "TSV", "JSON")
 STRUCTURED_KEYS = ("fileFormat", "schema", "defaultSourceFile", "examples")
 MAX_STRUCTURED_INPUTS = 10
+
+# The JSON Schema types a samplesheet cell can hold. A picker column is a string with a
+# PATH_FORMATS format; its cell holds a Cirro reference.
+SCALAR_TYPES = ("string", "integer", "number", "boolean")
 
 # The upstream API's regex engine wants (?<name>...); the JSON assets in Cirro-pipelines
 # use Python's (?P<name>...). Passing the wrong dialect to the wrong side 400s.
@@ -308,12 +315,7 @@ def check_structured_inputs(document: dict) -> list:
                 "per column"))
             continue
         for column, spec in columns.items():
-            if isinstance(spec, dict) and (spec.get("type") in ("object", "array")
-                                           or "properties" in spec or "items" in spec):
-                problems.append(Problem(
-                    ERROR, f"{where}.schema.items.properties.{column}",
-                    "a column holds one value; object and array columns are not "
-                    "supported"))
+            problems += _check_column(f"{where}.schema.items.properties.{column}", spec)
         unknown = [n for n in items.get("required") or [] if n not in columns]
         if unknown:
             problems.append(Problem(
@@ -325,6 +327,31 @@ def check_structured_inputs(document: dict) -> list:
                 "no form field names this input in its `schema`, so the run form never "
                 "shows it"))
     return problems
+
+
+def _check_column(where: str, spec) -> list:
+    if not isinstance(spec, dict):
+        return [Problem(ERROR, where, "a column must be an object")]
+    declared = spec.get("type", "string")
+    types = declared if isinstance(declared, list) else [declared]
+    if any(t in ("object", "array") for t in types) or "properties" in spec \
+            or "items" in spec:
+        return [Problem(ERROR, where, "a column holds one value; object and array "
+                                      "columns are not supported")]
+    # null beside a scalar is JSON Schema's way of letting a cell be empty.
+    unknown = [t for t in types if t not in SCALAR_TYPES + ("null",)]
+    if unknown:
+        fix = next((f"type string with format {PATH_FORMAT_BY_TYPE[t]}" for t in unknown
+                    if t in PATH_FORMAT_BY_TYPE), None)
+        return [Problem(ERROR, f"{where}.type",
+                        f"{', '.join(map(repr, unknown))} is not a JSON Schema type; a "
+                        f"column is one of {', '.join(SCALAR_TYPES)}", fix=fix)]
+    if spec.get("format") in PATH_FORMATS and "string" not in types:
+        return [Problem(ERROR, f"{where}.format",
+                        f"a {spec['format']} cell holds a Cirro reference, which is a "
+                        f"string, so its type cannot be {declared!r}",
+                        fix="type string")]
+    return []
 
 
 def iter_dependency_branches(form: dict, prefix: str = "form") -> list:

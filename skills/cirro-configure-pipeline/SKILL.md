@@ -99,7 +99,11 @@ plan(op="upload_process_config",
 up **exactly as written** — validated by the same checker, never reformatted, never
 regenerated. A hand-written form may carry `structuredInputs` beside `form` and `ui`;
 the checker holds each entry to what Cirro can write as a file, and a field's `schema`
-to naming one of them. Anything else in the folder is ignored. Nothing is staged, because the
+to naming one of them. Each column there is plain JSON Schema: `"type"` is `string`,
+`integer`, `number` or `boolean`, and a column picked from the project is a `string`
+with `"format"` `file-path`, `directory-path` or `path` (either) — the spec's `file`,
+`folder` and `path`. A column typed `file` or `folder` is not JSON Schema and is
+refused. Anything else in the folder is ignored. Nothing is staged, because the
 files are already where the user put them.
 
 Exactly one of `design_spec` and `assets_dir` on an upload. `create_process` still
@@ -241,7 +245,7 @@ it as exactly what it is: `<dataset_id of step 3: upload>`.
 That run is a `browse`-mode pipeline, so its input is a picked path: `{"dataset": ...,
 "path": ""}` is the uploaded dataset's whole data folder, and the dataset it names is
 the run's input. A samplesheet goes in `structured_inputs` the same way, one row per
-sample, each file cell a `{"dataset": ..., "path": "..."}`. A `select`-mode pipeline
+sample, each file, folder or path cell a `{"dataset": ..., "path": "..."}`. A `select`-mode pipeline
 names its inputs instead, as `"source_dataset_ids": [{"from_step": 2, "field":
 "dataset_id"}]`.
 
@@ -275,8 +279,8 @@ something down is its own approval, always.
 
 ## Preprocess scripts
 
-Not for a samplesheet. A workflow that reads one gets a structured input, which the
-person fills in on the run form and Cirro writes for it; Cirro has deprecated building
+Not for a samplesheet, or any other table the workflow reads. Such a parameter is a
+structured input, which the person fills in on the run form and Cirro writes for it; Cirro has deprecated building
 samplesheets in preprocess from `ds.files` and `ds.samplesheet`. Write a preprocess
 script only if the workflow needs its inputs transformed some other way before launch —
 and always for WDL/Cromwell, which needs an `inputs.json` built.

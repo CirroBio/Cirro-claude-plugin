@@ -187,9 +187,9 @@ STRUCTURED_SPEC = {**BROWSE_SPEC, "inputs": [
          "columns": [
              {"name": "sample", "type": "string", "required": True, "pattern": r"^\S+$",
               "error_message": "Sample names cannot contain spaces"},
-             {"name": "fastq_1", "format": "file-path", "required": True,
+             {"name": "fastq_1", "type": "file", "required": True,
               "title": "FASTQ (R1)"},
-             {"name": "fastq_2", "format": "file-path"},
+             {"name": "fastq_2", "type": "file"},
              {"name": "strandedness", "enum": ["auto", "forward", "reverse"]},
          ]}},
 ] + SPEC["inputs"][1:]}
@@ -214,6 +214,44 @@ def test_a_structured_input_becomes_a_samplesheet_the_form_builds():
         "a samplesheet's rows are written to a file, never into $.dataset.params"
     report = formcheck.check_assets(assets)
     assert report["ok"] and not report["n_warnings"], report["problems"]
+
+
+@pytest.mark.parametrize("kind, schema", [
+    ("string", {"type": "string"}),
+    ("integer", {"type": "integer"}),
+    ("number", {"type": "number"}),
+    ("boolean", {"type": "boolean"}),
+    ("file", {"type": "string", "format": "file-path"}),
+    ("folder", {"type": "string", "format": "directory-path"}),
+    ("path", {"type": "string", "format": "path"}),
+])
+def test_a_columns_type_is_what_its_cell_holds(kind, schema):
+    """One vocabulary for a column and an input: a picker column is spelled like a
+    picker input, never as a format the spec author has to know."""
+    spec = _with_columns([{"name": "x", "type": kind}])
+    definition = json.loads(formgen.generate(spec)[formgen.FORM])["structuredInputs"]
+    assert definition["samplesheet"]["schema"]["items"]["properties"]["x"] == schema
+    assert not formcheck.check_structured_inputs(
+        json.loads(formgen.generate(spec)[formgen.FORM]))
+
+
+@pytest.mark.parametrize("column, field", [
+    ({"name": "x", "type": "fastq"}, "type"),
+    ({"name": "x", "type": "array"}, "type"),
+    ({"name": "x", "format": "file-path"}, "format"),
+])
+def test_a_column_the_run_form_cannot_hold_is_refused_at_generation(column, field):
+    with pytest.raises(errors.AgentError) as caught:
+        formgen.generate(_with_columns([column]))
+    assert caught.value.field == f"inputs.input.structured.columns.x.{field}"
+    assert caught.value.candidates == list(formgen.COLUMN_TYPES)
+
+
+def _with_columns(columns):
+    first = STRUCTURED_SPEC["inputs"][0]
+    return {**STRUCTURED_SPEC, "inputs": [
+        {**first, "structured": {**first["structured"], "columns": columns}}]
+        + STRUCTURED_SPEC["inputs"][1:]}
 
 
 def test_a_structured_input_needs_browse_mode():
@@ -461,10 +499,27 @@ def test_a_well_formed_structured_input_is_clean():
     ({"schema": {"type": "array", "items": {"type": "object", "properties": {
         "sample": {"type": "string"}}, "required": ["sample", "fastq"]}}},
      "which are not columns"),
+    ({"schema": {"type": "array", "items": {"type": "object", "properties": {
+        "fastq": {"type": "file"}}}}}, "not a JSON Schema type"),
+    ({"schema": {"type": "array", "items": {"type": "object", "properties": {
+        "cells": {"type": "integer", "format": "file-path"}}}}}, "holds a Cirro reference"),
 ])
 def test_a_structured_input_cirro_cannot_write_is_an_error(change, said):
     problems = formcheck.check_structured_inputs(_with_table({**GOOD_TABLE, **change}))
     assert any(p.level == "error" and said in p.message for p in problems), problems
+
+
+def test_a_column_spelled_as_a_picker_type_is_told_its_format():
+    problems = formcheck.check_structured_inputs(_with_table({**GOOD_TABLE, "schema": {
+        "type": "array", "items": {"type": "object", "properties": {
+            "run_dir": {"type": "folder"}}}}}))
+    assert [p.fix for p in problems] == ["type string with format directory-path"]
+
+
+def test_an_optional_scalar_column_is_clean():
+    assert not formcheck.check_structured_inputs(_with_table({**GOOD_TABLE, "schema": {
+        "type": "array", "items": {"type": "object", "properties": {
+            "cells": {"type": ["integer", "null"]}}}}}))
 
 
 def test_a_structured_input_name_must_be_usable_as_a_file_name():

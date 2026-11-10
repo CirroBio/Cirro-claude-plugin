@@ -43,15 +43,34 @@ Check what the parameter actually accepts before choosing. A workflow that takes
 *folder* of files, or several shapes (a file, a folder, an instrument run directory),
 wants `type: folder` or `type: path`.
 
-**A samplesheet the workflow reads** becomes a structured input: the person fills in a
-table in the run form, Cirro writes the file and passes its path, and no preprocess
-script has to build it. Give the input a `structured` block. The parser's
-`samplesheet_columns` (from `assets/schema_input.json`) are its columns, and its
-`structured_input` candidates name the parameter that reads it. Copy each column's
-`type`, `format` (a `file-path` column lets the person pick a file), `pattern`, `enum`
-and `required`; `errorMessage` becomes `error_message`. A column the parser marks
+**Any table the workflow reads is a structured input.** A parameter whose value is a
+CSV, TSV or JSON list of rows the workflow parses — a samplesheet, a contrasts or design
+file, a barcode assignment — is never a file picker. The person fills in the table in the
+run form, Cirro writes the file and passes its path, and nobody formats it by hand or has
+a preprocess script build it. A file picker is for a file the workflow hands to a tool
+without reading its rows: a BED, a FASTA, a GTF. Give the input a `structured` block.
+Structured inputs need `input_mode: browse`, so in the spec of a pipeline already
+configured in `select` mode, name the tables that would become structured inputs and
+leave them as they are unless the person moves it to `browse`.
+
+The parser's `structured_input` candidates are the parameters that read a table, each
+with the evidence (a row schema, a CSV mimetype or pattern, a `.csv` default, a name
+with "sheet" in it). Where a schema declares the rows, the candidate carries `columns`
+already in the spec's vocabulary — copy them as they are. Where it says no schema
+declares them, read the code that parses the file (`splitCsv(header: true)` and the
+`row.<column>` reads after it, or a WDL `read_csv`/`read_tsv`/`read_objects` and the
+fields taken from each row), list the columns you found, and confirm them with the
+person before writing the spec. A candidate marked as taking its columns from a file no
+parameter names is a guess; check it the same way. A column the parser marks
 `unsupported` holds a list, which a cell cannot — say so rather than dropping it.
-Structured inputs need `input_mode: browse`.
+
+**Each column's `type` is what its cell holds:** `string`, `integer`, `number` or
+`boolean` for a value, `file`, `folder` or `path` (either) for something picked from the
+project — the same words an input's `type` uses. Choose by what the workflow does with
+the value, not by how the schema happens to spell it: a column the workflow opens as a
+file is `file` even if its schema says only `string`. A column never takes a `format`;
+the generator refuses one. Choices go in `enum`, a regex in `pattern`, bounds in
+`minimum`/`maximum`.
 
 **Secondary file inputs** become form pickers. Give each one a `group`. A genome or
 annotation belongs to the shared reference library (`path_type: reference`); anything
@@ -98,8 +117,8 @@ workflow:      name, repository, entrypoint, version, executor, executor_version
 inputs[]:      name, description, type, required, group (omit group on the primary),
                path_type, pattern, multiple,
                structured{name, file_format, default_source_file,
-                          columns[{name, type, format, pattern, enum, required,
-                                   title, description, error_message}]}
+                          columns[{name, type, pattern, enum, minimum, maximum,
+                                   required, title, description, error_message}]}
 parameters[]:  name, type, group, required, default, choices, when, description
 outputs[]:     path, description, required
 constraints[]: applies_to, description, verify
