@@ -83,6 +83,97 @@ A picker that allows several picks hands Cirro a list. The generator maps it wit
 string, as it always got. A mapping without `[*]` hands the workflow the list itself —
 right only when a preprocess script reads it.
 
+## Tables the workflow reads are structured inputs
+
+**Cirro's launcher writes them; a preprocess script never does.** When a workflow takes
+a CSV, TSV or JSON list of rows — a samplesheet, a contrasts or design file, a barcode
+assignment — configure it as a structured input. The person builds the rows in a table
+on the run form, and at launch Cirro writes the file in its format and passes its path
+to the workflow. Building that file in `preprocess.py` from `ds.files`,
+`ds.samplesheet` or `ds.pivot_samplesheet()` is deprecated
+(https://docs.cirro.bio/pipelines/preprocess-script/), and it is the job preprocess
+scripts were most often written for. None is needed for it now. When you update a
+pipeline whose `preprocess.py` exists to write a samplesheet, the change is a structured
+input and its mapping, and that part of the script goes. If the pipeline is in `select`
+mode, say so to the person first: a structured input moves it to `browse`, which
+changes how everyone runs it.
+
+A structured input is three pieces that must agree. The generator writes all three from
+an input's `structured` block; in a hand-written folder you write them:
+
+```json
+// process-form.json
+{
+  "form": {"type": "object", "properties": {
+    "input": {"type": "string", "title": "Samplesheet", "schema": "samplesheet"}}},
+  "ui": {},
+  "structuredInputs": {
+    "samplesheet": {
+      "fileFormat": "CSV",
+      "defaultSourceFile": "samplesheet.csv",
+      "schema": {"title": "Samplesheet", "type": "array", "items": {
+        "type": "object",
+        "properties": {
+          "sample":   {"type": "string", "pattern": "^\\S+$"},
+          "fastq_1":  {"type": "string", "format": "file-path", "pattern": "\\.f(ast)?q\\.gz$"},
+          "fastq_2":  {"type": "string", "format": "file-path", "pattern": "\\.f(ast)?q\\.gz$"},
+          "run_dir":  {"type": "string", "format": "directory-path"},
+          "expected_cells": {"type": "integer", "minimum": 1},
+          "strandedness": {"type": "string", "enum": ["auto", "forward", "reverse"]}},
+        "required": ["sample", "fastq_1"]}}}}
+}
+// process-input.json
+{"input": "$.structuredInputs.samplesheet.path"}
+```
+
+1. **The entry under `structuredInputs`.** Its key is the file's name: 1-50 letters,
+   digits, `_` or `-`. `fileFormat` is `CSV`, `TSV` or `JSON`. `schema` is an array
+   whose items are an object with one property per column, in the order the workflow
+   expects them. `defaultSourceFile` (optional) names a CSV or Excel file the table is
+   filled from when the run starts from a dataset holding one.
+2. **The form field whose `schema` names that key.** Nothing else on it matters: a
+   `format`, `pattern` or `enum` there is ignored, and the entry's title and
+   description win. `schema` is always the name of an entry, never a path — nf-core's
+   `"schema": "assets/schema_input.json"` copied onto a field is an error.
+3. **The mapping `$.structuredInputs.<name>.path`** for the workflow parameter that
+   takes the file. The rows never reach `$.dataset.params`; a mapping to the field's
+   `$.dataset.params` path resolves to nothing.
+
+**Each column's type is what its cell holds.** Choose by what the workflow does with the
+value, not by how a schema happens to spell it — a column the workflow opens as a file
+is a file column even if its schema says only `string`:
+
+| The cell holds | Spec column `type` | In `structuredInputs` |
+|---|---|---|
+| text | `string` | `{"type": "string"}` |
+| a whole number | `integer` | `{"type": "integer"}` |
+| a number | `number` | `{"type": "number"}` |
+| yes or no | `boolean` | `{"type": "boolean"}` |
+| one of a fixed set | `string` with `enum` | `{"type": "string", "enum": [...]}` |
+| one file | `file` | `{"type": "string", "format": "file-path"}` |
+| one folder | `folder` | `{"type": "string", "format": "directory-path"}` |
+| a file or a folder | `path` | `{"type": "string", "format": "path"}` |
+
+`file` is for a cell the workflow opens as one file (a FASTQ, a BAM, an index), `folder`
+for one it reads as a directory (a Cell Ranger output, an instrument run folder), and
+`path` only when the workflow really takes either. Every file, folder or path column
+gives the cell a picker over the project's datasets; a file column also offers
+reference files, a folder column does not. The picked path is written into the file as
+its full S3 URI, a folder's with no trailing slash, so the workflow reads it as any
+absolute path. `pattern` is checked against each cell, so `\.f(ast)?q\.gz$` keeps a
+FASTQ column to FASTQ files. A cell holds one value: no `object` or `array` columns. In
+JSON, `"type": "file"` or `"folder"` is not JSON Schema, and `check-config` refuses it
+with the format to use instead.
+
+**A single file or folder outside a table** is a form field with the same three formats
+on a `string`: `file-path`, `directory-path` or `path`. `multiple: true` lets the person
+pick several (map it with `[*]` for one comma-joined string), `pattern` narrows what the
+picker offers, matched against each path within its dataset, and `process` — an ID, a
+list, or a wildcard like `process-nf-core-rnaseq-*` — limits the datasets it browses.
+The workflow receives the full S3 path. These formats put the form in `browse` mode; a
+`select`-mode form picks from the chosen datasets with `pathType` and a `file` glob
+instead, and the two cannot be mixed.
+
 ## When generation is not enough
 
 Some forms cannot be described by a spec: a field revealed by two independent
@@ -97,14 +188,36 @@ plan(op="upload_process_config",
 `assets_dir` is a folder holding `process-form.json` and any of `process-input.json`,
 `process-output.json`, `process-compute.config`, `preprocess.py`, `README.md`. They go
 up **exactly as written** — validated by the same checker, never reformatted, never
-regenerated. A hand-written form may carry `structuredInputs` beside `form` and `ui`;
-the checker holds each entry to what Cirro can write as a file, and a field's `schema`
-to naming one of them. Each column there is plain JSON Schema: `"type"` is `string`,
-`integer`, `number` or `boolean`, and a column picked from the project is a `string`
-with `"format"` `file-path`, `directory-path` or `path` (either) — the spec's `file`,
-`folder` and `path`. A column typed `file` or `folder` is not JSON Schema and is
-refused. Anything else in the folder is ignored. Nothing is staged, because the
+regenerated. A hand-written form carries its tables as `structuredInputs` beside `form`
+and `ui`, in the three pieces above, and the checker holds each entry to what Cirro can
+write as a file. Anything else in the folder is ignored. Nothing is staged, because the
 files are already where the user put them.
+
+**The input map, by hand.** A mapping resolves against the launch, whose only roots are
+`$.dataset`, `$.project`, `$.process` and `$.inputs`:
+
+- a form field is `$.dataset.params.<group>.<field>` (no group, `$.dataset.params.<field>`)
+- a table is `$.structuredInputs.<name>.path`
+- the output directory is always `$.dataset.dataPath`, never `$.dataset.s3|/data/`:
+  HealthOmics finds that field by its name
+- the dataset's other folders are `$.dataset.s3|/config/<name>`, `|/web/`, `|/logs/`
+- a `select`-mode input dataset is `$.inputs[0].dataPath`, or `$.inputs[*].dataPath`
+  for all of them
+
+`|` joins a path to static text, as in a container tag taken from the form:
+`"quay.io/biocontainers/salmon:|$.dataset.params.salmon_version"`. It cannot be combined
+with `[*]`. The older spellings `$.params.dataset.paramJson.*`, `$.params.dataset.s3` and
+`$.params.inputs[*]` still resolve but are not the documented form; write the
+`$.dataset` ones.
+
+**Form keys worth knowing.** Beyond JSON Schema draft-07, the renderer understands:
+`enumNames` (labels parallel to `enum`), `help_text`, `multiple`, `process` (above),
+`pathType` and `file` (a `select`-mode picker), `useS3Path` (also accept a typed S3
+path) and `mm: {"matchBase": true}` (match a `file` glob against the name alone). The
+`ui` object, keyed like `form`, takes `ui:widget` (`radio`, `checkboxes`,
+`autoComplete`, `textarea`, `hidden`), `ui:placeholder`, `ui:help`, `ui:order` and
+`ui:disabled`. Do not use `folder` — the portal has rejected a `folder` picker; a folder
+is `format: directory-path` — or `mimetype`, which no production form uses.
 
 Exactly one of `design_spec` and `assets_dir` on an upload. `create_process` still
 takes the spec for the process record's own fields — name, version, repository — and
@@ -279,17 +392,34 @@ something down is its own approval, always.
 
 ## Preprocess scripts
 
-Not for a samplesheet, or any other table the workflow reads. Such a parameter is a
-structured input, which the person fills in on the run form and Cirro writes for it; Cirro has deprecated building
-samplesheets in preprocess from `ds.files` and `ds.samplesheet`. Write a preprocess
-script only if the workflow needs its inputs transformed some other way before launch —
-and always for WDL/Cromwell, which needs an `inputs.json` built.
+**Never to build a samplesheet, or any other table the workflow reads.** That is a
+structured input, written by Cirro at launch (see above). Write a preprocess script only
+for something no form can express — and always for WDL/Cromwell, which needs an
+`inputs.json` built.
 
 If you write one, it **must** ship with an offline unit test beside it. Extract a pure
-function that takes files and parameters and returns the manifest, keep the `cirro`
+function that takes files and parameters and returns what it writes, keep the `cirro`
 import inside `__main__`, and test the pure function with in-memory fixtures.
 `check-config` fails a folder containing `preprocess.py` with no `test_preprocess.py`,
 because a preprocess bug only surfaces after a run has been submitted.
+
+**Where it writes.** Never into its working directory: nothing stages that directory for
+the run, so a bare file name cannot resolve on HealthOmics, and the file is lost rather
+than kept with the results. Write into the dataset's own `config/` folder instead:
+declare the path in the input map, `"run_config": "$.dataset.s3|/config/run.yaml"`,
+and write to `ds.params["run_config"]`. The mapping already put the value there, so no
+`ds.add_param` is needed.
+
+- Not `config/samplesheet.csv`, `config/files.csv`, `config/params.json` or
+  `config/metadata.json`: Cirro writes those itself and the script reads them at start.
+- A file written only in some runs needs `ds.remove_param("<name>")` in the others; the
+  mapping fills the parameter every time, and a path to nothing fails the run.
+- `pandas.to_csv` accepts an S3 URI; `open()` does not. Write anything else — YAML, JSON,
+  text — with `boto3`.
+- A file named from inside a staged file needs its full S3 URI. Derive the folder from
+  the mapped parameter: `ds.params["run_config"].rsplit("/", 1)[0] + "/other.yaml"`.
+- WDL/Cromwell is the exception: `inputs.json` and `options.json` are read from the
+  working directory by convention, and no parameter redirects them.
 
 ## Verify before calling it done
 
