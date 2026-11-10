@@ -491,6 +491,43 @@ def test_quoted_text_is_not_split_into_commands(tmp_path):
     assert run(bash(f'echo "one thing"; python3 {path}', cwd=tmp_path)) == DENY
 
 
+def test_a_heredoc_inside_a_quoted_substitution_is_a_payload():
+    """`gh pr create --body "$(cat <<'EOF' ...)"` is how a model writes a PR body.
+
+    The `<<` sat inside double quotes, so no heredoc was found, and a body line
+    beginning with "cirro 1.17.0" was refused as a run of the upstream CLI.
+    """
+    body = "cirro 1.17.0 (CirroBio/Cirro-SDK-Python#242) adds the SDK's form"
+    assert run(bash(f"gh pr create --body \"$(cat <<'EOF'\n{body}\nEOF\n)\"")) == ALLOW
+    # A body the substitution hands to a shell or an interpreter is still a program.
+    for consumer, payload in (("bash", "cirro upload -p X"),
+                              ("cd /tmp; sh", "cirro upload -p X"),
+                              ("python3", "import cirro")):
+        command = f"gh pr create --body \"$({consumer} <<'EOF'\n{payload}\nEOF\n)\""
+        assert run(bash(command)) == DENY, command
+
+
+def test_an_interpreters_name_as_an_argument_is_not_a_run_of_it():
+    """`python` is this repository's source directory.
+
+    Judged as an interpreter reading stdin, it was refused whenever the same command
+    named the SDK anywhere -- a `git grep -- python` beside a path into
+    cirro_api_client.
+    """
+    for command in ("ls python; echo cirro_api_client",
+                    'grep -rn "import cirro" python',
+                    "git grep -n DataPortal HEAD -- python",
+                    "git -C repo log --oneline -- python; echo cirro_api_client"):
+        assert run(bash(command)) == ALLOW, command
+    # A program that can run an argument still has it judged, and so does a program
+    # git runs, which is named before the `--`.
+    for command in ("echo cirro_api_client; find . -exec python3 \\;",
+                    "echo cirro_api_client; git grep -O python3 x -- y",
+                    "echo cirro_api_client; git bisect run python3",
+                    "arch -arm64 python3 <<EOF\nimport cirro\nEOF"):
+        assert run(bash(command)) == DENY, command
+
+
 def test_a_missing_script_path_is_not_an_error(tmp_path):
     assert run(bash(f"python3 {tmp_path / 'gone.py'}")) == ALLOW
 

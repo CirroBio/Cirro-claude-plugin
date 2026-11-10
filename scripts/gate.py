@@ -254,6 +254,21 @@ SHELL_KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "!"}
 # Sourcing runs the file in the current shell, so the argument is the executed code.
 SOURCING = (".", "source")
 
+# Programs that never run an argument, so an interpreter's name among their arguments
+# is a file or a search term: `ls python`, `grep -rn cirro python`. Not here are the
+# ones that can run one: find and xargs, sort (`--compress-program`), rg (`--pre`),
+# sed (`e`) and awk (`system`).
+NEVER_RUN_ARGUMENTS = {"ls", "cat", "head", "tail", "grep", "egrep", "fgrep", "wc",
+                       "echo", "printf", "which", "type", "file", "stat", "du"}
+
+# git reads everything after `--` as a pathspec in the subcommands that take one, so
+# `git grep -n x -- python` names a directory. A program git can run, as in
+# `git grep -O python3 x`, is named before the `--` and is still judged.
+GIT_PATHSPEC_SUBCOMMANDS = {"grep", "log", "diff", "show", "ls-files", "blame", "add",
+                            "rm", "status"}
+GIT_OPTIONS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                          "--config-env"}
+
 # Runners that fetch and execute a package in one step, so the SDK never has to be
 # named in code for it to run: `uv run --with cirro ...`, `uvx cirro ...`.
 PACKAGE_RUNNERS = {"uv", "uvx", "pipx", "poetry", "conda", "hatch", "pdm"}
@@ -332,6 +347,7 @@ PARAMETER = re.compile(r"^\$\{?([A-Za-z_]\w*)\}?$")
 # shlex does not expand these, so a substituted command never became a segment of its
 # own and its program name was never inspected.
 SUBSTITUTIONS = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+SUBSTITUTION_OPENERS = re.compile(r"\$\(|[<>]\(|`")
 
 
 def respond(decision: str, reason: str, extra: dict | None = None,
@@ -370,7 +386,7 @@ def passthrough() -> NoReturn:
 # --------------------------------------------------------------------------- bash
 
 
-def unquoted(text: str) -> str:
+def unquoted(text: str, open_substitutions: bool = False) -> str:
     """The command with every quoted span blanked, character for character.
 
     Operators are only operators where the shell would act on them, and a `;` inside
@@ -378,21 +394,36 @@ def unquoted(text: str) -> str:
     as a command of its own, so `git commit -m "parser fix; scripts/gate.py reads
     heredocs"` was blocked as though the path after the semicolon were being run.
     The mask is the same length as the input, so a match's offsets index the original.
+
+    With `open_substitutions`, a `$(...)` inside double quotes is left unmasked: the
+    shell runs it, so a heredoc opened there -- `--body "$(cat <<'EOF'` -- is one.
     """
     masked = []
     quote = ""
     escaped = False
-    for character in text:
+    # The paren depth inside each `$(` that interrupted a double quote, innermost last.
+    opened = []
+    for position, character in enumerate(text):
         if escaped:
             escaped = False
             masked.append(" ")
         elif quote != "'" and character == "\\":
             escaped = True
             masked.append(" ")
+        elif quote == '"' and open_substitutions and text.startswith("$(", position):
+            quote = ""
+            opened.append(-1)
+            masked.append(character)
         elif quote:
             masked.append("\n" if character == "\n" else " ")
             if character == quote:
                 quote = ""
+        elif opened and character in "()":
+            opened[-1] += 1 if character == "(" else -1
+            masked.append(character)
+            if opened[-1] < 0:
+                opened.pop()
+                quote = '"'
         elif character in "'\"":
             quote = character
             masked.append(" ")
@@ -430,7 +461,7 @@ def strip_heredocs(command: str) -> tuple:
         line = lines[index]
         kept.append(line)
         index += 1
-        for operator in HEREDOC_OPERATOR.finditer(unquoted(line)):
+        for operator in HEREDOC_OPERATOR.finditer(unquoted(line, open_substitutions=True)):
             match = HEREDOC_DELIMITER.match(line, operator.start())
             if match is None:
                 continue
@@ -453,8 +484,12 @@ def consumes_commands(line: str) -> bool:
     `bash <<'EOF'` and `cat <<'EOF' | sh` do; `cat > notes.md <<'EOF'` writes it. A
     body fed to a Python interpreter is source rather than commands, and the SDK
     markers are searched over the whole command text before any of this.
+
+    The body of `"$(bash <<'EOF'` goes to the shell inside the substitution, so the
+    text after each opener is read as well as the line.
     """
-    for segment in split_unquoted(line, SPLITTERS):
+    commands = [line] + [line[m.end():] for m in SUBSTITUTION_OPENERS.finditer(line)]
+    for segment in (s for c in commands for s in split_unquoted(c, SPLITTERS)):
         words = tokens_of(segment)
         if not words:
             continue
@@ -548,13 +583,32 @@ def code_runners(words: list, index: int) -> list:
     """Every position in a segment that starts an interpreter or a shell: the program,
     and any further along. A wrapper this file does not model -- `arch -arm64`,
     `find -exec`, `micromamba run -n env` -- puts the interpreter where the program
-    name is not, and judging only the first program let all of them through."""
+    name is not, and judging only the first program let all of them through.
+
+    Arguments the program can only read are left out. `ls python` and
+    `git grep x -- python` name a directory, and judged as an interpreter reading
+    stdin they were refused whenever the command named the SDK anywhere."""
     found = [index]
-    for offset, word in enumerate(words):
+    for offset, word in enumerate(words[:runnable_end(words, index)]):
         name = Path(word).name
         if offset != index and (INTERPRETERS.match(name) or SHELLS.match(name)):
             found.append(offset)
     return found
+
+
+def runnable_end(words: list, index: int) -> int:
+    """Where the words the program at `index` could run end; past it, it only reads."""
+    program = Path(words[index]).name
+    if program in NEVER_RUN_ARGUMENTS:
+        return index + 1
+    if program == "git":
+        offset = index + 1
+        while offset < len(words) and words[offset].startswith("-"):
+            offset += 2 if words[offset] in GIT_OPTIONS_WITH_VALUE else 1
+        if offset < len(words) and words[offset] in GIT_PATHSPEC_SUBCOMMANDS \
+                and "--" in words[offset:]:
+            return words.index("--", offset) + 1
+    return len(words)
 
 
 def module_file(arguments: list, cwd: str) -> str | None:
