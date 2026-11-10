@@ -81,18 +81,21 @@ GLOBS = (
 SELECT, BROWSE = "select", "browse"
 INPUT_MODES = (SELECT, BROWSE)
 
-# A browse-mode picker's `format`, from the input's `type`.
-PATH_FORMAT_BY_TYPE = {"file": "file-path", "folder": "directory-path", "path": "path"}
-
 # The group a browse-mode primary input is shown in. It has none of its own: having none
 # is what marks it as the primary.
 PRIMARY_GROUP = "input"
 
-# Design-spec column keys and the JSON Schema keywords they become.
+# Design-spec column keys and the JSON Schema keywords they become. A column's kind is
+# its `type`, never a `format`: see COLUMN_TYPES.
 COLUMN_KEYWORDS = (("title", "title"), ("description", "description"),
-                   ("format", "format"), ("pattern", "pattern"), ("enum", "enum"),
-                   ("choices", "enum"), ("minimum", "minimum"), ("maximum", "maximum"),
+                   ("pattern", "pattern"), ("enum", "enum"), ("choices", "enum"),
+                   ("minimum", "minimum"), ("maximum", "maximum"),
                    ("error_message", "errorMessage"))
+
+# What a samplesheet column holds, in the vocabulary an input's `type` already uses: a
+# scalar cell, or a picker for a file, a folder or either. A picker column is a string
+# carrying its path format, and its cell holds a Cirro reference.
+COLUMN_TYPES = formcheck.SCALAR_TYPES + tuple(formcheck.PATH_FORMAT_BY_TYPE)
 
 DEFAULT_COMPUTE = """\
 // Compute configuration for {name} {version}.
@@ -269,7 +272,7 @@ def _field_for_browse_picker(entry: dict) -> dict:
         field["pathType"] = "reference"
         field["file"] = entry.get("glob") or infer_glob(entry)
     else:
-        field["format"] = PATH_FORMAT_BY_TYPE.get(entry.get("type"), "file-path")
+        field["format"] = formcheck.PATH_FORMAT_BY_TYPE.get(entry.get("type"), "file-path")
         # The pattern is checked against the folder picked as much as a file, so an
         # extension guessed from a folder's name would refuse every folder.
         pattern = entry.get("pattern") or (
@@ -291,6 +294,32 @@ def _field_for_table(entry: dict) -> dict:
     return field
 
 
+def _column_kind(entry: dict, column: dict) -> dict:
+    kind = column.get("type") or "string"
+    where = f"inputs.{entry['name']}.structured.columns.{column.get('name')}"
+    if "format" in column:
+        raise errors.InvalidQuery(
+            f"{where} sets `format`; a column says what it holds with `type` alone.",
+            what=f"type is one of {', '.join(COLUMN_TYPES)}: file, folder and path give "
+                 "the cell a picker, which is what a file-path, directory-path or path "
+                 "format meant.",
+            field=f"{where}.format", given=column["format"], candidates=list(COLUMN_TYPES),
+            user_action="Replace the column's format with the matching type in the "
+                        "design spec.",
+        )
+    if kind not in COLUMN_TYPES:
+        raise errors.InvalidQuery(
+            f"{where} has type {kind!r}, which no samplesheet cell holds.",
+            what=f"type is one of {', '.join(COLUMN_TYPES)}. A column holds one value, "
+                 "so a list belongs in a column per item or a delimited string.",
+            field=f"{where}.type", given=kind, candidates=list(COLUMN_TYPES),
+            user_action="Correct the column's type in the design spec.",
+        )
+    if kind in formcheck.PATH_FORMAT_BY_TYPE:
+        return {"type": "string", "format": formcheck.PATH_FORMAT_BY_TYPE[kind]}
+    return {"type": kind}
+
+
 def build_structured_input(entry: dict) -> dict:
     """A samplesheet's definition: its file format and one schema property per column.
 
@@ -300,7 +329,7 @@ def build_structured_input(entry: dict) -> dict:
     structured = entry["structured"]
     columns, required = {}, []
     for column in structured.get("columns") or []:
-        spec = {"type": column.get("type") or "string"}
+        spec = _column_kind(entry, column)
         for key, keyword in COLUMN_KEYWORDS:
             if column.get(key) is not None:
                 spec[keyword] = column[key]

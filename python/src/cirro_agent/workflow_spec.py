@@ -43,8 +43,27 @@ KNOWN_PARAM_KEYS = {
 # form reads, plus two spellings older nf-core schemas use that it does not.
 PATH_FORMATS = set(formcheck.PATH_FORMATS) | {"file", "directory"}
 
-# Samplesheet column keys carried through to the spec, as the schema spells them.
-COLUMN_KEYS = ("title", "format", "pattern", "enum", "errorMessage")
+# Samplesheet column keys carried through, each as the schema spells it and as the
+# design spec does, so a column is reported ready to copy into the spec.
+COLUMN_KEYS = (("title", "title"), ("description", "description"),
+               ("pattern", "pattern"), ("enum", "enum"),
+               ("minimum", "minimum"), ("maximum", "maximum"),
+               ("errorMessage", "error_message"))
+
+# A column's path format as the design spec's column `type` names its picker, with the
+# two older nf-core spellings PATH_FORMATS also accepts.
+COLUMN_TYPE_BY_FORMAT = {
+    **{fmt: kind for kind, fmt in formcheck.PATH_FORMAT_BY_TYPE.items()},
+    "file-path-pattern": "file", "file": "file", "directory": "folder"}
+
+# Evidence that a path parameter names a table the workflow reads row by row.
+TABLE_MIMETYPES = {"text/csv", "text/tsv", "text/tab-separated-values"}
+TABLE_IN_PATTERN = re.compile(r"\b[ct]sv\b", re.I)
+TABLE_SUFFIX = re.compile(r"\.[ct]sv(\.gz)?$", re.I)
+
+# Where nf-core keeps a samplesheet's columns. Pipelines from before nf-schema keep
+# them here without any parameter naming the file.
+DEFAULT_TABLE_SCHEMA = "assets/schema_input.json"
 
 # Names that conventionally denote Cirro's managed output directory.
 OUTPUT_DIR_NAMES = {"outdir", "out_dir", "output_dir", "outputdir", "publish_dir",
@@ -193,7 +212,7 @@ def _parse_nextflow(root: Path) -> dict:
         "parse_confidence": confidence,
         "groups": groups,
         "params": params,
-        "samplesheet_columns": _samplesheet_columns(root, flags),
+        "tables": _tables(root, params, flags),
         "outputs": _nextflow_outputs(root, flags),
         "test_profiles": sorted(p.name for p in (root / "conf").glob("test*.config"))
         if (root / "conf").is_dir() else [],
@@ -242,6 +261,7 @@ def _params_from_schema(schema: dict, flags: list) -> tuple:
 
 def _param_entry(name: str, spec: dict, group: str, required: bool) -> dict:
     unknown = sorted(set(spec) - KNOWN_PARAM_KEYS)
+    table_evidence = _table_evidence(spec)
     entry = {
         "name": name,
         "group": group,
@@ -260,7 +280,8 @@ def _param_entry(name: str, spec: dict, group: str, required: bool) -> dict:
         "default": spec.get("default"),
         "hidden": bool(spec.get("hidden")),
         "declared_required": required,
-        "is_path": (spec.get("format") in PATH_FORMATS),
+        "table_evidence": table_evidence,
+        "is_path": spec.get("format") in PATH_FORMATS or bool(table_evidence),
         "is_infrastructure": name in INFRA_NAMES,
     }
     # nf-schema's pointer to the samplesheet schema a path parameter reads.
@@ -269,6 +290,19 @@ def _param_entry(name: str, spec: dict, group: str, required: bool) -> dict:
     if unknown:
         entry["unknown_keys"] = unknown
     return entry
+
+
+def _table_evidence(spec: dict) -> Optional[str]:
+    """Why a parameter names a table the workflow parses, or None if nothing says so."""
+    if spec.get("schema"):
+        return f"it declares the schema of its rows in {spec['schema']}"
+    if spec.get("mimetype") in TABLE_MIMETYPES:
+        return f"its mimetype is {spec['mimetype']}"
+    if isinstance(spec.get("pattern"), str) and TABLE_IN_PATTERN.search(spec["pattern"]):
+        return f"its pattern {spec['pattern']!r} names a CSV or TSV"
+    if isinstance(spec.get("default"), str) and TABLE_SUFFIX.search(spec["default"]):
+        return f"its default {spec['default']!r} is a CSV or TSV"
+    return None
 
 
 def _params_from_config(root: Path, flags: list) -> tuple:
@@ -308,13 +342,14 @@ def _params_from_config(root: Path, flags: list) -> tuple:
         if not assignment:
             continue
         name, raw = assignment.group(1), assignment.group(2).rstrip(",")
+        table_evidence = _table_evidence({"default": _literal(raw)})
         params.append({
             "name": name, "group": "general", "type": _infer_type(raw),
             "description": None, "help_text": None, "title": None, "format": None,
             "enum": None, "minimum": None, "maximum": None, "pattern": None,
             "has_default": True, "default": _literal(raw), "hidden": False,
-            "declared_required": False,
-            "is_path": False, "is_infrastructure": name in INFRA_NAMES,
+            "declared_required": False, "table_evidence": table_evidence,
+            "is_path": bool(table_evidence), "is_infrastructure": name in INFRA_NAMES,
         })
     flags.append({
         "code": "PARAMS_FROM_CONFIG",
@@ -351,30 +386,77 @@ def _literal(raw: str):
     return text
 
 
-def _samplesheet_columns(root: Path, flags: list) -> list:
-    schema = root / "assets" / "schema_input.json"
-    if not schema.is_file():
-        return []
+def _tabular(entry: dict) -> bool:
+    return bool(entry.get("table_evidence")) or (
+        entry["is_path"] and "sheet" in entry["name"].lower())
+
+
+def _tables(root: Path, params: list, flags: list) -> dict:
+    """Each tabular parameter's columns, read from the schema that parameter names.
+
+    {param: {"columns_from", "columns", "assumed"?}}. A parameter naming no schema takes
+    DEFAULT_TABLE_SCHEMA when it is the only such parameter and nothing else names that
+    file; `assumed` says the pairing is a guess.
+    """
+    tables = {}
+    for entry in params:
+        if entry.get("schema"):
+            columns = _table_columns(root, entry["schema"], flags)
+            if columns is not None:
+                tables[entry["name"]] = {"columns_from": entry["schema"],
+                                         "columns": columns}
+    named = {Path(e["schema"].lstrip("/")) for e in params if e.get("schema")}
+    unnamed = [e for e in params if _tabular(e) and not e.get("schema")]
+    if len(unnamed) == 1 and Path(DEFAULT_TABLE_SCHEMA) not in named \
+            and (root / DEFAULT_TABLE_SCHEMA).is_file():
+        columns = _table_columns(root, DEFAULT_TABLE_SCHEMA, flags)
+        if columns is not None:
+            tables[unnamed[0]["name"]] = {"columns_from": DEFAULT_TABLE_SCHEMA,
+                                          "columns": columns, "assumed": True}
+    return tables
+
+
+def _table_columns(root: Path, relative: str, flags: list) -> Optional[list]:
+    base = root.resolve()
+    schema = (base / relative.lstrip("/")).resolve()
+    if not schema.is_relative_to(base) or not schema.is_file():
+        flags.append({"code": "SAMPLESHEET_SCHEMA_MISSING",
+                      "detail": f"{relative} is named as a samplesheet schema but is not "
+                                "a file in the repository."})
+        return None
     try:
         doc = json.loads(schema.read_text())
     except ValueError:
         flags.append({"code": "SAMPLESHEET_SCHEMA_UNREADABLE",
-                      "detail": "assets/schema_input.json is not valid JSON."})
-        return []
+                      "detail": f"{relative} is not valid JSON."})
+        return None
     items = doc.get("items") or {}
     required = set(items.get("required") or [])
     columns = []
     for name, spec in (items.get("properties") or {}).items():
         spec = spec or {}
-        column = {"name": name, "required": name in required,
-                  "description": spec.get("description"), "type": spec.get("type")}
-        column.update({key: spec[key] for key in COLUMN_KEYS if key in spec})
+        column = {"name": name, "type": _column_type(spec), "required": name in required}
+        column.update({ours: spec[theirs] for theirs, ours in COLUMN_KEYS
+                       if theirs in spec})
         # A structured input's cell holds one value, so such a column cannot be built
         # in the run form as it stands.
-        if spec.get("type") in ("object", "array") or "items" in spec:
+        if column["type"] in ("object", "array") or "items" in spec:
             column["unsupported"] = "holds more than one value"
         columns.append(column)
     return columns
+
+
+def _column_type(spec: dict) -> str:
+    """A schema column's kind in the design spec's vocabulary (formgen.COLUMN_TYPES)."""
+    if spec.get("format") in COLUMN_TYPE_BY_FORMAT:
+        return COLUMN_TYPE_BY_FORMAT[spec["format"]]
+    declared = spec.get("type") or "string"
+    if isinstance(declared, list):
+        # A cell that may be empty says ["integer", "null"]; one taking either of two
+        # scalars can only be text.
+        scalars = [t for t in declared if t != "null"]
+        return scalars[0] if len(scalars) == 1 else "string"
+    return declared
 
 
 def _nextflow_outputs(root: Path, flags: list) -> list:
@@ -444,7 +526,7 @@ def _parse_wdl(root: Path) -> dict:
         "groups": [{"key": "general", "title": "Parameters", "description": None,
                     "n_params": 0, "n_visible": 0}],
         "params": [],
-        "samplesheet_columns": [],
+        "tables": {},
         "outputs": [],
         "test_profiles": [],
         "flags": flags + [{
@@ -459,9 +541,12 @@ def _parse_wdl(root: Path) -> dict:
 # ---------------------------------------------------------------- candidate hints
 
 
-def candidates(params: list) -> dict:
-    """Suggest classifications, each with its reason. Never decide."""
-    primary, managed, pickers, samplesheets, infra = [], [], [], [], []
+def candidates(params: list, tables: dict) -> dict:
+    """Suggest classifications, each with its reason. Never decide.
+
+    `tables` is the parse's columns per tabular parameter (see `_tables`).
+    """
+    primary, managed, pickers, infra = [], [], [], []
     structured = []
     for entry in params:
         name, low = entry["name"], entry["name"].lower()
@@ -478,16 +563,8 @@ def candidates(params: list) -> dict:
             continue
         if not entry["is_path"]:
             continue
-        if entry.get("schema"):
-            structured.append({
-                "name": name, "schema": entry["schema"],
-                "why": (f"reads a samplesheet whose columns {entry['schema']} declares, so "
-                        "in browse mode the run form can build it as a structured input"
-                        + (" -- and it is required, so it is likely the primary input"
-                           if entry["declared_required"] else "")),
-            })
-        elif "sheet" in low:
-            samplesheets.append({"name": name, "why": "the name denotes a sample sheet"})
+        if _tabular(entry):
+            structured.append(_structured_hint(entry, tables.get(name)))
         elif low in PRIMARY_INPUT_NAMES and entry["declared_required"]:
             primary.append({
                 "name": name,
@@ -502,5 +579,23 @@ def candidates(params: list) -> dict:
                 "required": entry["declared_required"],
             })
     return {"primary_data_input": primary, "managed_output_dir": managed,
-            "file_pickers": pickers, "samplesheet": samplesheets,
-            "structured_input": structured, "infrastructure": infra}
+            "file_pickers": pickers, "structured_input": structured,
+            "infrastructure": infra}
+
+
+def _structured_hint(entry: dict, table: Optional[dict]) -> dict:
+    evidence = entry.get("table_evidence") or "its name denotes a sample sheet"
+    why = (f"{evidence}, so it is a table the workflow reads: the run form builds it as "
+           "a structured input and Cirro writes the file")
+    if table is None:
+        why += (" -- no schema declares its columns, so read them from the code that "
+                "parses it and confirm them with the person")
+    elif table.get("assumed"):
+        why += (f" -- its columns are taken from {table['columns_from']}, which no "
+                "parameter names; confirm against the code that parses it")
+    if entry["declared_required"]:
+        why += "; it is required, so it is likely the primary input"
+    hint = {"name": entry["name"], "why": why}
+    if table is not None:
+        hint.update({"columns_from": table["columns_from"], "columns": table["columns"]})
+    return hint

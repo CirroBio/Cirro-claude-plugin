@@ -75,7 +75,7 @@ def do_workflow_spec(request: dict) -> dict:
     root = Path(source["local_path"])
     engine = WS.detect_engine(root)
     parsed = WS.parse(root, engine)
-    hints = WS.candidates(parsed["params"])
+    hints = WS.candidates(parsed["params"], parsed["tables"])
 
     wanted_group = request.get("group")
     params = parsed["params"]
@@ -109,7 +109,6 @@ def do_workflow_spec(request: dict) -> dict:
         "groups": parsed["groups"],
         "candidates": hints,
         "params": shown,
-        "samplesheet_columns": parsed["samplesheet_columns"],
         "outputs": parsed["outputs"],
         "test_profiles": parsed["test_profiles"],
         "flags": parsed["flags"],

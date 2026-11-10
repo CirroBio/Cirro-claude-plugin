@@ -73,7 +73,9 @@ them.
 
 **Each of `process-params`' `structured_inputs` is a samplesheet.** Its rows go in
 `structured_inputs`, keyed by its name — never in `params` — one object per row, with
-the columns it lists; a file column takes the same `{"dataset", "path"}` as a picker.
+the columns it lists. A column whose `format` is `file-path`, `directory-path` or `path`
+takes the same `{"dataset", "path"}` as a picker; an `integer`, `number` or `boolean`
+column takes a JSON value of that type, not a string.
 Cirro writes the file in its format and passes its path to the pipeline. Nothing on
 Cirro's side checks a row against the columns, so the plan does: a row that does not
 fit is refused before anything runs.

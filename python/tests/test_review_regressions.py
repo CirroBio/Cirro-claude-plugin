@@ -115,7 +115,7 @@ def test_output_dir_detection_groups_its_operators():
     hints = WS.candidates([
         {"name": "reference_dir", "format": "directory-path", "is_path": True,
          "is_infrastructure": False, "declared_required": True, "default": None},
-    ])
+    ], {})
     assert not hints["managed_output_dir"], \
         "a directory input without 'out' in its name is not the output directory"
     assert [c["name"] for c in hints["file_pickers"]] == ["reference_dir"]
