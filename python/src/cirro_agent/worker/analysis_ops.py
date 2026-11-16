@@ -700,6 +700,24 @@ def _tables(reader: reads.Reader, project_id: str, document: Optional[dict], giv
                     retry_with=[{"verb": "process_params", "note": "lists its columns"}],
                 )
             continue
+        least, most = definition["min_rows"], definition["max_rows"]
+        if least is not None and len(rows) < least:
+            raise errors.InvalidQuery(
+                f"structured_inputs.{name} has {len(rows)} row(s); the samplesheet takes "
+                f"at least {least}.",
+                what=(f"Send at least {least} rows" if definition["required"] else
+                      f"Send at least {least} rows, or none to leave it out") + ".",
+                field=f"structured_inputs.{name}", given=len(rows),
+                retry_with=[{"verb": "process_params", "note": "states its row limits"}],
+            )
+        if most is not None and len(rows) > most:
+            raise errors.InvalidQuery(
+                f"structured_inputs.{name} has {len(rows)} rows; the samplesheet takes "
+                f"at most {most}.",
+                what=f"Send at most {most} rows, or split the run.",
+                field=f"structured_inputs.{name}", given=len(rows),
+                retry_with=[{"verb": "process_params", "note": "states its row limits"}],
+            )
         if len(rows) > MAX_STRUCTURED_ROWS:
             raise errors.InvalidQuery(
                 f"structured_inputs.{name} has {len(rows)} rows; a launch carries at most "

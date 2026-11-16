@@ -1635,9 +1635,8 @@ BROWSE_FORM = {"ui": {}, "form": {"type": "object", "properties": {
 READ = {"dataset": "ds_0005", "path": "SAMP005_R1_001.fastq.gz"}
 
 
-def plan_browse(tenant, session_dir, rows=None, **overrides):
-    tenant["router"].get(f"{API}/processes/proc_rnaseq/parameters").respond(
-        json=BROWSE_FORM)
+def plan_browse(tenant, session_dir, rows=None, form=BROWSE_FORM, **overrides):
+    tenant["router"].get(f"{API}/processes/proc_rnaseq/parameters").respond(json=form)
     args = {"source_dataset_ids": [],
             "params": {"input": {"reads": {"dataset": "ds_0003", "path": ""}}},
             "structured_inputs": {"samplesheet": rows if rows is not None else [
@@ -1697,6 +1696,55 @@ def test_a_row_that_does_not_fit_the_samplesheet_is_refused(writable_tenant, ses
 def test_a_required_samplesheet_has_to_be_sent(writable_tenant, session_dir):
     error = plan_browse(writable_tenant, session_dir, structured_inputs={})["error"]
     assert "requires the samplesheet 'samplesheet'" in error["message"]
+
+
+def bounded_form(required=True, **bounds):
+    """BROWSE_FORM with row limits on its samplesheet, and the table optional if asked."""
+    form = json.loads(json.dumps(BROWSE_FORM))
+    form["structuredInputs"]["samplesheet"]["schema"].update(bounds)
+    if not required:
+        form["form"]["properties"]["input"]["required"] = ["reads"]
+    return form
+
+
+@pytest.mark.parametrize("count, said", [
+    (1, "has 1 row(s); the samplesheet takes at least 2"),
+    (4, "has 4 rows; the samplesheet takes at most 3"),
+])
+def test_a_samplesheet_is_held_to_its_row_limits(writable_tenant, session_dir, count, said):
+    """minItems and maxItems are on the table's schema, not a row's, so checking each
+    row against its columns never reached them."""
+    row = {"sample": "S1", "fastq_1": READ}
+    error = plan_browse(writable_tenant, session_dir, rows=[row] * count,
+                        form=bounded_form(minItems=2, maxItems=3))["error"]
+    assert error["code"] == "INVALID_QUERY"
+    assert said in error["message"]
+    assert error["field"] == "structured_inputs.samplesheet"
+
+
+@pytest.mark.parametrize("count", [2, 3])
+def test_a_samplesheet_within_its_row_limits_is_sent(writable_tenant, session_dir, count):
+    row = {"sample": "S1", "fastq_1": READ}
+    result = plan_browse(writable_tenant, session_dir, rows=[row] * count,
+                         form=bounded_form(minItems=2, maxItems=3))
+    assert result["ok"], result
+    rows = plans.load(session_dir, result["plan_id"]).args[
+        "structured_inputs"]["samplesheet"]["rows"]
+    assert len(rows) == count
+
+
+def test_an_optional_samplesheet_with_a_minimum_can_be_left_out(
+        writable_tenant, session_dir):
+    """Row limits bound a table that is sent; whether one may be left out is the form's
+    `required`. A table's field can sit in a branch that is off, and minItems must not
+    demand rows for it then."""
+    form = bounded_form(required=False, minItems=1)
+    result = plan_browse(writable_tenant, session_dir, form=form, structured_inputs={})
+    assert result["ok"], result
+    assert plans.load(session_dir, result["plan_id"]).args["structured_inputs"] == {}
+    short = plan_browse(writable_tenant, session_dir, rows=[{"sample": "S1", "fastq_1": READ}],
+                        form=bounded_form(required=False, minItems=2))["error"]
+    assert "or none to leave it out" in short["remediation"]["what"]
 
 
 def test_a_samplesheet_given_as_a_parameter_is_refused(writable_tenant, session_dir):

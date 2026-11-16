@@ -78,7 +78,9 @@ takes the same `{"dataset", "path"}` as a picker; an `integer`, `number` or `boo
 column takes a JSON value of that type, not a string.
 Cirro writes the file in its format and passes its path to the pipeline. Nothing on
 Cirro's side checks a row against the columns, so the plan does: a row that does not
-fit is refused before anything runs.
+fit is refused before anything runs. A samplesheet sent with fewer rows than its
+`min_rows` or more than its `max_rows` is refused the same way. One that is not
+`required` is left out by sending it no rows, whatever its `min_rows`.
 
 **When `input_mode` is `browse`, the run's input datasets are the ones the picks point
 into.** Name none: the plan reads them off the parameters and the samplesheet and says

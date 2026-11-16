@@ -26,7 +26,9 @@ _PARAMS_NOTE = (
     "its data folder>}, or a Cirro URI. In `browse` mode the run's input datasets are "
     "the ones those paths and any samplesheet's file cells point into. Each entry of "
     "`structured_inputs` is a samplesheet, sent as rows in run_analysis' "
-    "`structured_inputs` under its name, never in params."
+    "`structured_inputs` under its name, never in params. Its `min_rows` and "
+    "`max_rows` bound a samplesheet that is sent; `required` says whether it may be "
+    "left out, and one that is not required is left out by sending no rows."
 )
 
 _SPEC_UNREADABLE = (
@@ -115,7 +117,7 @@ def do_process_params(request: dict) -> dict:
                         {"name": name,
                          **{key: table[key] for key in (
                              "field", "required", "file_format", "default_source_file",
-                             "columns")}}
+                             "min_rows", "max_rows", "columns")}}
                         for name, table in tables.items()],
                     "note": _PARAMS_NOTE if fields is not None else _SPEC_UNREADABLE,
                     "next_calls": [{

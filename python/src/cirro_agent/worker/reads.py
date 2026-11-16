@@ -714,10 +714,15 @@ def _as_submitted(node) -> None:
 def structured_inputs(document: Optional[dict]) -> dict:
     """Each samplesheet a run form builds, by the name its rows are sent under.
 
-    {name: {"field", "required", "file_format", "default_source_file", "row_schema",
-    "columns"}}, where `row_schema` is the JSON Schema one row must match and `field` is
-    the params path of the form field the table hangs on. A definition no field binds is
-    left out: the portal never shows it, so a launch has nothing to send for it.
+    {name: {"field", "required", "file_format", "default_source_file", "min_rows",
+    "max_rows", "row_schema", "columns"}}, where `row_schema` is the JSON Schema one row
+    must match and `field` is the params path of the form field the table hangs on. A
+    definition no field binds is left out: the portal never shows it, so a launch has
+    nothing to send for it.
+
+    `min_rows` and `max_rows` are the table's `minItems` and `maxItems`, None when
+    absent. They bound a table that is sent; whether it may be left out is `required`,
+    since a table's field can sit in a branch that is legitimately off.
     """
     document = document or {}
     definitions = document.get("structuredInputs") or {}
@@ -728,8 +733,12 @@ def structured_inputs(document: Optional[dict]) -> dict:
         definition = definitions.get(name) if isinstance(name, str) else None
         if not isinstance(definition, dict) or name in found:
             continue
-        items = (definition.get("schema") or {}).get("items") or {}
+        table = definition.get("schema") or {}
+        items = table.get("items") or {}
         required = set(items.get("required") or [])
+        # `type() is int` because True is an int too, and no bound is a boolean.
+        bounds = {key: table[keyword] if type(table.get(keyword)) is int else None
+                  for key, keyword in (("min_rows", "minItems"), ("max_rows", "maxItems"))}
         columns = []
         for column, spec in (items.get("properties") or {}).items():
             spec = spec if isinstance(spec, dict) else {}
@@ -739,7 +748,7 @@ def structured_inputs(document: Optional[dict]) -> dict:
         found[name] = {"field": record["path"], "required": record["required"],
                        "file_format": definition.get("fileFormat"),
                        "default_source_file": definition.get("defaultSourceFile"),
-                       "row_schema": items, "columns": columns}
+                       **bounds, "row_schema": items, "columns": columns}
     return found
 
 
