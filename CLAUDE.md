@@ -513,6 +513,14 @@ URIs only; Cirro still also reads legacy `s3://project-*/datasets/<uuid>` paths 
 params, and a run whose params lean on one shows that dataset in the approval only if
 it is named.
 
+A table's `minItems` and `maxItems` sit on its array schema, above the row schema each
+row is checked against, so `_tables` checks the count itself, from the `min_rows` and
+`max_rows` that `reads.structured_inputs` carries. The SDK validates the whole array,
+but only in the service this launch does not go through. The limits bound a table
+that is sent; whether one may be left out is its field's `required`, and zero rows
+leaves it out. An omitted table is never held to `minItems`, because its field can sit
+in a `dependencies` branch that is off.
+
 **Every op family registers itself into `mutations.OPS`.** `mutations.py` holds the
 shared core -- `Draft`, `Op`, the risk classes, the resolvers, `OPS` and `get_op` -- and
 nothing else. The operations live in `analysis_ops`, `dataset_ops`, `project_ops`,

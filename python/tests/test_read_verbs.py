@@ -193,9 +193,23 @@ def test_process_params_describes_a_browse_mode_form(writable_tenant, session_di
     assert sheet["name"] == "samplesheet" and sheet["field"] == "input.samplesheet"
     assert sheet["required"] is True and sheet["file_format"] == "CSV"
     assert [c["name"] for c in sheet["columns"] if c["required"]] == ["sample", "fastq_1"]
+    assert sheet["min_rows"] is None and sheet["max_rows"] is None
     launch = result["next_calls"][0]["call"]["args"]
     assert "dataset_id" not in launch, "nothing is named up front in browse mode"
     assert launch["structured_inputs"] == {"samplesheet": []}
+
+
+def test_process_params_states_a_samplesheets_row_limits(writable_tenant, session_dir):
+    """A launch is refused below minItems or above maxItems, so the read someone fills
+    a samplesheet from has to say so."""
+    from conftest import API
+    from test_write_integration import bounded_form
+    writable_tenant["router"].get(f"{API}/processes/proc_rnaseq/parameters").respond(
+        json=bounded_form(minItems=1, maxItems=96))
+    result = _read(writable_tenant, session_dir, "process_params", id="proc_rnaseq")["result"]
+    [sheet] = result["structured_inputs"]
+    assert (sheet["min_rows"], sheet["max_rows"]) == (1, 96)
+    assert "min_rows" in result["note"]
 
 
 def test_process_params_carries_the_labels_a_key_name_cannot(
